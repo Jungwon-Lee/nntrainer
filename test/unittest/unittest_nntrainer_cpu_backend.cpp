@@ -1506,7 +1506,7 @@ static void run_causal_depthwise_conv1d_k3_unittest(unsigned int B,
     input.data(), packed_weight.data(), use_bias ? bias.data() : nullptr,
     ref_out.data(), B, H, W);
 
-  causal_depthwise_conv1d_k3(
+  nntrainer::causal_depthwise_conv1d_k3(
     input.data(), packed_weight.data(), use_bias ? bias.data() : nullptr,
     neon_out.data(), B, H, W);
 
@@ -1543,7 +1543,7 @@ static void run_causal_depthwise_conv1d_k3_unittest(unsigned int B,
 
     {
       auto t1 = high_resolution_clock::now();
-      causal_depthwise_conv1d_k3(
+      nntrainer::causal_depthwise_conv1d_k3(
         input.data(), packed_weight.data(), use_bias ? bias.data() : nullptr,
         neon_out.data(), B, H, W);
       auto t2 = high_resolution_clock::now();
@@ -1571,7 +1571,7 @@ static void run_causal_depthwise_conv1d_k3_unittest(unsigned int B,
 
 
 TEST(nntrainer_cpu_backend_standalone, causal_depthwise_conv1d_k3_no_bias) {
-  run_causal_depthwise_conv1d_k3_unittest(1, 16, 64, false, true);
+  run_causal_depthwise_conv1d_k3_unittest(1, 16, 64, true, true);
 }
 
 TEST(nntrainer_cpu_backend_standalone, causal_depthwise_conv1d_k3_with_bias) {
