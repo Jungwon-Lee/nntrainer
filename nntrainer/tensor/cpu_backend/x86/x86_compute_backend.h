@@ -477,8 +477,19 @@ void nntr_gemm_qai8dxp_qsi4cxp_packed(
   void *rhs_packed_mtx_qs4cx, T *dst_act_mtx_f32, uint32_t idx_variant,
   bool transB = true, T lower_bound = std::numeric_limits<T>::lowest(),
   T upper_bound = std::numeric_limits<T>::max());
+
 #endif
-// init_backend() is declared in compute_ops.h (canonical location).
+
+void causal_depthwise_conv1d_k3_fp16(const uint16_t *input,
+                                     const uint16_t *packed_weight,
+                                     float *output,
+                                     unsigned int B,
+                                     unsigned int H,
+                                     unsigned int W);
+/**
+ * @brief Initialization of ggml backend
+ */
+void init_backend();
 
 /**
  * @copydoc unpack_q4_0x8_transpose16 in cpu_backend.h
@@ -988,6 +999,8 @@ void gemm_q6_K(const unsigned int M, const unsigned int N, const unsigned int K,
  */
 size_t quantize_q4_0(const float *src, void *dst, int64_t nrow,
                      int64_t n_per_row, const float *quant_weights);
+
+
 
 /**
  * @brief quantize_q4_K function
