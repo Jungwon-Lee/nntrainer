@@ -186,7 +186,7 @@ template <typename T = float>
 void softmax_row_inplace(T *qk_out, size_t start_row, size_t end_row,
                          size_t num_heads, T *sink = nullptr);
 
-void causal_depthwise_conv1d_k3_fp16(const uint16_t *input,
+void causal_depthwise_conv1d_k3_fp16(float *input,
                                      const uint16_t *packed_weight,
                                      float *output,
                                      unsigned int B,

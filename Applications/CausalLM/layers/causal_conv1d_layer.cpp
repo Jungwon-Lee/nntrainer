@@ -47,41 +47,6 @@ void CausalConv1DLayer::validateInputShape(
     << "[CausalConv1DLayer] input dtype must be FP32.";
 }
 
-void CausalConv1DLayer::finalize(nntrainer::InitLayerContext &context) {
-  NNTR_THROW_IF(context.getNumInputs() != 1, std::invalid_argument)
-    << "[CausalConv1DLayer] requires exactly 1 input, but got "
-    << context.getNumInputs();
-
-  const nntrainer::TensorDim &input_dim = context.getInputDimensions()[0];
-  validateInputShape(input_dim);
-
-  const unsigned int W = input_dim.width();
-
-#ifdef ENABLE_FP16
-  nntrainer::TensorDim weight_dim(
-    1, 1, KERNEL_SIZE, W, ml::train::TensorDim::DataType::FP16);
-#else
-  nntrainer::TensorDim weight_dim(
-    1, 1, KERNEL_SIZE, W, ml::train::TensorDim::DataType::UINT16);
-#endif
-
-  nntrainer::TensorDim output_dim = input_dim;
-  output_dim.setDataType(ml::train::TensorDim::DataType::FP32);
-
-  context.setOutputDimensions({output_dim});
-
-  context.requestWeight(weight_dim,
-                        nntrainer::Initializer::NONE, nntrainer::WeightRegularizer::NONE,
-                        0.0f, 0.0f, "causal_conv1d_weight");
-}
-
-void CausalConv1DLayer::forwarding(nntrainer::RunLayerContext &context,
-                                   bool training) {
-  throw std::runtime_error(
-    "[CausalConv1DLayer] forwarding() is not used. "
-    "Use incremental_forwarding().");
-}
-
 void CausalConv1DLayer::incremental_forwarding(
   nntrainer::RunLayerContext &context, unsigned int from, unsigned int to,
   bool training) {
@@ -94,7 +59,7 @@ void CausalConv1DLayer::incremental_forwarding(
 
   nntrainer::Tensor &input = context.getInput(SINGLE_INOUT_IDX);
   nntrainer::Tensor &output = context.getOutput(SINGLE_INOUT_IDX);
-  nntrainer::Tensor &conv_weight = context.getWeight(weight_idx[weight]);
+  nntrainer::Tensor weight_tensor = context.getWeight(weight_idx[weight]);
 
   const nntrainer::TensorDim &in_dim = input.getDim();
 
@@ -110,45 +75,59 @@ void CausalConv1DLayer::incremental_forwarding(
                 std::invalid_argument)
     << "[CausalConv1DLayer] output must be FP32.";
 
-#ifdef ENABLE_FP16
-  NNTR_THROW_IF(conv_weight.getDataType() !=
-                  ml::train::TensorDim::DataType::FP16,
-                std::invalid_argument)
-    << "[CausalConv1DLayer] weight must be FP16.";
-#else
-  NNTR_THROW_IF(conv_weight.getDataType() !=
-                  ml::train::TensorDim::DataType::UINT16,
-                std::invalid_argument)
-    << "[CausalConv1DLayer] weight must be UINT16 when ENABLE_FP16 is off.";
-#endif
-
-  NNTR_THROW_IF(!input.isContiguous(), std::invalid_argument)
-    << "[CausalConv1DLayer] input tensor must be contiguous.";
-  NNTR_THROW_IF(!output.isContiguous(), std::invalid_argument)
-    << "[CausalConv1DLayer] output tensor must be contiguous.";
-  NNTR_THROW_IF(!conv_weight.isContiguous(), std::invalid_argument)
-    << "[CausalConv1DLayer] weight tensor must be contiguous.";
   NNTR_THROW_IF(to > H, std::invalid_argument)
     << "[CausalConv1DLayer] invalid incremental end: to=" << to
     << ", H=" << H;
 
-  const size_t prefix_elems = static_cast<size_t>(B) * to * W;
-  std::vector<uint16_t> input_fp16(prefix_elems);
-
-  const float *input_ptr = input.getData<float>();
-  for (size_t i = 0; i < prefix_elems; ++i) {
-    input_fp16[i] = fp16_ieee_from_fp32_value(input_ptr[i]);
-  }
-
-#ifdef ENABLE_FP16
-  const uint16_t *weight_ptr =
-    reinterpret_cast<const uint16_t *>(conv_weight.getData<__fp16>());
-#else
-  const uint16_t *weight_ptr = conv_weight.getData<uint16_t>();
-#endif
+  float *input_ptr = input.getData<float>();
+  const uint16_t *weight_ptr = weight_tensor.getData<uint16_t>();
+  float *output_ptr = output.getData<float>();
 
   nntrainer::causal_depthwise_conv1d_k3_fp16(
-    input_fp16.data(), weight_ptr, output.getData<float>(), B, to, W);
+    input_ptr, weight_ptr, output_ptr, B, to, W);
+}
+
+void CausalConv1DLayer::forwarding(nntrainer::RunLayerContext &context,
+                                   bool training) {
+  throw std::runtime_error(
+    "[CausalConv1DLayer] forwarding() is not used. "
+    "Use incremental_forwarding().");
+}
+
+void CausalConv1DLayer::finalize(nntrainer::InitLayerContext &context) {
+  auto weight_initializer = nntrainer::props::InitializerInfo::Enum::NONE;
+  auto &weight_regularizer =
+    std::get<nntrainer::props::WeightRegularizer>(*layer_impl_props);
+  auto &weight_regularizer_constant =
+    std::get<nntrainer::props::WeightRegularizerConstant>(*layer_impl_props);
+  auto &weight_decay =
+    std::get<nntrainer::props::WeightDecay>(*layer_impl_props);
+
+  NNTR_THROW_IF(context.getNumInputs() != 1, std::invalid_argument)
+    << "[CausalConv1DLayer] requires exactly 1 input, but got "
+    << context.getNumInputs();
+
+  const nntrainer::TensorDim &input_dim = context.getInputDimensions()[0];
+  validateInputShape(input_dim);
+
+  const unsigned int W = input_dim.width();
+
+  ml::train::TensorDim::TensorType weight_type(
+    context.getFormat(), context.getWeightDataType());
+
+  nntrainer::TensorDim weight_dim(1, 1, KERNEL_SIZE, W, weight_type);
+
+  nntrainer::TensorDim output_dim = input_dim;
+  output_dim.setTensorType(
+    {context.getFormat(), context.getActivationDataType()});
+  output_dim.setDataType(ml::train::TensorDim::DataType::FP32);
+
+  context.setOutputDimensions({output_dim});
+
+  weight_idx[weight] = context.requestWeight(
+    weight_dim, weight_initializer, weight_regularizer,
+    weight_regularizer_constant, weight_decay,
+    "causal_conv1d_weight", true);
 }
 
 void CausalConv1DLayer::calcDerivative(nntrainer::RunLayerContext &context) {

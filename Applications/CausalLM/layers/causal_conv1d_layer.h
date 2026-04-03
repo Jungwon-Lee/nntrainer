@@ -25,10 +25,6 @@ public:
                               bool training) override;
   void calcDerivative(nntrainer::RunLayerContext &context) override;
   void calcGradient(nntrainer::RunLayerContext &context) override;
-  void updateTensorsByInputDimensions(
-    nntrainer::RunLayerContext &context,
-    std::vector<nntrainer::TensorDim> input_dimensions) override;
-  const std::string getType() const override;
   void exportTo(nntrainer::Exporter &exporter,
                 const ml::train::ExportMethods &method) const override;
 
