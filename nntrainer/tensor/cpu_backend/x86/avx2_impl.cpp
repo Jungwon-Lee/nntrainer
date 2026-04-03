@@ -1085,8 +1085,7 @@ void ele_add(const unsigned int N, const float *X, const float *Y, float *Z,
     }
   }
 }
-
-void causal_depthwise_conv1d_k3_fp16(const uint16_t *input,
+void causal_depthwise_conv1d_k3_fp16(float *input,
                                      const uint16_t *packed_weight,
                                      float *output,
                                      unsigned int B,
@@ -1100,30 +1099,17 @@ void causal_depthwise_conv1d_k3_fp16(const uint16_t *input,
   constexpr unsigned int TILE = 32;
 
   auto load_fp16x8_to_fp32 = [](const uint16_t *src) -> __m256 {
-#if defined(__F16C__)
-    return _mm256_cvtph_ps(
-      _mm_loadu_si128(reinterpret_cast<const __m128i *>(src)));
-#else
-    alignas(32) float tmp[8];
-    for (int i = 0; i < 8; ++i) {
-      tmp[i] = fp16_ieee_to_fp32_value(src[i]);
-    }
-    return _mm256_load_ps(tmp);
-#endif
+    const __m128i h =
+      _mm_loadu_si128(reinterpret_cast<const __m128i *>(src));
+    return _mm256_cvtph_ps(h);
   };
 
   auto fp16_to_fp32_scalar = [](uint16_t h) -> float {
-#if defined(__F16C__)
-    __m128i v = _mm_cvtsi32_si128(static_cast<int>(h));
-    __m128 f = _mm_cvtph_ps(v);
-    return _mm_cvtss_f32(f);
-#else
-    return fp16_ieee_to_fp32_value(h);
-#endif
+    return _cvtsh_ss(h);
   };
 
   for (unsigned int b = 0; b < B; ++b) {
-    const uint16_t *x_base = input + static_cast<size_t>(b) * H * W;
+    const float *x_base = input + static_cast<size_t>(b) * H * W;
     float *y_base = output + static_cast<size_t>(b) * H * W;
 
     unsigned int c = 0;
@@ -1155,30 +1141,19 @@ void causal_depthwise_conv1d_k3_fp16(const uint16_t *input,
       __m256 prev2_3 = _mm256_setzero_ps();
 
       for (unsigned int t = 0; t < H; ++t) {
-        const uint16_t *x_ptr = x_base + static_cast<size_t>(t) * W + c;
+        const float *x_ptr = x_base + static_cast<size_t>(t) * W + c;
         float *y_ptr = y_base + static_cast<size_t>(t) * W + c;
 
-        const __m256 cur0 = load_fp16x8_to_fp32(x_ptr + 0);
-        const __m256 cur1 = load_fp16x8_to_fp32(x_ptr + 8);
-        const __m256 cur2 = load_fp16x8_to_fp32(x_ptr + 16);
-        const __m256 cur3 = load_fp16x8_to_fp32(x_ptr + 24);
+        const __m256 cur0 = _mm256_loadu_ps(x_ptr + 0);
+        const __m256 cur1 = _mm256_loadu_ps(x_ptr + 8);
+        const __m256 cur2 = _mm256_loadu_ps(x_ptr + 16);
+        const __m256 cur3 = _mm256_loadu_ps(x_ptr + 24);
 
         __m256 acc0 = _mm256_mul_ps(cur0, vw0_0);
         __m256 acc1 = _mm256_mul_ps(cur1, vw0_1);
         __m256 acc2 = _mm256_mul_ps(cur2, vw0_2);
         __m256 acc3 = _mm256_mul_ps(cur3, vw0_3);
 
-#if defined(__FMA__)
-        acc0 = _mm256_fmadd_ps(prev1_0, vw1_0, acc0);
-        acc1 = _mm256_fmadd_ps(prev1_1, vw1_1, acc1);
-        acc2 = _mm256_fmadd_ps(prev1_2, vw1_2, acc2);
-        acc3 = _mm256_fmadd_ps(prev1_3, vw1_3, acc3);
-
-        acc0 = _mm256_fmadd_ps(prev2_0, vw2_0, acc0);
-        acc1 = _mm256_fmadd_ps(prev2_1, vw2_1, acc1);
-        acc2 = _mm256_fmadd_ps(prev2_2, vw2_2, acc2);
-        acc3 = _mm256_fmadd_ps(prev2_3, vw2_3, acc3);
-#else
         acc0 = _mm256_add_ps(acc0, _mm256_mul_ps(prev1_0, vw1_0));
         acc1 = _mm256_add_ps(acc1, _mm256_mul_ps(prev1_1, vw1_1));
         acc2 = _mm256_add_ps(acc2, _mm256_mul_ps(prev1_2, vw1_2));
@@ -1188,7 +1163,6 @@ void causal_depthwise_conv1d_k3_fp16(const uint16_t *input,
         acc1 = _mm256_add_ps(acc1, _mm256_mul_ps(prev2_1, vw2_1));
         acc2 = _mm256_add_ps(acc2, _mm256_mul_ps(prev2_2, vw2_2));
         acc3 = _mm256_add_ps(acc3, _mm256_mul_ps(prev2_3, vw2_3));
-#endif
 
         _mm256_storeu_ps(y_ptr + 0, acc0);
         _mm256_storeu_ps(y_ptr + 8, acc1);
@@ -1215,19 +1189,15 @@ void causal_depthwise_conv1d_k3_fp16(const uint16_t *input,
       __m256 prev2 = _mm256_setzero_ps();
 
       for (unsigned int t = 0; t < H; ++t) {
-        const uint16_t *x_ptr = x_base + static_cast<size_t>(t) * W + c;
+        const float *x_ptr = x_base + static_cast<size_t>(t) * W + c;
         float *y_ptr = y_base + static_cast<size_t>(t) * W + c;
 
-        const __m256 cur = load_fp16x8_to_fp32(x_ptr);
+        const __m256 cur = _mm256_loadu_ps(x_ptr);
 
         __m256 acc = _mm256_mul_ps(cur, vw0v);
-#if defined(__FMA__)
-        acc = _mm256_fmadd_ps(prev1, vw1v, acc);
-        acc = _mm256_fmadd_ps(prev2, vw2v, acc);
-#else
         acc = _mm256_add_ps(acc, _mm256_mul_ps(prev1, vw1v));
         acc = _mm256_add_ps(acc, _mm256_mul_ps(prev2, vw2v));
-#endif
+
         _mm256_storeu_ps(y_ptr, acc);
 
         prev2 = prev1;
@@ -1245,7 +1215,7 @@ void causal_depthwise_conv1d_k3_fp16(const uint16_t *input,
 
       for (unsigned int t = 0; t < H; ++t) {
         const size_t idx = static_cast<size_t>(t) * W + c;
-        const float cur = fp16_to_fp32_scalar(x_base[idx]);
+        const float cur = x_base[idx];
         y_base[idx] = cur * sw0 + prev1 * sw1 + prev2 * sw2;
         prev2 = prev1;
         prev1 = cur;

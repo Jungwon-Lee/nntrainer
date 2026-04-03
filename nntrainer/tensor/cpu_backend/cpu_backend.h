@@ -624,11 +624,12 @@ extern void nntr_gemm_qsi8d32p_qsi4c32p_packed(
   bool transB = true, T lower_bound = std::numeric_limits<T>::lowest(),
   T upper_bound = std::numeric_limits<T>::max());
 
-extern void causal_depthwise_conv1d_k3_fp16(
-  const __fp16 *input, const __fp16 *packed_weight,
-  __fp16 *output, unsigned int B,
-  unsigned int H, unsigned int W);
+
 #endif
+extern void causal_depthwise_conv1d_k3_fp16(
+  float *input, const uint16_t *packed_weight,
+  float *output, unsigned int B,
+  unsigned int H, unsigned int W);
 /**
  * @brief Initialization of ggml backend
  */

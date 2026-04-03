@@ -455,7 +455,7 @@ void compute_kcaches(const float *in, const uint16_t *kcache, float *output,
     local_window_size, head_start, head_end);
 }
 
-void causal_depthwise_conv1d_k3_fp16(const uint16_t *input,
+void causal_depthwise_conv1d_k3_fp16(float *input,
                                      const uint16_t *packed_weight,
                                      float *output,
                                      unsigned int B,
