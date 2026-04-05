@@ -128,14 +128,14 @@ void EmbeddingLayer::incremental_forwarding(nntrainer::RunLayerContext &context,
 
       if (weight.getDataType() == nntrainer::TensorDim::DataType::Q6_K) {
         ///@note this should be replaced with quantizer operation
-        int num_blocks_per_row = (weight.width() + 256 - 1) / 256;
+        int num_blocks_per_row = (out_dim + 256 - 1) / 256;
         nntrainer::dequantize_row_q6_K(
           (void *)((char *)weight.getData<uint8_t>() +
                    (210 * num_blocks_per_row) * embed_idx),
           out_tensor.getData(), out_dim);
       } else if (weight.getDataType() == nntrainer::TensorDim::DataType::Q4_0) {
         ///@note this should be replaced with quantizer operation
-        int num_blocks_per_row = (weight.width() + 32 - 1) / 32;
+        int num_blocks_per_row = (out_dim + 32 - 1) / 32;
         nntrainer::dequantize_row_q4_0(
           (void *)((char *)weight.getData<uint8_t>() +
                    (18 * num_blocks_per_row) * embed_idx),
@@ -199,31 +199,44 @@ void EmbeddingLayer::save(std::ofstream &file,
           if (K == 1) {
             weight.save(file);
           } else {
-            NNTR_THROW_IF(N % 32 != 0 || K % 32 != 0, std::invalid_argument)
-              << "Q4_0 quantization requires both width and height to be "
-                 "divisible by 32, but got height="
-              << K << ", width=" << N;
+            // Embedding is quantized row-wise per token across hidden dim.
+            NNTR_THROW_IF(N % 32 != 0, std::invalid_argument)
+              << "Q4_0 quantization requires hidden dimension (width) to be "
+                 "divisible by 32, but got width="
+              << N;
             //////////////////////////////////////////////////////////////////
             ///@note Please note that Embedding layer doesn't need to be
             /// transposed!
             //////////////////////////////////////////////////////////////////
             nntrainer::Tensor quant_weight(dim.batch(), dim.channel(), K, N,
                                            {nntrainer::Tformat::NCHW, dtype});
-            nntrainer::quantize_q4_0(weight.getData<float>(),
-                                     quant_weight.getData<uint8_t>(), K, N,
-                                     nullptr);
+            const float *src = weight.getData<float>();
+            uint8_t *dst = quant_weight.getData<uint8_t>();
+            const unsigned int row_stride = 18 * (N / 32);
+            for (unsigned int row = 0; row < K; ++row) {
+              nntrainer::quantize_q4_0(src + row * N, dst + row * row_stride, 1,
+                                       N, nullptr);
+            }
             quant_weight.save(file);
           }
         } else if (dtype == nntrainer::TensorDim::DataType::Q6_K) {
+          NNTR_THROW_IF(N % 256 != 0, std::invalid_argument)
+            << "Q6_K quantization requires hidden dimension (width) to be "
+               "divisible by 256, but got width="
+            << N;
           //////////////////////////////////////////////////////////////////
           ///@note Please note that Embedding layer doesn't need to be
           /// transposed!
           //////////////////////////////////////////////////////////////////
           nntrainer::Tensor quant_weight(dim.batch(), dim.channel(), K, N,
                                          {nntrainer::Tformat::NCHW, dtype});
-          nntrainer::quantize_q6_K(weight.getData<float>(),
-                                   quant_weight.getData<uint8_t>(), K, N,
-                                   nullptr);
+          const float *src = weight.getData<float>();
+          uint8_t *dst = quant_weight.getData<uint8_t>();
+          const unsigned int row_stride = 210 * (N / 256);
+          for (unsigned int row = 0; row < K; ++row) {
+            nntrainer::quantize_q6_K(src + row * N, dst + row * row_stride, 1,
+                                     N, nullptr);
+          }
           quant_weight.save(file);
         } else {
           NNTR_THROW_IF(true, std::runtime_error)
