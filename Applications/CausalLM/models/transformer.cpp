@@ -252,8 +252,29 @@ void Transformer::save_weight(const std::string &weight_path) {
   }
 };
 
+void Transformer::save_weight(
+  const std::string &weight_path, ml::train::TensorDim::DataType dtype,
+  const std::map<std::string, ml::train::TensorDim::DataType>
+    &layer_dtype_map) {
+
+  if (!is_initialized) {
+    throw std::runtime_error(
+      "Transformer model is not initialized. Please call "
+      "initialize() before save_weight().");
+  }
+
+  try {
+    model->save(weight_path, ml::train::ModelFormat::MODEL_FORMAT_BIN, dtype,
+                layer_dtype_map);
+  } catch (const std::exception &e) {
+    throw std::runtime_error("Failed to save model weights with dtype: " +
+                             std::string(e.what()));
+  }
+};
+
 void Transformer::run(const WSTR prompt, bool do_sample,
-                      const WSTR system_prompt, const WSTR tail_prompt) {
+                      const WSTR system_prompt, const WSTR tail_prompt,
+                      bool log_output) {
   if (!is_initialized) {
     throw std::runtime_error(
       "Transformer model is not initialized. Please call "
@@ -325,12 +346,12 @@ Transformer::createAttention(const int layer_id, int seq_len, int n_heads,
   auto A = "layer" + std::to_string(layer_id) + "_attention";
   auto O = "layer" + std::to_string(layer_id) + "_attention_out";
 
-  // V layer
-  std::vector<std::string> v_params = {
-    withKey("name", V), withKey("unit", head_dim * n_heads / GQA_SIZE),
-    withKey("disable_bias", "true"), withKey("input_layers", value_name),
+  // Q layer
+  std::vector<std::string> q_params = {
+    withKey("name", Q), withKey("unit", head_dim * n_heads),
+    withKey("disable_bias", "true"), withKey("input_layers", query_name),
     withKey("weight_initializer", "ones")};
-  layers.push_back(createLayer("fully_connected", v_params));
+  layers.push_back(createLayer("fully_connected", q_params));
 
   // K layer
   std::vector<std::string> k_params = {
@@ -339,12 +360,12 @@ Transformer::createAttention(const int layer_id, int seq_len, int n_heads,
     withKey("weight_initializer", "ones")};
   layers.push_back(createLayer("fully_connected", k_params));
 
-  // Q layer
-  std::vector<std::string> q_params = {
-    withKey("name", Q), withKey("unit", head_dim * n_heads),
-    withKey("disable_bias", "true"), withKey("input_layers", query_name),
+  // V layer
+  std::vector<std::string> v_params = {
+    withKey("name", V), withKey("unit", head_dim * n_heads / GQA_SIZE),
+    withKey("disable_bias", "true"), withKey("input_layers", value_name),
     withKey("weight_initializer", "ones")};
-  layers.push_back(createLayer("fully_connected", q_params));
+  layers.push_back(createLayer("fully_connected", v_params));
 
   // Attention core layer
   std::vector<std::string> a_params = {
@@ -392,9 +413,9 @@ std::vector<LayerHandle> Transformer::createMlp(const int layer_id, int dim,
   layers.push_back(createLayer(
     "swiglu",
     {withKey("name", "layer" + std::to_string(layer_id) + "_ffn_swiglu"),
-     withKey("input_layers", "layer" + std::to_string(layer_id) + "_ffn_up," +
+     withKey("input_layers", "layer" + std::to_string(layer_id) + "_ffn_gate," +
                                "layer" + std::to_string(layer_id) +
-                               "_ffn_gate")}));
+                               "_ffn_up")}));
 
   layers.push_back(createLayer(
     "fully_connected",

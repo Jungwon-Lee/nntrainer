@@ -269,11 +269,15 @@ public:
 
   /**
    * @copydoc Model::save(const std::string &file_path, ml::train::ModelFormat
-   * format);
+   * format, TensorDim::DataType dtype, const std::map<std::string,
+   * TensorDim::DataType> &layer_dtype_map);
    */
-  void save(const std::string &file_path,
-            ml::train::ModelFormat format =
-              ml::train::ModelFormat::MODEL_FORMAT_BIN) override;
+  void
+  save(const std::string &file_path,
+       ml::train::ModelFormat format = ml::train::ModelFormat::MODEL_FORMAT_BIN,
+       TensorDim::DataType dtype = TensorDim::DataType::NONE,
+       const std::map<std::string, TensorDim::DataType> &layer_dtype_map = {})
+    override;
 
   /**
    * @copydoc Model::load(const std::string &file_path, ml::train::ModelFormat
@@ -403,10 +407,12 @@ public:
    * @param[in] init_seq_len initial sequence length
    * @param[in] from current working step index
    * @param[in] to next working step index
-   * @param[in] output_hidden_state return last hidden state if true else return
-   * all hidden state
+   * @param[in] output_hidden_state (NYI) true to return all hidden state,
+   * false to return last hidden state only
    * @retval list of output as float *
-   * @note The output memory must not be freed by the caller
+   * @note If output_hidden_state is false, the output memory must be freed by
+   * the caller after use. Otherwise, the output memory must not be freed by the
+   * caller.
    */
   std::vector<float *>
   incremental_inference(unsigned int batch, const std::vector<float *> &input,

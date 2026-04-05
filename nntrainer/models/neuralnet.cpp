@@ -617,11 +617,19 @@ void NeuralNetwork::backwarding(int iteration,
   }
 }
 
-void NeuralNetwork::save(const std::string &file_path,
-                         ml::train::ModelFormat format) {
+void NeuralNetwork::save(
+  const std::string &file_path, ml::train::ModelFormat format,
+  TensorDim::DataType dtype,
+  const std::map<std::string, TensorDim::DataType> &layer_dtype_map) {
   NNTR_THROW_IF(!initialized, std::runtime_error)
     << "Cannot save model if not initialized yet, path: " << file_path
     << " format: " << static_cast<unsigned>(format);
+
+  NNTR_THROW_IF(format != ml::train::ModelFormat::MODEL_FORMAT_BIN &&
+                  dtype != TensorDim::DataType::NONE,
+                std::runtime_error)
+    << "Cannot save the model with a specific data type unless the model "
+       "format is `MODEL_FORMAT_BIN`.";
 
   /// @todo this switch case should be delegating the function call only. It's
   /// not delegating for now as required logics are manageable for now.
@@ -631,7 +639,10 @@ void NeuralNetwork::save(const std::string &file_path,
       file_path, std::ios::out | std::ios::binary | std::ios::trunc);
 
     for (auto iter = model_graph.cbegin(); iter != model_graph.cend(); iter++) {
-      (*iter)->save(model_file, false, exec_mode);
+      const auto &layer_node = *iter;
+      auto it = layer_dtype_map.find(layer_node->getName());
+      auto target_dtype = (it != layer_dtype_map.end()) ? it->second : dtype;
+      layer_node->save(model_file, false, exec_mode, target_dtype);
     }
 
     if (opt && istrequal(opt->getType(), "adam")) {
@@ -688,9 +699,19 @@ void NeuralNetwork::load(const std::string &file_path,
 
   size_t start_from = 0;
   std::vector<std::pair<size_t, size_t>> file_offset;
+  std::unordered_set<const Tensor *> visited_weights;
   for (auto iter = model_graph.cbegin(); iter != model_graph.cend(); iter++) {
     auto weights = (*iter)->getRunContext().getWeights();
     for (auto weight : weights) {
+      // Shared weights (e.g., TieWordEmbedding) reference the same Tensor
+      // object via requestOrExtend. Calling setFileOffset on the second
+      // occurrence overwrites the correct offset by the first.
+      // Skip duplicates so that:
+      // 1. file_offset is only set once (at the position where save writes)
+      // 2. start_from is only advanced once (matching actual file layout)
+      if (!visited_weights.insert(&weight->getVariableRef()).second) {
+        continue;
+      }
       size_t size = weight->getVariable().getMemoryBytes();
       auto tensor_data_type = weight->getDim().getDataType();
       weight->getVariableRef().setFileOffset(start_from);
@@ -1159,43 +1180,29 @@ std::vector<float *> NeuralNetwork::incremental_inference(
   // auto end_increment = std::chrono::high_resolution_clock::now();
   std::vector<float *> output;
 
-  ///@note Always we take the first position of output
-  // unsigned int step = ((to - from) == 0) ? 0 : (to - from) - 1;
-  unsigned int step = 0;
-
   for (auto &out : output_tensors) {
     auto out_t = *out.get();
     float *last_out_buf_data;
 
     if (output_hidden_state) {
-      last_out_buf_data = out_t.getData();
-    } else {
-      last_out_buf_data = new float[batch_size * out_t.width()];
+      std::cout << "Warning: output_hidden_state is not supported yet.\n"
+                << "Returning last hidden state only...\n"
+                << "Please free output memory after use!";
+    }
+    const size_t buf_size = batch_size * out_t.getDim().getFeatureLen();
+    last_out_buf_data = new float[buf_size];
 
-      for (unsigned int batch = 0; batch < batch_size; ++batch) {
-        if (out->getDataType() == ml::train::TensorDim::DataType::FP16) {
+    if (out->getDataType() == ml::train::TensorDim::DataType::FP16) {
 #ifdef ENABLE_FP16
 
-          const _FP16 *out_t_batch_ptr =
-            out_t.getData<_FP16>() + batch * out_t.getDim().getFeatureLen() +
-            step * out_t.width();
-          scopy(out_t.width(), out_t_batch_ptr, 1,
-                last_out_buf_data + batch * out_t.width(), 1);
-
+      nntrainer::scopy(buf_size, out_t.getData<_FP16>(), 1, last_out_buf_data,
+                       1);
 #else
-          throw std::invalid_argument("Error: enable-fp16 is not set");
+      throw std::invalid_argument("Error: enable-fp16 is not set");
 #endif
-        } else if (out->getDataType() == ml::train::TensorDim::DataType::FP32) {
+    } else if (out->getDataType() == ml::train::TensorDim::DataType::FP32) {
 
-          const float *out_t_batch_ptr =
-            out_t.getData() + batch * out_t.getDim().getFeatureLen() +
-            step * out_t.width();
-          // std::memcpy( last_out_buf_data + batch * out_t.width(),
-          // out_t_batch_ptr, out_t.width()*sizeof(float));
-          scopy(out_t.width(), out_t_batch_ptr, 1,
-                last_out_buf_data + batch * out_t.width(), 1);
-        }
-      }
+      std::memcpy(last_out_buf_data, out_t.getData(), sizeof(float) * buf_size);
     }
 
     output.push_back(last_out_buf_data);

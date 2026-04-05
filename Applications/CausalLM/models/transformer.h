@@ -35,12 +35,14 @@
 #endif
 
 #include <layer.h>
+#include <map>
 #include <model.h>
 #include <random>
 
 #include <limits.h>
 
 #include "json.hpp"
+#include "performance_metrics.h"
 #include <fstream>
 #include <tokenizers_c.h>
 #include <tokenizers_cpp.h>
@@ -95,10 +97,30 @@ public:
   virtual void save_weight(const std::string &weight_path);
 
   /**
+   * @brief Save the weight to a file with type conversion
+   * @param weight_path Path to save the weight file
+   * @param dtype Global target data type for all layers (NONE = keep original)
+   * @param layer_dtype_map Per-layer data type overrides (layer_name -> dtype)
+   */
+  virtual void
+  save_weight(const std::string &weight_path,
+              ml::train::TensorDim::DataType dtype,
+              const std::map<std::string, ml::train::TensorDim::DataType>
+                &layer_dtype_map = {});
+
+  /**
    * @brief run the Transformer model
    */
   virtual void run(const WSTR prompt, bool do_sample = false,
-                   const WSTR system_prompt = "", const WSTR tail_prompt = "");
+                   const WSTR system_prompt = "", const WSTR tail_prompt = "",
+                   bool log_output = true);
+
+  /**
+   * @brief Get PerformanceMetrics
+   */
+  PerformanceMetrics getPerformanceMetrics() const {
+    return performance_metrics;
+  }
 
 protected:
   /**
@@ -175,6 +197,9 @@ protected:
   unsigned int FSU_LOOKAHEAD;
   float ATTN_LOGIT_SOFTCAPPING = 0.0f; /**< attention logit softcapping */
   bool IS_CAUSAL = true;
+
+  // Performance metrics
+  PerformanceMetrics performance_metrics;
 };
 /**
  * Loads JSON data from a file with detailed error handling

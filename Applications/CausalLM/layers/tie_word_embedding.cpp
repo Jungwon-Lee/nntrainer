@@ -281,9 +281,7 @@ void TieWordEmbedding::incremental_forwarding_lmhead(
   for (unsigned int b = 0; b < b_size; ++b) {
     nntrainer::Tensor input_step = input_.getSharedDataTensor(
       input_step_dim,
-      b * input_dim.getFeatureLen() +
-        (to - from == 1 ? 0 : (to - 1) * input_.width()),
-      true);
+      b * input_dim.getFeatureLen() + (to - from - 1) * input_.width(), true);
     nntrainer::Tensor hidden_step = hidden_.getSharedDataTensor(
       hidden_step_dim, b * hidden_dim.getFeatureLen(), true);
 
@@ -349,7 +347,7 @@ void TieWordEmbedding::read(
     for (unsigned int i = 0; i < context.getNumWeights(); ++i) {
       /// @note shared weights are only be read at the first acecss
       if (context.isGradientFirstAccess(i)) {
-        context.getWeight(i).read(file);
+        context.getWeight(i).read(file, start_offset, read_from_offset);
         if (context.isMixedPrecision(i) && trainable &&
             !context.getWeightFP32(i).empty()) {
           context.getWeightFP32(i).copyData(context.getWeight(i));
@@ -359,16 +357,69 @@ void TieWordEmbedding::read(
   }
 }
 
-void TieWordEmbedding::save(
-  std::ofstream &file, nntrainer::RunLayerContext &run_context, bool opt_var,
+void TieWordEmbedding::read(
+  nntrainer::ReadSource src, nntrainer::RunLayerContext &context, bool opt_var,
   ml::train::ExecutionMode mode, bool trainable,
-  nntrainer::TensorDim::DataType definedWeightDataType) const {
+  nntrainer::TensorDim::DataType definedWeightDataType, bool fsu,
+  size_t start_offset, bool read_from_offset) {
+
+  // Only read when mode is embedding
+  if (mode_ == mode::embedding) {
+    for (unsigned int i = 0; i < context.getNumWeights(); ++i) {
+      /// @note shared weights are only be read at the first acecss
+      if (context.isGradientFirstAccess(i)) {
+        context.getWeight(i).read(src, start_offset, read_from_offset);
+        if (context.isMixedPrecision(i) && trainable &&
+            !context.getWeightFP32(i).empty()) {
+          context.getWeightFP32(i).copyData(context.getWeight(i));
+        }
+      }
+    }
+  }
+}
+
+void TieWordEmbedding::save(std::ofstream &file,
+                            nntrainer::RunLayerContext &run_context,
+                            bool opt_var, ml::train::ExecutionMode mode,
+                            bool trainable,
+                            nntrainer::TensorDim::DataType dtype) const {
   // Only read when mode is embedding
   if (mode_ == mode::embedding) {
     // @note shared weights are only be saved at the first access
     for (unsigned int i = 0; i < run_context.getNumWeights(); ++i) {
       if (run_context.isGradientFirstAccess(i)) {
-        run_context.getWeight(i).save(file);
+        auto &weight = run_context.getWeight(i);
+        if (dtype == nntrainer::TensorDim::DataType::NONE ||
+            weight.getDataType() == dtype)
+          weight.save(file);
+        else {
+          NNTR_THROW_IF(weight.getDataType() !=
+                          nntrainer::TensorDim::DataType::FP32,
+                        std::runtime_error)
+            << "Save with quantization only supports for FP32 weight.";
+          ///@note The codelines below can be replaced with quantizer's
+          /// quantize()
+          nntrainer::TensorDim dim = weight.getDim();
+          unsigned int K = dim.height();
+          unsigned int N = dim.width();
+
+          if (dtype == nntrainer::TensorDim::DataType::Q6_K) {
+            //////////////////////////////////////////////////////////////////
+            ///@note Please note that Embedding layer doesn't need to be
+            /// transposed!
+            //////////////////////////////////////////////////////////////////
+            nntrainer::Tensor quant_weight(dim.batch(), dim.channel(), K, N,
+                                           {nntrainer::Tformat::NCHW, dtype});
+
+            nntrainer::quantize_q6_K(weight.getData<float>(),
+                                     quant_weight.getData<uint8_t>(), K, N,
+                                     nullptr);
+            quant_weight.save(file);
+          } else {
+            NNTR_THROW_IF(true, std::runtime_error)
+              << "This dtype is not supported in save with quantization";
+          }
+        }
       }
     }
   }
