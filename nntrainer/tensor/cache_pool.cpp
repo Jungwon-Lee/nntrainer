@@ -206,14 +206,28 @@ std::shared_ptr<MemoryData> CachePool::getMemory(unsigned int id) {
   NNTR_THROW_IF(!swap_device->isOperating(), std::invalid_argument)
     << "Allocate memory before allocation";
 
-  off_t offset = getMemoryOffset().at(id - 1);
-  size_t len = getMemorySize().at(id - 1);
-  auto exe_order = getMemoryExecOrder().at(id - 1);
+  auto &memory_offset = getMemoryOffset();
+  auto &memory_size = getMemorySize();
+  auto &memory_exec_order = getMemoryExecOrder();
+  NNTR_THROW_IF(id == 0 || id > memory_offset.size() ||
+                  id > memory_size.size() || id > memory_exec_order.size(),
+                std::out_of_range)
+    << "CachePool::getMemory invalid id=" << id
+    << " offsets=" << memory_offset.size() << " sizes="
+    << memory_size.size() << " exec_orders=" << memory_exec_order.size();
+
+  off_t offset = memory_offset[id - 1];
+  size_t len = memory_size[id - 1];
+  auto exe_order = memory_exec_order[id - 1];
   auto policy = getCachePolicy().at(id - 1);
 
   void *memory_ptr = nullptr;
   if (execution_mode_ == ml::train::ExecutionMode::INFERENCE) {
-    memory_ptr = getMemoryPtrs().at(id - 1);
+    auto memory_ptrs = getMemoryPtrs();
+    NNTR_THROW_IF(id > memory_ptrs.size(), std::out_of_range)
+      << "CachePool::getMemory missing FSU memory pointer id=" << id
+      << " ptrs=" << memory_ptrs.size();
+    memory_ptr = memory_ptrs[id - 1];
   }
 
   auto mem_data = std::make_shared<MemoryData>(
@@ -226,7 +240,7 @@ std::shared_ptr<MemoryData> CachePool::getMemory(unsigned int id) {
   std::string ords;
 
   if (execution_mode_ == ml::train::ExecutionMode::INFERENCE) {
-    auto &o = exe_order[0];
+    unsigned int o = exe_order.empty() ? 0 : exe_order[0];
     exec_ids[o].insert(id);
     ords.append(std::to_string(o));
   } else {

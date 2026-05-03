@@ -254,13 +254,23 @@ int NeuralNetwork::initialize(ExecutionMode mode) {
                                             label_layer_prop.end());
   }
 
-  status = model_graph.initialize(
-    exec_mode, input_conn,
-    std::vector<Connection>(label_layers.begin(), label_layers.end()));
+  try {
+    status = model_graph.initialize(
+      exec_mode, input_conn,
+      std::vector<Connection>(label_layers.begin(), label_layers.end()));
+  } catch (const std::exception &e) {
+    throw std::runtime_error("model_graph.initialize failed: " +
+                             std::string(e.what()));
+  }
   NN_RETURN_STATUS();
 
-  model_graph.setBatchSize(
-    std::get<props::TrainingBatchSize>(model_flex_props));
+  try {
+    model_graph.setBatchSize(
+      std::get<props::TrainingBatchSize>(model_flex_props));
+  } catch (const std::exception &e) {
+    throw std::runtime_error("model_graph.setBatchSize failed: " +
+                             std::string(e.what()));
+  }
 
   // If the execution mode is `train`, the optimizer and its relevant variables
   // are initialized. Throws an error if the optimizer is not set for training;
@@ -282,7 +292,12 @@ int NeuralNetwork::initialize(ExecutionMode mode) {
   }
 
   // Allocate weights
-  model_graph.allocateWeights(exec_mode != ExecutionMode::INFERENCE);
+  try {
+    model_graph.allocateWeights(exec_mode != ExecutionMode::INFERENCE);
+  } catch (const std::exception &e) {
+    throw std::runtime_error("model_graph.allocateWeights failed: " +
+                             std::string(e.what()));
+  }
   // enable this to save initialized weights for INFERENCE
   // model_graph.allocateWeights(true);
 

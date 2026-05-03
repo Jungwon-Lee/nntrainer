@@ -220,26 +220,70 @@ void TensorPool::setBatchSize(const std::string &name, unsigned int batch) {
  * @brief Allocate memory for all the managed tensors
  */
 void TensorPool::allocate(bool init) {
-  if (minMemoryRequirement() == 0)
+  std::string allocate_stage = "start";
+  std::string allocate_tensor_name;
+  try {
+  allocate_stage = "minMemoryRequirement";
+  size_t min_memory = 0;
+  try {
+    min_memory = minMemoryRequirement();
+  } catch (const std::exception &e) {
+    throw std::runtime_error(
+      "TensorPool::allocate minMemoryRequirement failed: " +
+      std::string(e.what()));
+  }
+  if (min_memory == 0)
     return;
-  mem_pool->allocate();
+  allocate_stage = "mem_pool->allocate";
+  try {
+    mem_pool->allocate();
+  } catch (const std::exception &e) {
+    throw std::runtime_error("TensorPool::allocate mem_pool allocation failed: " +
+                             std::string(e.what()));
+  }
 
   /** set the pointers using the token for all the tensors */
+  allocate_stage = "bind tensors";
   for (auto &spec : pool) {
+    allocate_tensor_name = spec.tensor->getName();
     auto details = std::get_if<SourceDetails>(&spec.details);
     if (!details || details->token == 0) {
       continue;
     }
-    spec.tensor->setData(mem_pool->getMemory(details->token), 0, init);
-    ml_logi("Memory Alloc Details (Tensor): %s : %zu : address %p",
-            spec.tensor->getName().c_str(), spec.tensor->getMemoryBytes(),
-            spec.tensor->getData());
+    try {
+      spec.tensor->setData(mem_pool->getMemory(details->token), 0, init);
+    } catch (const std::exception &e) {
+      throw std::runtime_error("TensorPool::allocate failed for tensor " +
+                               spec.tensor->getName() + " token=" +
+                               std::to_string(details->token) + ": " +
+                               e.what());
+    }
+    try {
+      ml_logi("Memory Alloc Details (Tensor): %s : %zu",
+              spec.tensor->getName().c_str(), spec.tensor->getMemoryBytes());
+    } catch (const std::exception &e) {
+      throw std::runtime_error("TensorPool::allocate failed to log tensor " +
+                               spec.tensor->getName() + ": " + e.what());
+    }
 
-    syncDependents(spec);
+    try {
+      syncDependents(spec);
+    } catch (const std::exception &e) {
+      throw std::runtime_error("TensorPool::allocate failed to sync dependents "
+                               "for tensor " +
+                               spec.tensor->getName() + ": " + e.what());
+    }
   }
 
   if (cache_loader) {
+    allocate_stage = "cache_loader->init";
+    allocate_tensor_name.clear();
     cache_loader->init();
+  }
+  } catch (const std::exception &e) {
+    throw std::runtime_error("TensorPool::allocate failed at " +
+                             allocate_stage + " tensor=" +
+                             allocate_tensor_name + ": " + e.what());
   }
 }
 

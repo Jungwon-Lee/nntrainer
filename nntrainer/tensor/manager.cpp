@@ -153,8 +153,18 @@ void Manager::reinitialize() {
 void Manager::allocateWeights(unsigned int max_exec_order_, bool init) {
   max_exec_order = max_exec_order_;
   if (!weight_pool.isAllocated()) {
-    finalizeTensorPool(weight_pool, 0, max_exec_order_);
-    weight_pool.allocate(init);
+    try {
+      finalizeTensorPool(weight_pool, 0, max_exec_order_);
+    } catch (const std::exception &e) {
+      throw std::runtime_error("finalize weight pool failed: " +
+                               std::string(e.what()));
+    }
+    try {
+      weight_pool.allocate(init);
+    } catch (const std::exception &e) {
+      throw std::runtime_error("allocate weight pool failed: " +
+                               std::string(e.what()));
+    }
   }
 }
 
