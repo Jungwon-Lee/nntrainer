@@ -23,6 +23,7 @@
 #include <algorithm>
 #include <fstream>
 #include <iostream>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -340,41 +341,23 @@ int main(int argc, char *argv[]) {
       architecture = resolve_architecture(model_type, architecture);
     }
 
-    // Load chat template from tokenizer_config.json (if available)
-    causallm::ChatTemplate chat_tmpl;
-    std::string tokenizer_config_path = model_path + "/tokenizer_config.json";
-    if (std::filesystem::exists(tokenizer_config_path)) {
-      chat_tmpl = causallm::ChatTemplate::fromFile(tokenizer_config_path);
-      if (chat_tmpl.isAvailable()) {
-        std::cout << "[Info] Chat template loaded from tokenizer_config.json"
-                  << std::endl;
-      } else {
-        std::cerr
-          << "[Warning] tokenizer_config.json found but chat template could "
-             "not be loaded. Chat formatting will not be applied to raw input."
-          << std::endl;
-      }
-    } else {
-      std::cerr
-        << "[Warning] tokenizer_config.json not found in " << model_path
-        << ". Chat template will not be available for raw input formatting."
-        << std::endl;
+    // Load chat template from tokenizer_config.json or jinja (if available)
+    std::optional<causallm::ChatTemplate> chat_template;
+    if (causallm::ChatTemplate::Exists(model_path)) {
+      chat_template.emplace(causallm::ChatTemplate::Load(model_path));
     }
+    // chat_template.emplace(quick_dot_ai::ChatTemplate::LoadBuiltin(
+    //   quick_dot_ai::ChatTemplate::Builtin::FunctionGemma));
 
     // Determine input text
     if (argc >= 3) {
       input_text = argv[2];
-      if (chat_tmpl.isAvailable()) {
-        auto formatted_input = chat_tmpl.apply(input_text);
-        if (!formatted_input.empty()) {
-          input_text = formatted_input;
-        }
-      }
     } else {
       if (nntr_cfg.contains("chat_input")) {
-        if (architecture == "Gemma3ForCausalLM") {
-          input_text = causallm::gemma3::apply_function_gemma_template(
-            nntr_cfg["chat_input"]);
+        if (chat_template.has_value()) {
+          input_text = chat_template->apply(nntr_cfg["chat_input"]);
+          system_head_prompt.clear();
+          system_tail_prompt.clear();
         } else {
           std::cerr << "[Warning] 'chat_input' is set but support for model "
                        "architecture '"
