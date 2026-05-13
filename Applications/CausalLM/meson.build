@@ -13,6 +13,7 @@ executable_src = [
 
 causallm_inc_abs = [meson.current_source_dir()]
 causallm_inc = [include_directories('.')]
+causallm_inc_minja_inc = include_directories('third_party/minja/include')
 
 # Build layer dependency
 causallm_layer_dependencies = []
@@ -124,7 +125,7 @@ if get_option('platform') == 'windows'
             causallm_layer_dependencies,
             tokenizer_dependencies
         ],
-        include_directories: causallm_inc,
+        include_directories: [causallm_inc, causallm_inc_minja_inc],
         install: true,
         cpp_args: cpp_args
     )
@@ -137,7 +138,7 @@ else
             causallm_layer_dependencies,
             tokenizer_dependencies
         ],
-        include_directories: causallm_inc,
+        include_directories: [causallm_inc, causallm_inc_minja_inc],
         install: true,
         install_dir: application_install_dir,
         link_args: tokenizer_link_args,
@@ -153,7 +154,7 @@ causallm_dep = declare_dependency(
 
 e = executable('nntr_causallm',
     executable_src,
-    include_directories: causallm_inc,
+    include_directories: [causallm_inc, causallm_inc_minja_inc],
     dependencies: [nntrainer_dep, nntrainer_ccapi_dep, causallm_layer_dependencies, causallm_dep],
 )
 
