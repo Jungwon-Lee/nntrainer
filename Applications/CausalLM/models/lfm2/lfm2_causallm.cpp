@@ -170,10 +170,22 @@ void Lfm2CausalLM::setupParameters(json &cfg, json &generation_cfg,
     CONV_BIAS =
       cfg.contains("conv_bias") ? cfg["conv_bias"].get<bool>() : false;
 
-    // LFM2 does not tie word embeddings by default
-    TIE_WORD_EMBEDDINGS =
-      cfg.contains("tie_word_embeddings") ? cfg["tie_word_embeddings"].get<bool>()
-                                          : false;
+    if (cfg.contains("tie_word_embeddings")) {
+      TIE_WORD_EMBEDDINGS = cfg["tie_word_embeddings"].get<bool>();
+    } else if (cfg.contains("tie_embedding")) {
+      TIE_WORD_EMBEDDINGS = cfg["tie_embedding"].get<bool>();
+    } else {
+      TIE_WORD_EMBEDDINGS = false;
+    }
+
+    if (cfg.contains("layer_types")) {
+      LAYER_TYPES = cfg["layer_types"].get<std::vector<std::string>>();
+    } else {
+      LAYER_TYPES = {"conv",           "conv", "full_attention", "conv",
+                     "conv",           "full_attention", "conv", "conv",
+                     "full_attention", "conv", "full_attention", "conv",
+                     "full_attention", "conv", "full_attention", "conv"};
+    }
 
   } catch (const std::exception &e) {
     throw std::runtime_error("Lfm2CausalLM: config parsing error: " +
@@ -187,20 +199,12 @@ Lfm2CausalLM::createTransformerDecoderBlock(const int layer_id,
 
   std::vector<LayerHandle> layers;
 
-  // Per-layer operator types for LFM2 hybrid architecture
-  // Pattern: conv, conv, attention, conv, conv, attention, ...
-  static const std::vector<std::string> LAYER_TYPES = {
-    "conv", "conv", "attention", "conv", "conv", "attention",
-    "conv", "conv", "attention", "conv", "attention", "conv",
-    "attention", "conv", "attention", "conv"
-  };
-
   // Determine block type based on layer_id
   std::string block_type = (layer_id < static_cast<int>(LAYER_TYPES.size()))
                              ? LAYER_TYPES[layer_id]
-                             : "attention";
+                             : "full_attention";
 
-  if (block_type == "attention") {
+  if (block_type == "attention" || block_type == "full_attention") {
     // Attention block: norm -> attention -> residual -> norm -> FFN -> residual
     layers.push_back(createLayer(
       "rms_norm",
@@ -371,8 +375,8 @@ Lfm2CausalLM::createMlp(const int layer_id, int dim, int hidden_dim,
     "swiglu",
     {withKey("name", "layer" + std::to_string(layer_id) + "_ffn_swiglu"),
      withKey("input_layers",
-             "layer" + std::to_string(layer_id) + "_ffn_gate,layer" +
-               std::to_string(layer_id) + "_ffn_up")}));
+             "layer" + std::to_string(layer_id) + "_ffn_up,layer" +
+               std::to_string(layer_id) + "_ffn_gate")}));
 
   layers.push_back(createLayer(
     "fully_connected",

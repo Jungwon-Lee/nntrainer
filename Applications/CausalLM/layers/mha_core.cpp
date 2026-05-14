@@ -878,10 +878,20 @@ void MHACoreLayer::apply_rotary_emb_tensor_v2(nntrainer::Tensor &in,
                           c * in.height() * in.width() + h * in.width();
 
           if (out.getDataType() == ml::train::TensorDim::DataType::FP32) {
+            float *out_ptr = out.getData<float>() +
+                             b * out.channel() * out.height() * out.width() +
+                             c * out.height() * out.width() +
+                             h * out.width();
 
-            nntrainer::compute_rotary_emb_value(in.width(), dim, half_, in_ptr,
-                                                nullptr, cos_->data(),
-                                                sin_->data(), convert_only);
+            if (out_ptr != in_ptr) {
+              std::copy(in_ptr, in_ptr + in.width(), out_ptr);
+            }
+
+            if (!convert_only) {
+              nntrainer::compute_rotary_emb_value(
+                in.width(), dim, half_, out_ptr, nullptr, cos_->data(),
+                sin_->data(), convert_only);
+            }
           } else if (out.getDataType() ==
                        ml::train::TensorDim::DataType::UINT16 ||
                      out.getDataType() ==

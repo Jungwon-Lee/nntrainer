@@ -54,12 +54,12 @@ void CustomMultiplyLayer::finalize(nntrainer::InitLayerContext &context) {
 
 void CustomMultiplyLayer::forwarding(nntrainer::RunLayerContext &context,
                                      bool training) {
-  // nntrainer::Tensor &in1 = context.getInput(INPUT_IDX_1);
-  // nntrainer::Tensor &out = context.getOutput(OUT_IDX);
+  nntrainer::Tensor &out = context.getOutput(OUT_IDX);
+  nntrainer::Tensor &in0 = context.getInput(INPUT_IDX_0);
+  nntrainer::Tensor &in1 = context.getInput(INPUT_IDX_1);
 
-  // // In-place multiply: out shares memory with in0, multiply in-place with in1
-  // out.multiply_i(in1);
-  return;
+  out.copy(in0);
+  out.multiply_i(in1);
 }
 
 void CustomMultiplyLayer::incremental_forwarding(
@@ -70,23 +70,32 @@ void CustomMultiplyLayer::incremental_forwarding(
     << "CustomMultiplyLayer::incremental_forwarding requires to > from";
 
   nntrainer::Tensor &out = context.getOutput(OUT_IDX);
+  nntrainer::Tensor &in0 = context.getInput(INPUT_IDX_0);
   nntrainer::Tensor &in1 = context.getInput(INPUT_IDX_1);
 
   nntrainer::TensorDim out_dim = out.getDim();
+  nntrainer::TensorDim in0_dim = in0.getDim();
   nntrainer::TensorDim in1_dim = in1.getDim();
 
   const unsigned int batch_size = out.batch();
   const unsigned int step_height = to - from;
+  const bool in0_broadcast = (in0_dim.height() == 1);
   const bool in1_broadcast = (in1_dim.height() == 1);
 
   // Pre-compute dimensions (same pattern as addition_layer)
   const size_t out_feature_len = out_dim.getFeatureLen();
+  const size_t in0_feature_len = in0_dim.getFeatureLen();
   const size_t in1_feature_len = in1_dim.getFeatureLen();
 
   // Output step dimension
   nntrainer::TensorDim out_step_dim = out_dim;
   out_step_dim.batch(1);
   out_step_dim.height(step_height);
+
+  // In0 step dimension
+  nntrainer::TensorDim in0_step_dim = in0_dim;
+  in0_step_dim.batch(1);
+  in0_step_dim.height(in0_broadcast ? 1 : step_height);
 
   // In1 step dimension
   nntrainer::TensorDim in1_step_dim = in1_dim;
@@ -97,12 +106,14 @@ void CustomMultiplyLayer::incremental_forwarding(
   for (unsigned int b = 0; b < batch_size; ++b) {
     // Follow addition_layer pattern: b * getFeatureLen()
     const size_t out_offset = b * out_feature_len;
+    const size_t in0_offset = b * in0_feature_len;
     const size_t in1_offset = b * in1_feature_len;
 
     nntrainer::Tensor out_step = out.getSharedDataTensor(out_step_dim, out_offset, true);
+    nntrainer::Tensor in0_step = in0.getSharedDataTensor(in0_step_dim, in0_offset, true);
     nntrainer::Tensor in1_step = in1.getSharedDataTensor(in1_step_dim, in1_offset, true);
 
-    // In-place multiply: out_step shares memory with in0_step
+    out_step.copy(in0_step);
     out_step.multiply_i(in1_step);
   }
 }

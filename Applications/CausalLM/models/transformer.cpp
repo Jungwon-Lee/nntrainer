@@ -130,13 +130,25 @@ void Transformer::setupParameters(json &cfg, json &generation_cfg,
                              ? cfg["sliding_window_pattern"].get<unsigned int>()
                              : 1;
   MAX_POSITION_EMBEDDINGS = cfg["max_position_embeddings"].get<unsigned int>();
-  ROPE_THETA = cfg["rope_theta"].get<unsigned int>();
-  TIE_WORD_EMBEDDINGS = cfg.contains("tie_word_embeddings") 
-                      ? cfg["tie_word_embeddings"].get<bool>() 
-                      : false;
-  NORM_EPS = cfg.contains("rms_norm_eps") 
-            ? cfg["rms_norm_eps"].get<float>() 
-            : 1e-5;
+  if (cfg.contains("rope_theta") && !cfg["rope_theta"].is_null()) {
+    ROPE_THETA = static_cast<unsigned int>(cfg["rope_theta"].get<float>());
+  } else if (cfg.contains("rope_parameters") &&
+             cfg["rope_parameters"].contains("rope_theta")) {
+    ROPE_THETA = static_cast<unsigned int>(
+      cfg["rope_parameters"]["rope_theta"].get<float>());
+  }
+
+  if (cfg.contains("tie_word_embeddings")) {
+    TIE_WORD_EMBEDDINGS = cfg["tie_word_embeddings"].get<bool>();
+  } else if (cfg.contains("tie_embedding")) {
+    TIE_WORD_EMBEDDINGS = cfg["tie_embedding"].get<bool>();
+  } else {
+    TIE_WORD_EMBEDDINGS = false;
+  }
+
+  NORM_EPS = cfg.contains("rms_norm_eps")
+               ? cfg["rms_norm_eps"].get<float>()
+               : (cfg.contains("norm_eps") ? cfg["norm_eps"].get<float>() : 1e-5);
   GQA_SIZE = NUM_HEADS / NUM_KEY_VALUE_HEADS;
 
   return;

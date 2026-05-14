@@ -55,18 +55,24 @@ void CausalConv1DLayer::finalize(nntrainer::InitLayerContext &context) {
   const unsigned int B = in_dim.batch();
   const unsigned int W = in_dim.width(); // number of features/channels
 
-  // Weight: [1, 1, KERNEL_SIZE, W] FP32
-  //   Row k  (offset k*W) = kernel weights for position k:
-  //     k=0 → w0: applied to current token x_t
-  //     k=1 → w1: applied to x_{t-1}
-  //     k=2 → w2: applied to x_{t-2}
+  // Weight file layout follows HuggingFace Conv1d: [W, KERNEL_SIZE].
   nntrainer::TensorDim weight_dim(
-    {1, 1, KERNEL_SIZE, W},
+    {1, 1, W, KERNEL_SIZE},
     {context.getFormat(), ml::train::TensorDim::DataType::FP32});
   weight_idx[weight] =
     context.requestWeight(weight_dim, nntrainer::Initializer::NONE,
                           nntrainer::WeightRegularizer::NONE, 0.0f, 0.0f,
                           "causal_conv1d_weight", false);
+
+  // Runtime kernels consume [KERNEL_SIZE, W] in the existing kernel order:
+  // current token, previous token, oldest cached token.
+  nntrainer::TensorDim packed_weight_dim(
+    {1, 1, KERNEL_SIZE, W},
+    {context.getFormat(), ml::train::TensorDim::DataType::FP32});
+  tensor_idx[packed_weight] =
+    context.requestTensor(packed_weight_dim, "packed_weight",
+                          nntrainer::Initializer::NONE, false,
+                          nntrainer::TensorLifespan::MAX_LIFESPAN);
 
   // Conv-state cache: [B, 1, KERNEL_SIZE-1, W] FP32
   //   state[b, 0, 0, f] = x_{t-2}
@@ -108,8 +114,18 @@ void CausalConv1DLayer::incremental_forwarding(
   const unsigned int H = input.height(); // full sequence length (INIT_SEQ_LEN)
   const unsigned int W = input.width();  // feature dimension
 
-  const float *w_ptr   = w_tensor.getData<float>();
+  nntrainer::Tensor &packed_w = context.getTensor(tensor_idx[packed_weight]);
+  const float *w_raw = w_tensor.getData<float>();
+  float *w_ptr = packed_w.getData<float>();
   float       *state_data = state.getData<float>(); // [B, 1, KERNEL_SIZE-1, W]
+
+  for (unsigned int c = 0; c < W; ++c) {
+    for (unsigned int k = 0; k < KERNEL_SIZE; ++k) {
+      const unsigned int packed_k = KERNEL_SIZE - 1 - k;
+      w_ptr[static_cast<size_t>(packed_k) * W + c] =
+        w_raw[static_cast<size_t>(c) * KERNEL_SIZE + k];
+    }
+  }
 
   if (to - from == 1) {
     // ----------------------------------------------------------------
