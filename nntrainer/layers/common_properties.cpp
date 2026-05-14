@@ -42,7 +42,7 @@ void Name::set(const std::string &value) {
 }
 
 bool Name::isValid(const std::string &v) const {
-  static std::regex allowed("[a-zA-Z0-9][-_./a-zA-Z0-9]*");
+  static std::regex allowed("[a-zA-Z0-9][-_./:a-zA-Z0-9]*");
   return !v.empty() && std::regex_match(v, allowed);
 }
 

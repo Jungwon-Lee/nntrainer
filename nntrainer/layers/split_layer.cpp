@@ -19,6 +19,9 @@
 #include <split_layer.h>
 #include <util_func.h>
 
+#include <iostream>
+#include <chrono>
+
 namespace nntrainer {
 
 static constexpr size_t SINGLE_INOUT_IDX = 0;
@@ -104,7 +107,72 @@ void SplitLayer::finalize(InitLayerContext &context) {
   setBatch(in_dim.batch());
 }
 
+void SplitLayer::incremental_forwarding(RunLayerContext &context,
+                                        unsigned int from,
+                                        unsigned int to,
+                                        bool training) {
+  const unsigned int split_number = std::get<props::SplitNumber>(split_props);
+  const unsigned int split_dimension = std::get<props::SplitDimension>(split_props);
+
+  Tensor &input_ = context.getInput(SINGLE_INOUT_IDX);
+  const TensorDim in_dim = input_.getDim();
+
+  const unsigned int batch_size = in_dim.batch();
+  const unsigned int step_height = to - from;
+  const unsigned int in_width = in_dim.width();
+  const size_t in_feature_len = in_dim.getFeatureLen();
+
+  // Stack allocation for output pointers (max 3 splits typical)
+  float *out_ptrs[3];
+  for (unsigned int idx = 0; idx < split_number; idx++) {
+    out_ptrs[idx] = context.getOutput(idx).getData<float>();
+  }
+
+  const float *in_base = input_.getData<float>();
+
+  if (split_dimension == 3) {
+    // Split on width
+    const unsigned int out_width = context.getOutput(0).getDim().width();
+    const size_t row_bytes = out_width * sizeof(float);
+
+    if (step_height == 1) {
+      // Fast path for incremental generation (single row)
+      for (unsigned int b = 0; b < batch_size; ++b) {
+        const float *in_b = in_base + b * in_feature_len;
+        for (unsigned int idx = 0; idx < split_number; ++idx) {
+          std::memcpy(out_ptrs[idx] + b * out_width, in_b + idx * out_width, row_bytes);
+        }
+      }
+    } else {
+      for (unsigned int b = 0; b < batch_size; ++b) {
+        const float *in_b = in_base + b * in_feature_len;
+        for (unsigned int idx = 0; idx < split_number; ++idx) {
+          float *out_b = out_ptrs[idx] + b * step_height * out_width;
+          const float *in_s = in_b + idx * out_width;
+          for (unsigned int h = 0; h < step_height; ++h) {
+            std::memcpy(out_b + h * out_width, in_s + h * in_width, row_bytes);
+          }
+        }
+      }
+    }
+  } else if (split_dimension == 1) {
+    // Split on channel
+    const size_t channel_off = static_cast<size_t>(output_reshape_helper.height()) * 
+                               in_dim.height() * in_width;
+    const size_t copy_bytes = static_cast<size_t>(step_height) * in_width * sizeof(float);
+
+    for (unsigned int b = 0; b < batch_size; ++b) {
+      const float *in_b = in_base + b * in_feature_len;
+      for (unsigned int idx = 0; idx < split_number; ++idx) {
+        std::memcpy(out_ptrs[idx] + b * step_height * in_width,
+                    in_b + idx * channel_off, copy_bytes);
+      }
+    }
+  }
+}
+
 void SplitLayer::forwarding(RunLayerContext &context, bool training) {
+  std::chrono::system_clock::time_point start = std::chrono::system_clock::now();
   unsigned int split_number = std::get<props::SplitNumber>(split_props);
 
   Tensor &input_ = context.getInput(SINGLE_INOUT_IDX);
@@ -112,29 +180,57 @@ void SplitLayer::forwarding(RunLayerContext &context, bool training) {
   const TensorDim in_dim = input_.getDim();
   input_.reshape(input_reshape_helper);
 
+  const unsigned int batch_count = input_.batch();
+  const unsigned int in_height = input_reshape_helper.height();
+  const unsigned int out_height = output_reshape_helper.height();
+  const unsigned int in_width = input_reshape_helper.width();
+  const unsigned int out_width = output_reshape_helper.width();
+  const size_t copy_bytes =
+    static_cast<size_t>(out_height) * in_width * sizeof(float);
+  const size_t in_batch_elems = static_cast<size_t>(in_height) * in_width;
+  const size_t out_batch_elems = static_cast<size_t>(out_height) * out_width;
+  const size_t split_offset_elems = static_cast<size_t>(out_height) * in_width;
+
+  /**
+   * Gather output base pointers and reshape all outputs upfront to avoid
+   * repeated reshape calls inside the hot loop.
+   */
+  std::vector<float *> out_ptrs(split_number);
+  std::vector<TensorDim> out_dims(split_number);
   for (unsigned int idx = 0; idx < split_number; idx++) {
     Tensor &output_ = context.getOutput(idx);
-    const TensorDim out_dim = output_.getDim();
+    out_dims[idx] = output_.getDim();
     output_.reshape(output_reshape_helper);
+    out_ptrs[idx] = output_.getAddress<float>(0, 0, 0, 0);
+  }
 
-    for (unsigned int batch = 0; batch < input_.batch(); batch++) {
-      const Tensor source_tensor = Tensor::Map(
-        input_.getAddress(batch, 0, idx * output_reshape_helper.height(), 0),
-        output_reshape_helper.height() * input_reshape_helper.width() *
-          sizeof(float),
-        {1, 1, output_reshape_helper.height(), input_reshape_helper.width()});
-      Tensor dest_tensor = Tensor::Map(
-        output_.getAddress(batch, 0, 0, 0),
-        output_reshape_helper.height() * output_reshape_helper.width() *
-          sizeof(float),
-        {1, 1, output_reshape_helper.height(), output_reshape_helper.width()});
-      dest_tensor.copy(source_tensor);
+  const float *in_base = input_.getAddress<float>(0, 0, 0, 0);
+
+  /**
+   * Use direct memcpy with OpenMP parallelization instead of per-element
+   * Tensor::Map + copy. This is especially beneficial for W-direction splits
+   * where batch_count = B*C*H (very large) and each copy is small (W/n
+   * elements). The batch-major loop improves input cache locality by
+   * processing all splits for one batch before moving to the next.
+   */
+#pragma omp parallel for schedule(static)
+  for (int batch = 0; batch < static_cast<int>(batch_count); batch++) {
+    const float *in_batch = in_base + batch * in_batch_elems;
+    for (unsigned int idx = 0; idx < split_number; idx++) {
+      std::memcpy(out_ptrs[idx] + batch * out_batch_elems,
+                  in_batch + idx * split_offset_elems, copy_bytes);
     }
+  }
 
-    output_.reshape(out_dim);
+  for (unsigned int idx = 0; idx < split_number; idx++) {
+    context.getOutput(idx).reshape(out_dims[idx]);
   }
 
   input_.reshape(in_dim);
+  std::chrono::system_clock::time_point end = std::chrono::system_clock::now();
+
+  std::chrono::microseconds micro = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
+  //std::cout << "split" << micro.count() << std::endl;
 }
 
 void SplitLayer::calcDerivative(RunLayerContext &context) {
@@ -145,26 +241,33 @@ void SplitLayer::calcDerivative(RunLayerContext &context) {
   const TensorDim in_dim = input_.getDim();
   input_.reshape(input_reshape_helper);
 
+  const unsigned int batch_count = input_.batch();
+  const unsigned int in_height = input_reshape_helper.height();
+  const unsigned int out_height = output_reshape_helper.height();
+  const unsigned int in_width = input_reshape_helper.width();
+  const unsigned int out_width = output_reshape_helper.width();
+  const size_t copy_bytes =
+    static_cast<size_t>(out_height) * in_width * sizeof(float);
+  const size_t in_batch_elems = static_cast<size_t>(in_height) * in_width;
+  const size_t out_batch_elems = static_cast<size_t>(out_height) * out_width;
+  const size_t split_offset_elems = static_cast<size_t>(out_height) * in_width;
+
+  std::vector<const float *> grad_ptrs(split_number);
   for (unsigned int idx = 0; idx < split_number; idx++) {
     Tensor output_ = context.getIncomingDerivative(idx);
-    const TensorDim out_dim = output_.getDim();
     output_.reshape(output_reshape_helper);
+    grad_ptrs[idx] = output_.getAddress<float>(0, 0, 0, 0);
+  }
 
-    for (unsigned int batch = 0; batch < input_.batch(); batch++) {
-      Tensor dest_tensor = Tensor::Map(
-        input_.getAddress(batch, 0, idx * output_reshape_helper.height(), 0),
-        output_reshape_helper.height() * input_reshape_helper.width() *
-          sizeof(float),
-        {1, 1, output_reshape_helper.height(), input_reshape_helper.width()});
-      const Tensor source_tensor = Tensor::Map(
-        output_.getAddress(batch, 0, 0, 0),
-        output_reshape_helper.height() * output_reshape_helper.width() *
-          sizeof(float),
-        {1, 1, output_reshape_helper.height(), output_reshape_helper.width()});
-      dest_tensor.copy(source_tensor);
+  float *in_base = input_.getAddress<float>(0, 0, 0, 0);
+
+#pragma omp parallel for schedule(static)
+  for (int batch = 0; batch < static_cast<int>(batch_count); batch++) {
+    float *in_batch = in_base + batch * in_batch_elems;
+    for (unsigned int idx = 0; idx < split_number; idx++) {
+      std::memcpy(in_batch + idx * split_offset_elems,
+                  grad_ptrs[idx] + batch * out_batch_elems, copy_bytes);
     }
-
-    output_.reshape(out_dim);
   }
 
   input_.reshape(in_dim);

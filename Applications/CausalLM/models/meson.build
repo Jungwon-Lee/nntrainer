@@ -7,6 +7,8 @@ causallm_src += [
 causallm_inc += include_directories('.')
 
 subdir('gpt_oss')
+subdir('gpt_oss_cached_slim')
+subdir('lfm2')
 subdir('qwen2')
 subdir('qwen3')
 subdir('qwen3_moe')

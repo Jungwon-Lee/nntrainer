@@ -606,7 +606,7 @@ ErrorCode getPerformanceMetrics(PerformanceMetrics *metrics) {
 
     if (causal_lm_model) {
       if (!causal_lm_model->hasRun()) {
-        return CAUSAL_LM_ERROR_INFERENCE_NOT_RUN;
+        return CAUSAL_LM_ERROR_INFERENCE_FAILED;
       }
       auto internal_metrics = causal_lm_model->getPerformanceMetrics();
       metrics->prefill_tokens = internal_metrics.prefill_tokens;
