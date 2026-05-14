@@ -1133,6 +1133,7 @@ NetworkGraph::getLayerExecutionOrders(const std::shared_ptr<LayerNode> &lnode) {
 
   for (auto &spec : out_specs) {
     const auto &name = lnode->getName() + ":" + spec.variable_spec.name;
+    std::cout << "[DEBUG] Output tensor name: " << name << std::endl;
     auto orders = tensor_manager->getTensorExecutionOrders(name, false);
     exec_orders.insert({name, orders});
     try {

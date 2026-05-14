@@ -486,6 +486,15 @@ void causal_depthwise_conv1d_k3_fp16(float *input,
                                      unsigned int B,
                                      unsigned int H,
                                      unsigned int W);
+                                     
+void causal_depthwise_conv1d_k3(const float *input, const float *packed_weight,
+  const float *bias, float *output,
+  unsigned int B, unsigned int H, unsigned int W);
+
+void causal_depthwise_conv1d_k3_decode(const float *x_cur,
+         const float *packed_weight, float *state,
+         float *y_cur, unsigned int W);
+
 /**
  * @brief Initialization of ggml backend
  */
@@ -554,6 +563,17 @@ void tanh_gelu(const unsigned int N, const float *X, float *Y);
  * @param Y float * for Vector Y (output)
  */
 void tanh_gelu_v2(const unsigned int N, const float *X, float *Y);
+
+/**
+ * @brief tanh_gelu function
+ * Y = 0.5 * X * (1 + tanh(sqrt(2/pi) * (X
+ *     + 0.044715 * X^3))) with x4 loop unrolling
+ *
+ * @param N number of elements in X
+ * @param X float * for Vector X (input)
+ * @param Y float * for Vector Y (output)
+ */
+void gelu_v2(const unsigned int N, const float *X, float *Y);
 
 /**
  * @brief tanh_gelu function with neon but as

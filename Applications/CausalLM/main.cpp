@@ -34,6 +34,7 @@
 #include "gemma3_causallm.h"
 #include "gptoss_cached_slim_causallm.h"
 #include "gptoss_causallm.h"
+#include "lfm2_causallm.h"
 #include "qwen2_causallm.h"
 #include "qwen2_embedding.h"
 #include "qwen3_cached_slim_moe_causallm.h"
@@ -197,6 +198,11 @@ int main(int argc, char *argv[]) {
       return std::make_unique<causallm::EmbeddingGemma>(cfg, generation_cfg,
                                                         nntr_cfg);
     });
+  causallm::Factory::Instance().registerModel(
+    "Lfm2ForCausalLM", [](json cfg, json generation_cfg, json nntr_cfg) {
+      return std::make_unique<causallm::Lfm2CausalLM>(cfg, generation_cfg,
+                                                      nntr_cfg);
+    });
 
   // Validate arguments
   if (argc < 2) {
@@ -263,10 +269,15 @@ int main(int argc, char *argv[]) {
         input_text = nntr_cfg["sample_input"].get<std::string>();
       }
     }
-
+    std::cout << "0000" << "\n";
     auto model = causallm::Factory::Instance().create(architecture, cfg,
                                                       generation_cfg, nntr_cfg);
+    if (!model) {
+      throw std::runtime_error("Unsupported model architecture: " + architecture);
+    }
+    std::cout << "1111" << "\n";
     model->initialize();
+    std::cout << "2222" << "\n";
     model->load_weight(weight_file);
 
     bool do_sample = generation_cfg.value("do_sample", false);

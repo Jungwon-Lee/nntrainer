@@ -112,6 +112,28 @@ void transpose_matrix(const unsigned int M, const unsigned int N,
 void swiglu(const unsigned int N, float *X, const float *Y, const float *Z);
 
 /**
+ * @brief swiglu function with AVX : X = (Y / (1 + exp( -Y ))) * Z
+ *
+ * @param N number of elements in X
+ * @param X float * for Vector X
+ * @param Y float * for Vector Y
+ * @param Z float * for Vector Z
+ */
+void tanh_gelu_v2(const unsigned int N, const float *X, float *Y);
+
+/**
+ * @brief swiglu function with AVX : X = (Y / (1 + exp( -Y ))) * Z
+ *
+ * @param N number of elements in X
+ * @param X float * for Vector X
+ * @param Y float * for Vector Y
+ * @param Z float * for Vector Z
+ */
+void gelu_v2(const unsigned int N, const float *X, float *Y);
+
+
+
+/**
  * @brief swiglu function with alpha and AVX : X = (Y / (1 + exp(- alpha * Y)))
  * * Z
  * @param N number of elements in X
@@ -172,6 +194,31 @@ void causal_depthwise_conv1d_k3_fp16(float *input,
                                      unsigned int B,
                                      unsigned int H,
                                      unsigned int W);
+
+/**
+ * @brief Causal depthwise conv1d, kernel-size 3, fp32 prefill.
+ *        packed_weight layout: [w0|w1|w2] each W floats.
+ *        bias may be nullptr.
+ */
+void causal_depthwise_conv1d_k3(const float *input,
+    const float *packed_weight,
+    const float *bias,
+    float *output,
+    unsigned int B,
+    unsigned int H,
+    unsigned int W);
+
+/**
+* @brief Single-token decode step for causal depthwise conv1d, fp32.
+*        packed_weight: [w0|w1|w2] each W floats.
+*        state [2*W]: state[0..W-1]=x_{t-2}, state[W..2W-1]=x_{t-1}
+*                     updated in-place: s0<-s1, s1<-x_cur.
+*/
+void causal_depthwise_conv1d_k3_decode(const float *x_cur,
+          const float *packed_weight,
+          float *state,
+          float *y_cur,
+          unsigned int W);
 /**
  * @brief Multihead softmax, exp(x_i) / sum(exp(x_i))
  * @param[in/out] qk_out float* input/output values

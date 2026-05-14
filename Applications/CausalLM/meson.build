@@ -29,7 +29,8 @@ causallm_layer_dependencies += [
     causallm_qkv_layer_dep,
     causallm_embedding_pooling_layer_dep,
     causallm_embedding_normalize_layer_dep,
-    causallm_causal_conv1d_dep,
+    causallm_causal_conv1d_layer_dep,
+    causallm_custom_multiply_layer_dep,
 ]
 
 subdir('models')

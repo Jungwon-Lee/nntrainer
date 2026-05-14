@@ -301,7 +301,11 @@ void tanh_gelu(const unsigned int N, const float *X, float *Y) {
 }
 
 void tanh_gelu_v2(const unsigned int N, const float *X, float *Y) {
-  __fallback_tanh_gelu(N, X, Y);
+  nntrainer::avx2::tanh_gelu_v2(N, X, Y);
+}
+
+void gelu_v2(const unsigned int N, const float *X, float *Y) {
+  nntrainer::avx2::gelu_v2(N, X, Y);
 }
 
 void tanh_gelu_mul(const unsigned int N, float *X, float *Y, float *Z) {
@@ -463,6 +467,21 @@ void causal_depthwise_conv1d_k3_fp16(float *input,
                                      unsigned int W){
   nntrainer::avx2::causal_depthwise_conv1d_k3_fp16(
     input, packed_weight, output, B, H, W);
+}
+
+void causal_depthwise_conv1d_k3(const float *input, const float *packed_weight,
+  const float *bias, float *output,
+  unsigned int B, unsigned int H,
+  unsigned int W) {
+nntrainer::avx2::causal_depthwise_conv1d_k3(input, packed_weight, bias,
+                output, B, H, W);
+}
+
+void causal_depthwise_conv1d_k3_decode(const float *x_cur,
+         const float *packed_weight, float *state,
+         float *y_cur, unsigned int W) {
+nntrainer::avx2::causal_depthwise_conv1d_k3_decode(x_cur, packed_weight,
+                       state, y_cur, W);
 }
 
 void compute_rotary_emb_value(unsigned int width, unsigned int dim,
