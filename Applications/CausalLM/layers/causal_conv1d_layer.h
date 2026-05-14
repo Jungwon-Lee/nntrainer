@@ -12,7 +12,12 @@
  * Input/output tensor layout: [B, 1, T, W]
  *   B = batch, T = sequence length (height), W = features/channels (width)
  *
- * Weight layout: [1, 1, KERNEL_SIZE, W] FP32
+ * Weight file layout: [W, KERNEL_SIZE] FP32, matching HuggingFace Conv1d
+ *   position 0: applied to x_{t-2}
+ *   position 1: applied to x_{t-1}
+ *   position 2: applied to the current token x_t
+ *
+ * Runtime kernel layout: [KERNEL_SIZE, W], repacked as:
  *   position 0 (w0): applied to the current token x_t
  *   position 1 (w1): applied to x_{t-1}
  *   position 2 (w2): applied to x_{t-2}
@@ -86,7 +91,7 @@ private:
   static constexpr size_t SINGLE_INOUT_IDX = 0;
 
   enum WeightIdx { weight = 0, NUM_WEIGHTS };
-  enum TensorIdx { conv_state = 0, NUM_TENSORS };
+  enum TensorIdx { conv_state = 0, packed_weight, NUM_TENSORS };
 
   std::array<unsigned int, NUM_WEIGHTS> weight_idx;
   std::array<unsigned int, NUM_TENSORS> tensor_idx;

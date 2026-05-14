@@ -108,6 +108,7 @@ public:
   unsigned int CONV_DIM_OUT;   ///< Conv output dimension
   unsigned int CONV_L_CACHE;   ///< Conv cache length
   bool CONV_BIAS;              ///< Whether conv has bias
+  std::vector<std::string> LAYER_TYPES; ///< Per-layer operator type
 };
 
 } // namespace causallm
