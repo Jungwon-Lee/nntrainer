@@ -53,7 +53,7 @@ static bool g_use_chat_template = false;
 static bool g_verbose = false;
 static std::string g_last_output = "";
 static double g_initialization_duration_ms = 0.0;
-// static causallm::ChatTemplate g_chat_template;
+static std::unique_ptr<causallm::ChatTemplate> g_chat_template;
 
 static std::map<std::string, std::string> g_model_path_map = {
   {"QWEN3-0.6B", "qwen3-0.6b"},
@@ -147,9 +147,16 @@ static const char *get_model_name_from_type(ModelType type) {
 static std::string apply_chat_template(const std::string &architecture,
                                        const std::string &input) {
   // Use dynamic chat template from tokenizer_config.json if available
-  // if (g_chat_template.isAvailable()) {
-  //   return g_chat_template.apply(input);
-  // }
+  if (g_chat_template) {
+    try {
+      nlohmann::json request = nlohmann::json::array(
+        {{{"role", "user"}, {"content", input}}});
+      return g_chat_template->apply(request);
+    } catch (const std::exception &e) {
+      std::cerr << "[Warning] Failed to apply chat template: " << e.what()
+                << ". Falling back to hardcoded templates." << std::endl;
+    }
+  }
 
   // Fallback: hardcoded per-architecture templates
   if (architecture == "LlamaForCausalLM") {
@@ -480,25 +487,24 @@ ErrorCode loadModel(BackendType compute, ModelType modeltype,
       }
     }
 
-    // Load chat template from tokenizer_config.json if available
-    // std::string tc_path = model_dir_path + "/tokenizer_config.json";
-    // if (check_file_exists(tc_path)) {
-    //   g_chat_template = causallm::ChatTemplate::fromFile(tc_path);
-    //   if (g_chat_template.isAvailable()) {
-    //     std::cout << "[Info] Chat template loaded from tokenizer_config.json"
-    //               << std::endl;
-    //   } else {
-    //     std::cerr
-    //       << "[Warning] tokenizer_config.json found but chat template could "
-    //          "not be loaded. Falling back to hardcoded templates."
-    //       << std::endl;
-    //   }
-    // } else {
-    //   g_chat_template = causallm::ChatTemplate();
-    //   std::cerr << "[Warning] tokenizer_config.json not found in "
-    //             << model_dir_path << ". Using hardcoded chat templates."
-    //             << std::endl;
-    // }
+    // Load chat template from model directory if available
+    if (causallm::ChatTemplate::Exists(model_dir_path)) {
+      try {
+        g_chat_template =
+          std::make_unique<causallm::ChatTemplate>(
+            causallm::ChatTemplate::Load(model_dir_path));
+        std::cout << "[Info] Chat template loaded from "
+                  << g_chat_template->sourcePath() << std::endl;
+      } catch (const std::exception &e) {
+        g_chat_template.reset();
+        std::cerr << "[Warning] Failed to load chat template: " << e.what()
+                  << ". Falling back to hardcoded templates." << std::endl;
+      }
+    } else {
+      g_chat_template.reset();
+      std::cerr << "[Warning] No chat template found in " << model_dir_path
+                << ". Using hardcoded templates." << std::endl;
+    }
 
     // Construct weight file path
     std::string weight_file_name;
