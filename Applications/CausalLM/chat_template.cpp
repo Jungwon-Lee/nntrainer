@@ -98,11 +98,6 @@ std::string findToken(const nlohmann::json &tokenizer_config,
   return "";
 }
 
-bool hasArrayItems(const nlohmann::json &value, const std::string &key) {
-  return value.is_object() && value.contains(key) && value[key].is_array() &&
-         !value[key].empty();
-}
-
 std::string textFromContentParts(const nlohmann::json &content) {
   std::string text;
   for (const auto &part : content) {
@@ -151,88 +146,88 @@ bool shouldAddGenerationPrompt(const OrderedJson &messages,
 
 std::string functionGemmaTemplate() {
   return R"CHAT_TEMPLATE({%- macro escaped(value) -%}<escape>{{ value }}<escape>{%- endmacro -%}
-{%- macro format_properties(properties) -%}
-{%- for key, val in properties.items() -%}
-{{- "," if not loop.first else "" -}}{{ key }}:{
-{%- set ns = namespace(first=true) -%}
-{%- if val.description -%}
-{{- "," if not ns.first else "" -}}description:{{ escaped(val.description) }}{%- set ns.first = false -%}
-{%- endif -%}
-{%- if val.type -%}
-{{- "," if not ns.first else "" -}}type:{{ escaped(val.type | upper) }}{%- set ns.first = false -%}
-{%- endif -%}
-{%- if val.properties -%}
-{{- "," if not ns.first else "" -}}properties:{ {{- format_properties(val.properties) -}} }{%- set ns.first = false -%}
-{%- endif -%}
-{%- if val.required -%}
-{{- "," if not ns.first else "" -}}required:[
-{%- for req in val.required -%}
-{{- "," if not loop.first else "" -}}{{ escaped(req) }}
-{%- endfor -%}
-]{%- set ns.first = false -%}
-{%- endif -%}
-}
-{%- endfor -%}
-{%- endmacro -%}
-{%- macro format_function_declaration(tool) -%}
-{%- set func = tool.function -%}
-declaration:{{ func.name }},description:{{ escaped(func.description) }},parameters:{
-{%- set params = func.parameters -%}
-{%- set ns = namespace(first=true) -%}
-{%- if params.properties -%}
-properties:{ {{- format_properties(params.properties) -}} }{%- set ns.first = false -%}
-{%- endif -%}
-{%- if params.required -%}
-{{- "," if not ns.first else "" -}}required:[
-{%- for req in params.required -%}
-{{- "," if not loop.first else "" -}}{{ escaped(req) }}
-{%- endfor -%}
-]{%- set ns.first = false -%}
-{%- endif -%}
-{%- if params.type -%}
-{{- "," if not ns.first else "" -}}type:{{ escaped(params.type | upper) }}
-{%- endif -%}
-}
-{%- endmacro -%}
-{{- bos_token -}}
-{%- set ns = namespace(tools_inserted=false) -%}
-{%- for message in messages -%}
-{%- set role = "model" if message.role == "assistant" else message.role -%}
-{%- if role != "tool" -%}
-{{- "<start_of_turn>" + role + "\n" -}}
-{%- endif -%}
-{%- if role != "tool" and message.content is string -%}
-{{- message.content -}}
-{%- endif -%}
-{%- if not ns.tools_inserted and tools and (role == "developer" or role == "system") -%}
-{%- for tool in tools -%}
-{{- "<start_function_declaration>" -}}{{ format_function_declaration(tool) }}{{- "<end_function_declaration>" -}}
-{%- endfor -%}
-{%- set ns.tools_inserted = true -%}
-{%- endif -%}
-{%- if message.tool_calls -%}
-{%- for tool_call in message.tool_calls -%}
-{%- set func = tool_call.function -%}
-{{- "<start_function_call>call:" + func.name + "{" -}}
-{%- if func.arguments is string -%}
-{{- func.arguments -}}
-{%- elif func.arguments -%}
-{%- for key, val in func.arguments.items() -%}
-{{- "," if not loop.first else "" -}}{{ key }}:{%- if val is string -%}{{ val }}{%- else -%}{{ val | tojson }}{%- endif -%}
-{%- endfor -%}
-{%- endif -%}
-{{- "}<end_function_call>" -}}
-{%- endfor -%}
-{%- endif -%}
-{%- if role != "tool" -%}
-{{- "<end_of_turn>\n" -}}
-{%- elif message.content -%}
-{{- "<start_function_response>response:" + message.name + "{value:" -}}
-{%- if message.content is string -%}{{ message.content }}{%- else -%}{{ message.content | tojson }}{%- endif -%}
-{{- "}<end_function_response>" -}}
-{%- endif -%}
-{%- endfor -%}
-{{- "<start_of_turn>model\n" -}})CHAT_TEMPLATE";
+ {%- macro format_properties(properties) -%}
+ {%- for key, val in properties.items() -%}
+ {{- "," if not loop.first else "" -}}{{ key }}:{
+ {%- set ns = namespace(first=true) -%}
+ {%- if val.description -%}
+ {{- "," if not ns.first else "" -}}description:{{ escaped(val.description) }}{%- set ns.first = false -%}
+ {%- endif -%}
+ {%- if val.type -%}
+ {{- "," if not ns.first else "" -}}type:{{ escaped(val.type | upper) }}{%- set ns.first = false -%}
+ {%- endif -%}
+ {%- if val.properties -%}
+ {{- "," if not ns.first else "" -}}properties:{ {{- format_properties(val.properties) -}} }{%- set ns.first = false -%}
+ {%- endif -%}
+ {%- if val.required -%}
+ {{- "," if not ns.first else "" -}}required:[
+ {%- for req in val.required -%}
+ {{- "," if not loop.first else "" -}}{{ escaped(req) }}
+ {%- endfor -%}
+ ]{%- set ns.first = false -%}
+ {%- endif -%}
+ }
+ {%- endfor -%}
+ {%- endmacro -%}
+ {%- macro format_function_declaration(tool) -%}
+ {%- set func = tool.function -%}
+ declaration:{{ func.name }},description:{{ escaped(func.description) }},parameters:{
+ {%- set params = func.parameters -%}
+ {%- set ns = namespace(first=true) -%}
+ {%- if params.properties -%}
+ properties:{ {{- format_properties(params.properties) -}} }{%- set ns.first = false -%}
+ {%- endif -%}
+ {%- if params.required -%}
+ {{- "," if not ns.first else "" -}}required:[
+ {%- for req in params.required -%}
+ {{- "," if not loop.first else "" -}}{{ escaped(req) }}
+ {%- endfor -%}
+ ]{%- set ns.first = false -%}
+ {%- endif -%}
+ {%- if params.type -%}
+ {{- "," if not ns.first else "" -}}type:{{ escaped(params.type | upper) }}
+ {%- endif -%}
+ }
+ {%- endmacro -%}
+ {{- bos_token -}}
+ {%- set ns = namespace(tools_inserted=false) -%}
+ {%- for message in messages -%}
+ {%- set role = "model" if message.role == "assistant" else message.role -%}
+ {%- if role != "tool" -%}
+ {{- "<start_of_turn>" + role + "\n" -}}
+ {%- endif -%}
+ {%- if role != "tool" and message.content is string -%}
+ {{- message.content -}}
+ {%- endif -%}
+ {%- if not ns.tools_inserted and tools and (role == "developer" or role == "system") -%}
+ {%- for tool in tools -%}
+ {{- "<start_function_declaration>" -}}{{ format_function_declaration(tool) }}{{- "<end_function_declaration>" -}}
+ {%- endfor -%}
+ {%- set ns.tools_inserted = true -%}
+ {%- endif -%}
+ {%- if message.tool_calls -%}
+ {%- for tool_call in message.tool_calls -%}
+ {%- set func = tool_call.function -%}
+ {{- "<start_function_call>call:" + func.name + "{" -}}
+ {%- if func.arguments is string -%}
+ {{- func.arguments -}}
+ {%- elif func.arguments -%}
+ {%- for key, val in func.arguments.items() -%}
+ {{- "," if not loop.first else "" -}}{{ key }}:{%- if val is string -%}{{ val }}{%- else -%}{{ val | tojson }}{%- endif -%}
+ {%- endfor -%}
+ {%- endif -%}
+ {{- "}<end_function_call>" -}}
+ {%- endfor -%}
+ {%- endif -%}
+ {%- if role != "tool" -%}
+ {{- "<end_of_turn>\n" -}}
+ {%- elif message.content -%}
+ {{- "<start_function_response>response:" + message.name + "{value:" -}}
+ {%- if message.content is string -%}{{ message.content }}{%- else -%}{{ message.content | tojson }}{%- endif -%}
+ {{- "}<end_function_response>" -}}
+ {%- endif -%}
+ {%- endfor -%}
+ {{- "<start_of_turn>model\n" -}})CHAT_TEMPLATE";
 }
 
 } // namespace
@@ -249,12 +244,10 @@ struct ChatTemplate::Impl {
   bool apply_polyfills = true;
   Options::DeveloperRolePolicy default_developer_role_policy =
     Options::DeveloperRolePolicy::MergeIntoSystem;
-  mutable std::unordered_map<std::string,
-                             std::unique_ptr<minja::chat_template>>
+  mutable std::unordered_map<std::string, std::unique_ptr<minja::chat_template>>
     renderers;
 
-  const std::string &selectTemplate(const nlohmann::json &request,
-                                    const Options &options,
+  const std::string &selectTemplate(bool has_tools, const Options &options,
                                     std::string &cache_key) const {
     if (!template_source.empty()) {
       cache_key = "__default__";
@@ -271,7 +264,7 @@ struct ChatTemplate::Impl {
       return template_map[options.template_name].get_ref<const std::string &>();
     }
 
-    if (hasArrayItems(request, "tools") && template_map.contains("tool_use") &&
+    if (has_tools && template_map.contains("tool_use") &&
         template_map["tool_use"].is_string()) {
       cache_key = "tool_use";
       return template_map["tool_use"].get_ref<const std::string &>();
@@ -349,7 +342,8 @@ struct ChatTemplate::Impl {
       if (message_json.contains("function_call") &&
           !message_json.contains("tool_calls")) {
         message["tool_calls"] = OrderedJson::array(
-          {{{"id", "function_call"}, {"type", "function"},
+          {{{"id", "function_call"},
+            {"type", "function"},
             {"function", toOrderedJson(message_json["function_call"])}}});
       }
 
@@ -380,6 +374,63 @@ struct ChatTemplate::Impl {
     return messages;
   }
 
+  OrderedJson normalizeTools(const nlohmann::json &request) const {
+    if (!request.is_object())
+      return OrderedJson::array();
+
+    const nlohmann::json *tools_json = nullptr;
+    const char *tools_field = nullptr;
+    if (request.contains("tools")) {
+      tools_json = &request["tools"];
+      tools_field = "tools";
+    } else if (request.contains("functions")) {
+      tools_json = &request["functions"];
+      tools_field = "functions";
+    }
+
+    if (tools_json == nullptr)
+      return OrderedJson::array();
+
+    if (!tools_json->is_array())
+      throw std::runtime_error(std::string("chat_input.") + tools_field +
+                               " must be an array");
+
+    OrderedJson tools = OrderedJson::array();
+    for (const auto &tool_json : *tools_json) {
+      if (!tool_json.is_object())
+        throw std::runtime_error("Each tool must be an object");
+
+      OrderedJson tool = OrderedJson::object();
+      if (tool_json.contains("function")) {
+        if (!tool_json["function"].is_object()) {
+          throw std::runtime_error(
+            "OpenAI function tools must include an object function field");
+        }
+
+        tool = toOrderedJson(tool_json);
+        if (!tool.contains("type"))
+          tool["type"] = "function";
+      } else if (tool_json.contains("name")) {
+        tool["type"] = "function";
+        tool["function"] = toOrderedJson(tool_json);
+      } else {
+        throw std::runtime_error(
+          "Function tools must be OpenAI tool objects or raw function schemas");
+      }
+
+      const auto &function = tool["function"];
+      if (!function.contains("name") || !function["name"].is_string() ||
+          function["name"].get<std::string>().empty()) {
+        throw std::runtime_error(
+          "Function tools must include a non-empty function name");
+      }
+
+      tools.push_back(std::move(tool));
+    }
+
+    return tools;
+  }
+
   OrderedJson buildExtraContext(const nlohmann::json &request) const {
     OrderedJson extra_context = OrderedJson::object();
 
@@ -400,9 +451,8 @@ struct ChatTemplate::Impl {
     if (request.is_object()) {
       for (auto it = request.begin(); it != request.end(); ++it) {
         const std::string &key = it.key();
-        if (key == "messages" || key == "tools" ||
-            key == "add_generation_prompt" ||
-            key == "continue_final_message") {
+        if (key == "messages" || key == "tools" || key == "functions" ||
+            key == "add_generation_prompt" || key == "continue_final_message") {
           continue;
         }
         extra_context[key] = toOrderedJson(it.value());
@@ -414,8 +464,7 @@ struct ChatTemplate::Impl {
 };
 
 ChatTemplate::ChatTemplate(std::unique_ptr<Impl> impl) :
-  impl_(std::move(impl)) {
-}
+  impl_(std::move(impl)) {}
 
 ChatTemplate::ChatTemplate(ChatTemplate &&) noexcept = default;
 
@@ -520,10 +569,7 @@ std::string ChatTemplate::apply(const nlohmann::json &request,
   }
 
   OrderedJson messages = impl_->normalizeMessages(request, options);
-  OrderedJson tools =
-    request.is_object() && request.contains("tools")
-      ? toOrderedJson(request["tools"])
-      : OrderedJson::array();
+  OrderedJson tools = impl_->normalizeTools(request);
 
   minja::chat_template_inputs inputs;
   inputs.messages = messages;
@@ -534,7 +580,7 @@ std::string ChatTemplate::apply(const nlohmann::json &request,
 
   std::string cache_key;
   const std::string &source =
-    impl_->selectTemplate(request, options, cache_key);
+    impl_->selectTemplate(!tools.empty(), options, cache_key);
   minja::chat_template_options render_options;
   render_options.apply_polyfills = impl_->apply_polyfills;
   return impl_->rendererFor(cache_key, source).apply(inputs, render_options);
