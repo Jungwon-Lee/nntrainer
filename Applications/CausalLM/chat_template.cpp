@@ -144,92 +144,6 @@ bool shouldAddGenerationPrompt(const OrderedJson &messages,
   return last["role"].get<std::string>() != "assistant";
 }
 
-std::string functionGemmaTemplate() {
-  return R"CHAT_TEMPLATE({%- macro escaped(value) -%}<escape>{{ value }}<escape>{%- endmacro -%}
- {%- macro format_properties(properties) -%}
- {%- for key, val in properties.items() -%}
- {{- "," if not loop.first else "" -}}{{ key }}:{
- {%- set ns = namespace(first=true) -%}
- {%- if val.description -%}
- {{- "," if not ns.first else "" -}}description:{{ escaped(val.description) }}{%- set ns.first = false -%}
- {%- endif -%}
- {%- if val.type -%}
- {{- "," if not ns.first else "" -}}type:{{ escaped(val.type | upper) }}{%- set ns.first = false -%}
- {%- endif -%}
- {%- if val.properties -%}
- {{- "," if not ns.first else "" -}}properties:{ {{- format_properties(val.properties) -}} }{%- set ns.first = false -%}
- {%- endif -%}
- {%- if val.required -%}
- {{- "," if not ns.first else "" -}}required:[
- {%- for req in val.required -%}
- {{- "," if not loop.first else "" -}}{{ escaped(req) }}
- {%- endfor -%}
- ]{%- set ns.first = false -%}
- {%- endif -%}
- }
- {%- endfor -%}
- {%- endmacro -%}
- {%- macro format_function_declaration(tool) -%}
- {%- set func = tool.function -%}
- declaration:{{ func.name }},description:{{ escaped(func.description) }},parameters:{
- {%- set params = func.parameters -%}
- {%- set ns = namespace(first=true) -%}
- {%- if params.properties -%}
- properties:{ {{- format_properties(params.properties) -}} }{%- set ns.first = false -%}
- {%- endif -%}
- {%- if params.required -%}
- {{- "," if not ns.first else "" -}}required:[
- {%- for req in params.required -%}
- {{- "," if not loop.first else "" -}}{{ escaped(req) }}
- {%- endfor -%}
- ]{%- set ns.first = false -%}
- {%- endif -%}
- {%- if params.type -%}
- {{- "," if not ns.first else "" -}}type:{{ escaped(params.type | upper) }}
- {%- endif -%}
- }
- {%- endmacro -%}
- {{- bos_token -}}
- {%- set ns = namespace(tools_inserted=false) -%}
- {%- for message in messages -%}
- {%- set role = "model" if message.role == "assistant" else message.role -%}
- {%- if role != "tool" -%}
- {{- "<start_of_turn>" + role + "\n" -}}
- {%- endif -%}
- {%- if role != "tool" and message.content is string -%}
- {{- message.content -}}
- {%- endif -%}
- {%- if not ns.tools_inserted and tools and (role == "developer" or role == "system") -%}
- {%- for tool in tools -%}
- {{- "<start_function_declaration>" -}}{{ format_function_declaration(tool) }}{{- "<end_function_declaration>" -}}
- {%- endfor -%}
- {%- set ns.tools_inserted = true -%}
- {%- endif -%}
- {%- if message.tool_calls -%}
- {%- for tool_call in message.tool_calls -%}
- {%- set func = tool_call.function -%}
- {{- "<start_function_call>call:" + func.name + "{" -}}
- {%- if func.arguments is string -%}
- {{- func.arguments -}}
- {%- elif func.arguments -%}
- {%- for key, val in func.arguments.items() -%}
- {{- "," if not loop.first else "" -}}{{ key }}:{%- if val is string -%}{{ val }}{%- else -%}{{ val | tojson }}{%- endif -%}
- {%- endfor -%}
- {%- endif -%}
- {{- "}<end_function_call>" -}}
- {%- endfor -%}
- {%- endif -%}
- {%- if role != "tool" -%}
- {{- "<end_of_turn>\n" -}}
- {%- elif message.content -%}
- {{- "<start_function_response>response:" + message.name + "{value:" -}}
- {%- if message.content is string -%}{{ message.content }}{%- else -%}{{ message.content | tojson }}{%- endif -%}
- {{- "}<end_function_response>" -}}
- {%- endif -%}
- {%- endfor -%}
- {{- "<start_of_turn>model\n" -}})CHAT_TEMPLATE";
-}
-
 } // namespace
 
 struct ChatTemplate::Impl {
@@ -530,24 +444,6 @@ ChatTemplate ChatTemplate::Load(const std::string &model_path) {
   } else {
     throw std::runtime_error("tokenizer_config.chat_template must be string or "
                              "object");
-  }
-
-  return ChatTemplate(std::move(impl));
-}
-
-ChatTemplate ChatTemplate::LoadBuiltin(Builtin builtin) {
-  auto impl = std::unique_ptr<Impl>(new Impl());
-
-  switch (builtin) {
-  case Builtin::FunctionGemma:
-    impl->source_path = "builtin:function_gemma";
-    impl->template_source = functionGemmaTemplate();
-    impl->bos_token = "<bos>";
-    impl->eos_token = "<eos>";
-    impl->apply_polyfills = false;
-    impl->default_developer_role_policy =
-      Options::DeveloperRolePolicy::Preserve;
-    break;
   }
 
   return ChatTemplate(std::move(impl));

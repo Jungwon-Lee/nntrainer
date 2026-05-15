@@ -21,8 +21,6 @@ namespace causallm {
 
 class ChatTemplate {
 public:
-  enum class Builtin { FunctionGemma };
-
   struct Options {
     enum class GenerationPromptMode { Auto, Always, Never };
     enum class DeveloperRolePolicy { Auto, Preserve, MergeIntoSystem };
@@ -35,7 +33,6 @@ public:
 
   static bool Exists(const std::string &model_path);
   static ChatTemplate Load(const std::string &model_path);
-  static ChatTemplate LoadBuiltin(Builtin builtin);
 
   ChatTemplate(ChatTemplate &&) noexcept;
   ChatTemplate &operator=(ChatTemplate &&) noexcept;

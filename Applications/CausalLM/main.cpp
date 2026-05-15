@@ -346,8 +346,6 @@ int main(int argc, char *argv[]) {
     if (causallm::ChatTemplate::Exists(model_path)) {
       chat_template.emplace(causallm::ChatTemplate::Load(model_path));
     }
-    // chat_template.emplace(quick_dot_ai::ChatTemplate::LoadBuiltin(
-    //   quick_dot_ai::ChatTemplate::Builtin::FunctionGemma));
 
     // Determine input text
     if (argc >= 3) {
