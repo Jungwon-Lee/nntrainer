@@ -40,6 +40,7 @@
 #include <limits.h>
 #include <util_simd.h>
 
+#include <kv_cache_optimizer.h>
 #include <utility>
 
 namespace causallm {
@@ -327,6 +328,8 @@ private:
 
   float epsilon;            /** to avoid overflow */
   unsigned int cache_index; /** idx of kv cache */
+  KVCacheOptimizer *kv_cache_optimizer = nullptr;
+  unsigned int kv_cache_layer_idx = 0;
 
   /**
    * @brief Whether to use externally provided cache tensors
@@ -437,6 +440,19 @@ private:
                        nntrainer::Tensor &out, unsigned int from,
                        size_t sequence_len, unsigned int num_heads,
                        unsigned int group_size, unsigned int head_dim);
+
+  void materializeRuntimeKVCache(unsigned int batch, unsigned int read_len,
+                                 nntrainer::Tensor &query_step,
+                                 nntrainer::Tensor &key_cache,
+                                 nntrainer::Tensor &value_cache);
+
+  void computeCachedAttention(nntrainer::Tensor &query_step,
+                              nntrainer::Tensor &cached_key,
+                              nntrainer::Tensor &cached_value,
+                              nntrainer::Tensor &attention_output_step,
+                              unsigned int q_from, unsigned int cache_from,
+                              unsigned int step_size, unsigned int cache_to,
+                              nntrainer::Tensor *sink_step = nullptr);
 
   void softmax_triangle(nntrainer::Tensor &qk_out, size_t row, size_t num_heads,
                         unsigned int from);

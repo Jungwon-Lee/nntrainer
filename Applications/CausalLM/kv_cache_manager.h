@@ -84,6 +84,11 @@ public:
   bool isAllocated() const;
 
   /**
+   * @brief Get active optimizer runtime.
+   */
+  KVCacheOptimizer *getOptimizer() { return optimizer_.get(); }
+
+  /**
    * @brief Get current write position in the cache
    */
   unsigned int getPosition() const { return cache_pos_; }

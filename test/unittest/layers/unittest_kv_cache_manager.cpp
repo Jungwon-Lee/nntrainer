@@ -11,10 +11,13 @@
  */
 
 #include <cstdio>
+#include <cmath>
 #include <gtest/gtest.h>
 #include <string>
+#include <vector>
 
 #include <kv_cache_manager.h>
+#include <kv_cache_optimizer.h>
 #include <tensor.h>
 #include <tensor_dim.h>
 
@@ -89,7 +92,7 @@ TEST_F(KVCacheManagerTest, unsupported_backend_errors) {
   spec.num_heads_kv = NUM_HEADS_KV;
   spec.head_dim = HEAD_DIM;
   spec.dtype = ml::train::TensorDim::DataType::FP32;
-  spec.config.backend = "int8";
+  spec.config.backend = "q4";
   spec.config.fallback = "error";
 
   causallm::KVCacheManager m;
@@ -104,13 +107,38 @@ TEST_F(KVCacheManagerTest, unsupported_backend_fallback_raw) {
   spec.num_heads_kv = NUM_HEADS_KV;
   spec.head_dim = HEAD_DIM;
   spec.dtype = ml::train::TensorDim::DataType::FP32;
-  spec.config.backend = "int8";
+  spec.config.backend = "q4";
   spec.config.fallback = "raw";
 
   causallm::KVCacheManager m;
   EXPECT_NO_THROW(m.allocate(spec));
   EXPECT_TRUE(m.isAllocated());
   EXPECT_EQ(m.getKeyCache(0).height(), MAX_SEQ_LEN);
+}
+
+TEST_F(KVCacheManagerTest, allocate_int8_runtime_backend) {
+  causallm::KVCacheSpec spec;
+  spec.num_layers = NUM_LAYERS;
+  spec.batch_size = BATCH_SIZE;
+  spec.max_seq_len = MAX_SEQ_LEN;
+  spec.num_heads_kv = NUM_HEADS_KV;
+  spec.head_dim = HEAD_DIM;
+  spec.dtype = ml::train::TensorDim::DataType::FP32;
+  spec.config.backend = "int8";
+  spec.config.materialize_dtype = "fp32";
+  spec.config.scale_granularity = "per_token_per_head";
+
+  causallm::KVCacheManager m;
+  EXPECT_NO_THROW(m.allocate(spec));
+  ASSERT_NE(m.getOptimizer(), nullptr);
+  EXPECT_TRUE(m.getOptimizer()->isRuntimeCacheEnabled());
+  EXPECT_EQ(m.getOptimizer()->getRuntimeMaterializeDataType(
+              ml::train::TensorDim::DataType::FP16),
+            ml::train::TensorDim::DataType::FP32);
+  EXPECT_EQ(m.getMaxSeqLen(), MAX_SEQ_LEN);
+  EXPECT_EQ(m.getKeyCache(0).height(), 1u);
+  EXPECT_EQ(m.getKeyCache(0).getDataType(),
+            ml::train::TensorDim::DataType::FP32);
 }
 
 TEST_F(KVCacheManagerTest, cache_tensor_dimensions) {
@@ -368,6 +396,191 @@ TEST_F(KVCacheManagerTest, typical_inference_flow) {
   EXPECT_FLOAT_EQ(kd[0], 0.0f); // l=0, b=0, i=0
   EXPECT_FLOAT_EQ(kd[1], 1.0f); // l=0, b=0, i=1
 }
+
+TEST(KVCacheInt8QuantizerTest, per_token_per_head_roundtrip) {
+  const unsigned int tokens = 2;
+  const unsigned int heads = 2;
+  const unsigned int head_dim = 4;
+  std::vector<float> input = {
+    -1.0f, -0.5f, 0.25f, 1.0f, 0.1f,  -0.2f, 0.3f, -0.4f,
+    2.0f,  -1.0f, 0.5f,  0.0f, -3.0f, 1.5f,  0.0f, 3.0f};
+
+  auto block = causallm::Int8KVCacheQuantizer::quantize(
+    input.data(), tokens, heads, head_dim, "per_token_per_head");
+
+  EXPECT_EQ(block.data.size(), input.size());
+  EXPECT_EQ(block.scales.size(), static_cast<size_t>(tokens) * heads);
+
+  std::vector<float> output(input.size());
+  causallm::Int8KVCacheQuantizer::dequantize(block, output.data());
+
+  for (unsigned int t = 0; t < tokens; ++t) {
+    for (unsigned int h = 0; h < heads; ++h) {
+      const float tolerance =
+        block.scales[static_cast<size_t>(t) * heads + h] * 0.51f;
+      const size_t begin =
+        static_cast<size_t>(t) * heads * head_dim +
+        static_cast<size_t>(h) * head_dim;
+      for (unsigned int i = 0; i < head_dim; ++i) {
+        EXPECT_LE(std::fabs(input[begin + i] - output[begin + i]), tolerance);
+      }
+    }
+  }
+}
+
+TEST(KVCacheInt8QuantizerTest, per_token_roundtrip) {
+  const unsigned int tokens = 2;
+  const unsigned int heads = 2;
+  const unsigned int head_dim = 3;
+  std::vector<float> input = {-1.0f, -0.5f, 0.0f, 0.5f, 1.0f, 1.5f,
+                              -2.0f, 0.0f,  2.0f, 4.0f, 0.5f, -0.5f};
+
+  auto block = causallm::Int8KVCacheQuantizer::quantize(
+    input.data(), tokens, heads, head_dim, "per_token");
+
+  EXPECT_EQ(block.scales.size(), tokens);
+
+  std::vector<float> output(input.size());
+  causallm::Int8KVCacheQuantizer::dequantize(block, output.data());
+
+  for (unsigned int t = 0; t < tokens; ++t) {
+    const float tolerance = block.scales[t] * 0.51f;
+    const size_t begin = static_cast<size_t>(t) * heads * head_dim;
+    for (unsigned int i = 0; i < heads * head_dim; ++i) {
+      EXPECT_LE(std::fabs(input[begin + i] - output[begin + i]), tolerance);
+    }
+  }
+}
+
+TEST(KVCacheInt8QuantizerTest, zero_range_uses_unit_scale) {
+  std::vector<float> input(8, 0.0f);
+
+  auto block = causallm::Int8KVCacheQuantizer::quantize(
+    input.data(), 1, 2, 4, "per_token_per_head");
+
+  for (float scale : block.scales)
+    EXPECT_FLOAT_EQ(scale, 1.0f);
+  for (int8_t value : block.data)
+    EXPECT_EQ(value, 0);
+}
+
+TEST(KVCacheInt8QuantizerTest, unsupported_granularity_errors) {
+  std::vector<float> input(8, 1.0f);
+  EXPECT_THROW(causallm::Int8KVCacheQuantizer::quantize(
+                 input.data(), 1, 2, 4, "per_channel"),
+               std::invalid_argument);
+}
+
+TEST(KVCacheInt8OptimizerTest, append_and_materialize_roundtrip) {
+  causallm::KVCacheSpec spec;
+  spec.num_layers = 1;
+  spec.batch_size = 1;
+  spec.max_seq_len = 4;
+  spec.num_heads_kv = 2;
+  spec.head_dim = 3;
+  spec.dtype = ml::train::TensorDim::DataType::FP32;
+  spec.config.backend = "int8";
+  spec.config.materialize_dtype = "fp32";
+  spec.config.scale_granularity = "per_token_per_head";
+
+  causallm::Int8KVCacheOptimizer optimizer;
+  optimizer.allocate(spec);
+
+  ml::train::TensorDim step_dim({1, 1, 2, 6},
+                                {ml::train::TensorDim::Format::NCHW,
+                                 ml::train::TensorDim::DataType::FP32});
+  nntrainer::Tensor key_step(step_dim, true);
+  nntrainer::Tensor value_step(step_dim, true);
+
+  float *key_data = key_step.getData<float>();
+  float *value_data = value_step.getData<float>();
+  for (unsigned int i = 0; i < 12; ++i) {
+    key_data[i] = static_cast<float>(static_cast<int>(i) - 5) * 0.25f;
+    value_data[i] = static_cast<float>(static_cast<int>(i) + 1) * -0.125f;
+  }
+
+  optimizer.appendLayerCache(0, 0, 1, key_step, value_step);
+
+  auto key_cache = optimizer.materializeKeyCache(
+    0, 0, 3, ml::train::TensorDim::DataType::FP32,
+    ml::train::TensorDim::Format::NCHW);
+  auto value_cache = optimizer.materializeValueCache(
+    0, 0, 3, ml::train::TensorDim::DataType::FP32,
+    ml::train::TensorDim::Format::NCHW);
+
+  EXPECT_EQ(key_cache.height(), 3u);
+  EXPECT_EQ(value_cache.height(), 3u);
+
+  const float *key_out = key_cache.getData<float>();
+  const float *value_out = value_cache.getData<float>();
+  for (unsigned int i = 0; i < 6; ++i) {
+    EXPECT_FLOAT_EQ(key_out[i], 0.0f);
+    EXPECT_FLOAT_EQ(value_out[i], 0.0f);
+  }
+  for (unsigned int i = 0; i < 12; ++i) {
+    EXPECT_NEAR(key_out[6 + i], key_data[i], 0.01f);
+    EXPECT_NEAR(value_out[6 + i], value_data[i], 0.01f);
+  }
+}
+
+#ifdef ENABLE_FP16
+TEST(KVCacheInt8OptimizerTest, append_fp16_and_materialize_fp16_roundtrip) {
+  causallm::KVCacheSpec spec;
+  spec.num_layers = 1;
+  spec.batch_size = 1;
+  spec.max_seq_len = 4;
+  spec.num_heads_kv = 2;
+  spec.head_dim = 3;
+  spec.dtype = ml::train::TensorDim::DataType::FP16;
+  spec.config.backend = "int8";
+  spec.config.materialize_dtype = "fp16";
+  spec.config.scale_granularity = "per_token_per_head";
+
+  causallm::Int8KVCacheOptimizer optimizer;
+  optimizer.allocate(spec);
+  EXPECT_EQ(optimizer.getRuntimeMaterializeDataType(
+              ml::train::TensorDim::DataType::FP32),
+            ml::train::TensorDim::DataType::FP16);
+
+  ml::train::TensorDim step_dim({1, 1, 2, 6},
+                                {ml::train::TensorDim::Format::NCHW,
+                                 ml::train::TensorDim::DataType::FP16});
+  nntrainer::Tensor key_step(step_dim, true);
+  nntrainer::Tensor value_step(step_dim, true);
+
+  _FP16 *key_data = key_step.getData<_FP16>();
+  _FP16 *value_data = value_step.getData<_FP16>();
+  std::vector<float> key_expected(12);
+  std::vector<float> value_expected(12);
+  for (unsigned int i = 0; i < 12; ++i) {
+    key_expected[i] = static_cast<float>(static_cast<int>(i) - 5) * 0.25f;
+    value_expected[i] = static_cast<float>(static_cast<int>(i) + 1) * -0.125f;
+    key_data[i] = static_cast<_FP16>(key_expected[i]);
+    value_data[i] = static_cast<_FP16>(value_expected[i]);
+  }
+
+  optimizer.appendLayerCache(0, 0, 1, key_step, value_step);
+
+  auto key_cache = optimizer.materializeKeyCache(
+    0, 0, 3, ml::train::TensorDim::DataType::FP16,
+    ml::train::TensorDim::Format::NCHW);
+  auto value_cache = optimizer.materializeValueCache(
+    0, 0, 3, ml::train::TensorDim::DataType::FP16,
+    ml::train::TensorDim::Format::NCHW);
+
+  const _FP16 *key_out = key_cache.getData<_FP16>();
+  const _FP16 *value_out = value_cache.getData<_FP16>();
+  for (unsigned int i = 0; i < 6; ++i) {
+    EXPECT_FLOAT_EQ(static_cast<float>(key_out[i]), 0.0f);
+    EXPECT_FLOAT_EQ(static_cast<float>(value_out[i]), 0.0f);
+  }
+  for (unsigned int i = 0; i < 12; ++i) {
+    EXPECT_NEAR(static_cast<float>(key_out[6 + i]), key_expected[i], 0.01f);
+    EXPECT_NEAR(static_cast<float>(value_out[6 + i]), value_expected[i],
+                0.01f);
+  }
+}
+#endif
 
 int main(int argc, char **argv) {
   ::testing::InitGoogleTest(&argc, argv);

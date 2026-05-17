@@ -24,6 +24,10 @@ KVCacheManager::selectOptimizer(const KVCacheSpec &spec) {
     return std::make_unique<RawKVCacheOptimizer>();
   }
 
+  if (spec.config.backend == "int8") {
+    return std::make_unique<Int8KVCacheOptimizer>();
+  }
+
   if (spec.config.fallback == "raw") {
     return std::make_unique<RawKVCacheOptimizer>();
   }

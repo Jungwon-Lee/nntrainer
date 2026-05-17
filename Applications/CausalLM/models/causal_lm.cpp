@@ -23,6 +23,7 @@
 #include <algorithm>
 #include <app_context.h>
 #include <cmath>
+#include <cstdint>
 #include <cstdlib>
 #include <engine.h>
 #include <filesystem>
@@ -166,6 +167,21 @@ void CausalLM::allocateAndBindKVCache() {
 
     kp->setData(kc.getMemoryData(), kc.getOffset(), false);
     vp->setData(vc.getMemoryData(), vc.getOffset(), false);
+  }
+
+  auto *optimizer = kv_cache.getOptimizer();
+  if (optimizer != nullptr && optimizer->isRuntimeCacheEnabled()) {
+    const auto optimizer_addr = reinterpret_cast<std::uintptr_t>(optimizer);
+    for (int i = 0; i < NUM_LAYERS; ++i) {
+      std::shared_ptr<ml::train::Layer> layer;
+      const auto layer_name = "layer" + std::to_string(i) + "_attention";
+      if (model->getLayer(layer_name.c_str(), &layer) == ML_ERROR_NONE &&
+          layer != nullptr) {
+        layer->setProperty(
+          {"kv_cache_optimizer=" + std::to_string(optimizer_addr),
+           "kv_cache_layer=" + std::to_string(i)});
+      }
+    }
   }
 }
 

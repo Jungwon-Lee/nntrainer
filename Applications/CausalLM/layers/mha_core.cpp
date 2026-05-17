@@ -676,6 +676,48 @@ void MHACoreLayer::compute_kcaches(nntrainer::Tensor &in,
   }
 }
 
+void MHACoreLayer::materializeRuntimeKVCache(unsigned int batch,
+                                             unsigned int read_len,
+                                             nntrainer::Tensor &query_step,
+                                             nntrainer::Tensor &key_cache,
+                                             nntrainer::Tensor &value_cache) {
+  const auto cache_dtype =
+    kv_cache_optimizer->getRuntimeMaterializeDataType(query_step.getDataType());
+  const auto cache_format = query_step.getDim().getFormat();
+
+  key_cache = kv_cache_optimizer->materializeKeyCache(
+    kv_cache_layer_idx, batch, read_len, cache_dtype, cache_format);
+  value_cache = kv_cache_optimizer->materializeValueCache(
+    kv_cache_layer_idx, batch, read_len, cache_dtype, cache_format);
+}
+
+void MHACoreLayer::computeCachedAttention(
+  nntrainer::Tensor &query_step, nntrainer::Tensor &cached_key,
+  nntrainer::Tensor &cached_value, nntrainer::Tensor &attention_output_step,
+  unsigned int q_from, unsigned int cache_from, unsigned int step_size,
+  unsigned int cache_to, nntrainer::Tensor *sink_step) {
+  nntrainer::Tensor qk_out(
+    1, 1,
+    is_causal ? (calc_attn_index(cache_to) - calc_attn_index(cache_from))
+              : (step_size * cache_to),
+    num_heads_Q, query_step.getTensorType());
+
+  const unsigned int gqa_size = num_heads_Q / num_heads_KV;
+
+  compute_kcaches(query_step, cached_key, qk_out, q_from, step_size,
+                  num_heads_Q, gqa_size, head_dim);
+
+  if (sink_step != nullptr) {
+    softmax_triangle(qk_out, step_size, num_heads_Q, cache_from, *sink_step);
+  } else {
+    softmax_triangle(qk_out, step_size, num_heads_Q, cache_from);
+  }
+
+  compute_fp16vcache_transposed(qk_out, cached_value, attention_output_step,
+                                cache_from, num_heads_KV, gqa_size, head_dim,
+                                cache_to);
+}
+
 void MHACoreLayer::one_batch_incremental_forwarding(
   const unsigned int batch, const unsigned int _from, const unsigned int from,
   const unsigned int to, nntrainer::Tensor &query_step,
@@ -697,6 +739,39 @@ void MHACoreLayer::one_batch_incremental_forwarding(
    */
 
   // Load Input Tensors of this batch : b_ denotes a Tensor for this batch
+  if (kv_cache_optimizer != nullptr &&
+      kv_cache_optimizer->isRuntimeCacheEnabled()) {
+    nntrainer::Tensor rotated_key_step;
+    nntrainer::Tensor *runtime_key_step = &key_step;
+
+    bool use_rope = theta > 0.0f;
+    if (use_rope) {
+      rotated_key_step = nntrainer::Tensor(key_step.getDim(), true);
+      runtime_key_step = &rotated_key_step;
+
+      apply_rotary_emb_tensor_v2(query_step, query_step, head_dim, cache_index,
+                                 true);
+      apply_rotary_emb_tensor_v2(key_step, rotated_key_step, head_dim,
+                                 cache_index, true);
+    }
+
+    unsigned int step_size = to - from;
+    unsigned int cache_from = cache_index;
+    unsigned int cache_to = cache_from + step_size;
+
+    kv_cache_optimizer->appendLayerCache(kv_cache_layer_idx, batch, cache_index,
+                                         *runtime_key_step, value_step);
+
+    nntrainer::Tensor b_cached_key;
+    nntrainer::Tensor b_cached_value;
+    materializeRuntimeKVCache(batch, cache_to, query_step, b_cached_key,
+                              b_cached_value);
+    computeCachedAttention(query_step, b_cached_key, b_cached_value,
+                           attention_output_step, cache_from, cache_from,
+                           step_size, cache_to);
+    return;
+  }
+
   nntrainer::Tensor b_cache_key_step = cache_key.getSharedDataTensor(
     cache_key_step_dim,
     batch * cache_key_dim.getFeatureLen() + cache_index * cache_key_dim.width(),
@@ -749,23 +824,9 @@ void MHACoreLayer::one_batch_incremental_forwarding(
   nntrainer::Tensor b_cached_value = cache_value.getSharedDataTensor(
     cached_value_dim, batch * cache_value_dim.getFeatureLen(), true);
 
-  // out_ stores the output of Q * K
-  nntrainer::Tensor out_(
-    1, 1,
-    is_causal ? (calc_attn_index(cache_to) - calc_attn_index(cache_from))
-              : (step_size * cache_to),
-    num_heads_Q, query_step.getTensorType());
-
-  unsigned int gqa_size = num_heads_Q / num_heads_KV;
-
-  compute_kcaches(query_step, b_cached_key, out_, cache_from,
-                  cache_to - cache_from, num_heads_Q, gqa_size, head_dim);
-
-  softmax_triangle(out_, step_size, num_heads_Q, cache_from);
-
-  compute_fp16vcache_transposed(out_, b_cached_value, attention_output_step,
-                                cache_from, num_heads_KV, gqa_size, head_dim,
-                                cache_to);
+  computeCachedAttention(query_step, b_cached_key, b_cached_value,
+                         attention_output_step, cache_from, cache_from,
+                         step_size, cache_to);
 }
 
 void MHACoreLayer::one_batch_incremental_forwarding(
@@ -794,6 +855,27 @@ void MHACoreLayer::one_batch_incremental_forwarding(
 
   /** 1. Load Input Tensors of this batch : b_ denotes a Tensor for this batch
    * **/
+  if (kv_cache_optimizer != nullptr &&
+      kv_cache_optimizer->isRuntimeCacheEnabled()) {
+    nntrainer::Tensor rotated_key_step(key_step.getDim(), true);
+
+    apply_rotary_emb_tensor_v2(query_step, query_step, head_dim, _from, true);
+    apply_rotary_emb_tensor_v2(key_step, rotated_key_step, head_dim, _from,
+                               true);
+
+    kv_cache_optimizer->appendLayerCache(kv_cache_layer_idx, batch, from,
+                                         rotated_key_step, value_step);
+
+    nntrainer::Tensor b_cached_key;
+    nntrainer::Tensor b_cached_value;
+    materializeRuntimeKVCache(batch, to, query_step, b_cached_key,
+                              b_cached_value);
+    computeCachedAttention(query_step, b_cached_key, b_cached_value,
+                           attention_output_step, _from, from, to - from, to,
+                           &sink_step);
+    return;
+  }
+
   nntrainer::Tensor b_cache_key_step = cache_key.getSharedDataTensor(
     cache_key_step_dim,
     batch * cache_key_dim.getFeatureLen() + from * cache_key_dim.width(), true);
@@ -827,22 +909,9 @@ void MHACoreLayer::one_batch_incremental_forwarding(
   nntrainer::Tensor b_cached_value = cache_value.getSharedDataTensor(
     cached_value_dim, batch * cache_value_dim.getFeatureLen(), true);
 
-  nntrainer::Tensor out_(
-    1, 1,
-    is_causal
-      ? (((to - from) == 1) ? to : calc_attn_index(to) - calc_attn_index(from))
-      : ((to - from) * to),
-    num_heads_Q, query_step.getTensorType());
-
-  unsigned int gqa_size = num_heads_Q / num_heads_KV;
-
-  compute_kcaches(query_step, b_cached_key, out_, _from, to - from, num_heads_Q,
-                  gqa_size, head_dim);
-
-  softmax_triangle(out_, to - from, num_heads_Q, from, sink_step);
-
-  compute_fp16vcache_transposed(out_, b_cached_value, attention_output_step,
-                                from, num_heads_KV, gqa_size, head_dim, to);
+  computeCachedAttention(query_step, b_cached_key, b_cached_value,
+                         attention_output_step, _from, from, to - from, to,
+                         &sink_step);
 }
 
 /************************************************************** */
@@ -1504,6 +1573,15 @@ void MHACoreLayer::setProperty(const std::vector<std::string> &values) {
     if (nntrainer::getKeyValue(value, key, parsed_value) == ML_ERROR_NONE &&
         key == "cache_index") {
       setCacheIndex(static_cast<unsigned int>(std::stoul(parsed_value)));
+    } else if (nntrainer::getKeyValue(value, key, parsed_value) ==
+                 ML_ERROR_NONE &&
+               key == "kv_cache_optimizer") {
+      kv_cache_optimizer = reinterpret_cast<KVCacheOptimizer *>(
+        static_cast<std::uintptr_t>(std::stoull(parsed_value)));
+    } else if (nntrainer::getKeyValue(value, key, parsed_value) ==
+                 ML_ERROR_NONE &&
+               key == "kv_cache_layer") {
+      kv_cache_layer_idx = static_cast<unsigned int>(std::stoul(parsed_value));
     } else {
       props.push_back(value);
     }
