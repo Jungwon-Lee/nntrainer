@@ -216,10 +216,15 @@ void SentenceTransformer::allocateAndBindKVCache() {
 #else
     const auto cache_dtype = ml::train::TensorDim::DataType::UINT16;
 #endif
-    kv_cache.allocate(static_cast<unsigned int>(NUM_LAYERS), BATCH_SIZE,
-                      static_cast<unsigned int>(MAX_SEQ_LEN),
-                      static_cast<unsigned int>(NUM_KEY_VALUE_HEADS),
-                      static_cast<unsigned int>(HEAD_DIM), cache_dtype);
+    KVCacheSpec spec;
+    spec.num_layers = static_cast<unsigned int>(NUM_LAYERS);
+    spec.batch_size = BATCH_SIZE;
+    spec.max_seq_len = static_cast<unsigned int>(MAX_SEQ_LEN);
+    spec.num_heads_kv = static_cast<unsigned int>(NUM_KEY_VALUE_HEADS);
+    spec.head_dim = static_cast<unsigned int>(HEAD_DIM);
+    spec.dtype = cache_dtype;
+    spec.config = KV_CACHE_CONFIG;
+    kv_cache.allocate(spec);
   }
 
   for (int i = 0; i < NUM_LAYERS; ++i) {

@@ -46,6 +46,7 @@
 #include "json.hpp"
 #include "performance_metrics.h"
 #include <fstream>
+#include <kv_cache_optimizer.h>
 #include <tokenizers_c.h>
 #include <tokenizers_cpp.h>
 
@@ -207,6 +208,7 @@ protected:
   std::string MODEL_TENSOR_TYPE;
   std::string EMBEDDING_DTYPE; /** embedding dtype */
   std::string FC_LAYER_DTYPE;  /** custom_fc_lora */
+  KVCacheConfig KV_CACHE_CONFIG;
 
   unsigned int SLIDING_WINDOW = UINT_MAX;
   unsigned int SLIDING_WINDOW_PATTERN = 5;

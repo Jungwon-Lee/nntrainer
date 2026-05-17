@@ -457,6 +457,25 @@ ErrorCode loadModel(BackendType compute, ModelType modeltype,
       if (strlen(rc.lmhead_dtype) > 0) {
         nntr_cfg["lmhead_dtype"] = std::string(rc.lmhead_dtype);
       }
+      if (strlen(rc.kv_cache_backend) > 0) {
+        nntr_cfg["kv_cache"]["backend"] =
+          std::string(rc.kv_cache_backend);
+      }
+      if (strlen(rc.kv_cache_format) > 0) {
+        nntr_cfg["kv_cache"]["format"] = std::string(rc.kv_cache_format);
+      }
+      if (strlen(rc.kv_cache_materialize_dtype) > 0) {
+        nntr_cfg["kv_cache"]["materialize_dtype"] =
+          std::string(rc.kv_cache_materialize_dtype);
+      }
+      if (strlen(rc.kv_cache_scale_granularity) > 0) {
+        nntr_cfg["kv_cache"]["scale_granularity"] =
+          std::string(rc.kv_cache_scale_granularity);
+      }
+      if (strlen(rc.kv_cache_fallback) > 0) {
+        nntr_cfg["kv_cache"]["fallback"] =
+          std::string(rc.kv_cache_fallback);
+      }
 
       std::vector<unsigned int> bad_ids;
       for (unsigned int i = 0; i < rc.num_bad_word_ids; ++i)

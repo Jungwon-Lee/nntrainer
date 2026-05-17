@@ -4,6 +4,7 @@ causallm_src = [
     meson.current_source_dir() / 'llm_util.cpp',
     meson.current_source_dir() / 'api' / 'causal_lm_api.cpp',
     meson.current_source_dir() / 'api' / 'model_config.cpp',
+    meson.current_source_dir() / 'kv_cache_optimizer.cpp',
     meson.current_source_dir() / 'kv_cache_manager.cpp',
 ]
 

@@ -117,10 +117,15 @@ void CausalLM::allocateAndBindKVCache() {
 
     const unsigned int max_timestep = static_cast<unsigned int>(MAX_SEQ_LEN);
 
-    kv_cache.allocate(static_cast<unsigned int>(NUM_LAYERS), BATCH_SIZE,
-                      max_timestep,
-                      static_cast<unsigned int>(NUM_KEY_VALUE_HEADS),
-                      static_cast<unsigned int>(HEAD_DIM), cache_dtype);
+    KVCacheSpec spec;
+    spec.num_layers = static_cast<unsigned int>(NUM_LAYERS);
+    spec.batch_size = BATCH_SIZE;
+    spec.max_seq_len = max_timestep;
+    spec.num_heads_kv = static_cast<unsigned int>(NUM_KEY_VALUE_HEADS);
+    spec.head_dim = static_cast<unsigned int>(HEAD_DIM);
+    spec.dtype = cache_dtype;
+    spec.config = KV_CACHE_CONFIG;
+    kv_cache.allocate(spec);
   }
 
   // Bind each (layer, K|V) buffer into the corresponding input layer

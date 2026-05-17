@@ -67,6 +67,11 @@ typedef struct {
   unsigned int bad_word_ids[16];
   unsigned int num_bad_word_ids;
   char lmhead_dtype[32];
+  char kv_cache_backend[32];
+  char kv_cache_format[48];
+  char kv_cache_materialize_dtype[32];
+  char kv_cache_scale_granularity[48];
+  char kv_cache_fallback[32];
 
   // generation_config.json (runtime parameters)
   unsigned int top_k;

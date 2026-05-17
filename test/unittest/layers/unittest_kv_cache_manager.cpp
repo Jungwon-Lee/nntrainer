@@ -52,11 +52,65 @@ TEST_F(KVCacheManagerTest, allocate_basic) {
   EXPECT_EQ(manager.getPosition(), 0u);
 }
 
+TEST_F(KVCacheManagerTest, allocate_raw_spec) {
+  causallm::KVCacheSpec spec;
+  spec.num_layers = NUM_LAYERS;
+  spec.batch_size = BATCH_SIZE;
+  spec.max_seq_len = MAX_SEQ_LEN;
+  spec.num_heads_kv = NUM_HEADS_KV;
+  spec.head_dim = HEAD_DIM;
+  spec.dtype = ml::train::TensorDim::DataType::FP32;
+  spec.config.backend = "raw";
+
+  causallm::KVCacheManager m;
+  m.allocate(spec);
+
+  EXPECT_TRUE(m.isAllocated());
+  EXPECT_EQ(m.getNumLayers(), NUM_LAYERS);
+  EXPECT_EQ(m.getMaxSeqLen(), MAX_SEQ_LEN);
+  EXPECT_EQ(m.getBatchSize(), BATCH_SIZE);
+  EXPECT_EQ(m.getKVWidth(), KV_WIDTH);
+  EXPECT_EQ(m.getKeyCache(0).getDataType(),
+            ml::train::TensorDim::DataType::FP32);
+}
+
 TEST_F(KVCacheManagerTest, allocate_invalid_params) {
   causallm::KVCacheManager m;
   EXPECT_THROW(m.allocate(0, 1, 128, 4, 8), std::invalid_argument);
   EXPECT_THROW(m.allocate(4, 0, 128, 4, 8), std::invalid_argument);
   EXPECT_THROW(m.allocate(4, 1, 0, 4, 8), std::invalid_argument);
+}
+
+TEST_F(KVCacheManagerTest, unsupported_backend_errors) {
+  causallm::KVCacheSpec spec;
+  spec.num_layers = NUM_LAYERS;
+  spec.batch_size = BATCH_SIZE;
+  spec.max_seq_len = MAX_SEQ_LEN;
+  spec.num_heads_kv = NUM_HEADS_KV;
+  spec.head_dim = HEAD_DIM;
+  spec.dtype = ml::train::TensorDim::DataType::FP32;
+  spec.config.backend = "int8";
+  spec.config.fallback = "error";
+
+  causallm::KVCacheManager m;
+  EXPECT_THROW(m.allocate(spec), std::invalid_argument);
+}
+
+TEST_F(KVCacheManagerTest, unsupported_backend_fallback_raw) {
+  causallm::KVCacheSpec spec;
+  spec.num_layers = NUM_LAYERS;
+  spec.batch_size = BATCH_SIZE;
+  spec.max_seq_len = MAX_SEQ_LEN;
+  spec.num_heads_kv = NUM_HEADS_KV;
+  spec.head_dim = HEAD_DIM;
+  spec.dtype = ml::train::TensorDim::DataType::FP32;
+  spec.config.backend = "int8";
+  spec.config.fallback = "raw";
+
+  causallm::KVCacheManager m;
+  EXPECT_NO_THROW(m.allocate(spec));
+  EXPECT_TRUE(m.isAllocated());
+  EXPECT_EQ(m.getKeyCache(0).height(), MAX_SEQ_LEN);
 }
 
 TEST_F(KVCacheManagerTest, cache_tensor_dimensions) {

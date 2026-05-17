@@ -28,6 +28,34 @@
 
 namespace causallm {
 
+namespace {
+
+KVCacheConfig parseKVCacheConfig(const json &nntr_cfg) {
+  KVCacheConfig config;
+
+  if (!nntr_cfg.contains("kv_cache")) {
+    return config;
+  }
+
+  const auto &kv_cache = nntr_cfg["kv_cache"];
+  if (!kv_cache.is_object()) {
+    throw std::runtime_error(
+      "nntr_config.json kv_cache must be a JSON object");
+  }
+
+  config.backend = kv_cache.value("backend", config.backend);
+  config.format = kv_cache.value("format", config.format);
+  config.materialize_dtype =
+    kv_cache.value("materialize_dtype", config.materialize_dtype);
+  config.scale_granularity =
+    kv_cache.value("scale_granularity", config.scale_granularity);
+  config.fallback = kv_cache.value("fallback", config.fallback);
+
+  return config;
+}
+
+} // namespace
+
 std::string LoadBytesFromFile(const std::string &path) {
   std::ifstream file(path, std::ios::binary | std::ios::ate);
   if (!file.is_open()) {
@@ -103,6 +131,7 @@ void Transformer::setupParameters(json &cfg, json &generation_cfg,
                     : 1;
   EMBEDDING_DTYPE = nntr_cfg["embedding_dtype"];
   FC_LAYER_DTYPE = nntr_cfg["fc_layer_dtype"];
+  KV_CACHE_CONFIG = parseKVCacheConfig(nntr_cfg);
 
   if (cfg.contains("is_causal")) {
     IS_CAUSAL = cfg["is_causal"].get<bool>();

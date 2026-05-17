@@ -7,6 +7,7 @@
  * @brief  KV Cache Manager for externalized KV cache management
  * @see    https://github.com/nntrainer/nntrainer
  * @author Jijoong Moon <jijoong.moon@samsung.com>
+ * @author Jungwon-Lee <jungone.lee@samsung.com>
  * @bug    No known bugs except for NYI items
  */
 
@@ -15,10 +16,11 @@
 
 #include <cstddef>
 #include <fstream>
+#include <memory>
 #include <stdexcept>
 #include <string>
-#include <vector>
 
+#include <kv_cache_optimizer.h>
 #include <tensor.h>
 #include <tensor_dim.h>
 
@@ -71,9 +73,15 @@ public:
     ml::train::TensorDim::Format format = ml::train::TensorDim::Format::NCHW);
 
   /**
+   * @brief Allocate KV cache using an optimizer allocation spec
+   * @param[in] spec allocation dimensions and optimizer config
+   */
+  void allocate(const KVCacheSpec &spec);
+
+  /**
    * @brief Check if the manager has been allocated
    */
-  bool isAllocated() const { return !layer_caches_.empty(); }
+  bool isAllocated() const;
 
   /**
    * @brief Get current write position in the cache
@@ -181,9 +189,7 @@ public:
   /**
    * @brief Get number of layers
    */
-  unsigned int getNumLayers() const {
-    return static_cast<unsigned int>(layer_caches_.size());
-  }
+  unsigned int getNumLayers() const { return num_layers_; }
 
   /**
    * @brief Get maximum sequence length (cache capacity)
@@ -201,16 +207,11 @@ public:
   unsigned int getKVWidth() const { return num_heads_kv_ * head_dim_; }
 
 private:
-  /**
-   * @brief Per-layer cache storage
-   */
-  struct LayerCache {
-    nntrainer::Tensor key_cache;   /**< (batch, 1, max_seq_len, kv_width) */
-    nntrainer::Tensor value_cache; /**< (batch, 1, max_seq_len, kv_width) */
-  };
+  std::unique_ptr<KVCacheOptimizer> selectOptimizer(const KVCacheSpec &spec);
 
-  std::vector<LayerCache> layer_caches_; /**< per-layer KV caches */
+  std::unique_ptr<KVCacheOptimizer> optimizer_;
 
+  unsigned int num_layers_ = 0;    /**< number of attention layers */
   unsigned int cache_pos_ = 0;    /**< current write position */
   unsigned int batch_size_ = 0;   /**< batch size */
   unsigned int max_seq_len_ = 0;  /**< max sequence length */

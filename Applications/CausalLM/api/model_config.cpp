@@ -58,6 +58,15 @@ static void register_qwen3_0_6b() {
           sizeof(rc.model_file_name) - 1);
   strncpy(rc.tokenizer_file, "tokenizer.json", sizeof(rc.tokenizer_file) - 1);
   strncpy(rc.lmhead_dtype, "Q4_0", sizeof(rc.lmhead_dtype) - 1);
+
+  // KV Cache Config
+  strncpy(rc.kv_cache_backend, "raw", sizeof(rc.kv_cache_backend) - 1);
+  strncpy(rc.kv_cache_format, "auto", sizeof(rc.kv_cache_format) - 1);
+  strncpy(rc.kv_cache_materialize_dtype, "auto",
+          sizeof(rc.kv_cache_materialize_dtype) - 1);
+  strncpy(rc.kv_cache_scale_granularity, "per_token_per_head",
+          sizeof(rc.kv_cache_scale_granularity) - 1);
+  strncpy(rc.kv_cache_fallback, "error", sizeof(rc.kv_cache_fallback) - 1);
   rc.num_bad_word_ids = 0;
 
   rc.top_k = 20;
