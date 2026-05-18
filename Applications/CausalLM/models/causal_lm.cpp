@@ -107,17 +107,12 @@ void CausalLM::setupParameters(json &cfg, json &generation_cfg,
 
 void CausalLM::allocateAndBindKVCache() {
   if (!kv_cache.isAllocated()) {
-    // dtype matches mha_core's internal cache choice (kept consistent so
-    // saved caches stay binary-compatible across the 3-input/5-input modes).
+    // dtype must match the external cache placeholders created in
+    // Transformer::createKVCachePlaceholders().
 #ifdef ENABLE_FP16
     const auto cache_dtype = ml::train::TensorDim::DataType::FP16;
-#elif defined(_WIN32)
-    // Qwen3 generation currently produces invalid tokens on Windows with the
-    // UINT16 KV cache path. Keep the host-side cache in FP32 on Windows until
-    // that path is fixed.
-    const auto cache_dtype = ml::train::TensorDim::DataType::FP32;
 #else
-    const auto cache_dtype = ml::train::TensorDim::DataType::UINT16;
+    const auto cache_dtype = ml::train::TensorDim::DataType::FP32;
 #endif
 
     const unsigned int max_timestep = static_cast<unsigned int>(MAX_SEQ_LEN);
@@ -147,17 +142,13 @@ void CausalLM::allocateAndBindKVCache() {
       return static_cast<nntrainer::Tensor *>(nullptr);
     };
 
-    auto *kp =
-      model->getTensor("layer" + std::to_string(i) + "_attention:input3");
-    auto *vp =
-      model->getTensor("layer" + std::to_string(i) + "_attention:input4");
-    if (kp == nullptr)
-      kp = find_cache_placeholder("cache_k_l" + std::to_string(i));
-    if (vp == nullptr)
-      vp = find_cache_placeholder("cache_v_l" + std::to_string(i));
+    auto *kp = find_cache_placeholder("cache_k_l" + std::to_string(i));
+    auto *vp = find_cache_placeholder("cache_v_l" + std::to_string(i));
+    if (kp == nullptr && vp == nullptr)
+      continue;
     NNTR_THROW_IF(kp == nullptr || vp == nullptr, std::runtime_error)
-      << "allocateAndBindKVCache: cache_k_l" << i << " / cache_v_l" << i
-      << " input placeholder not found in compiled graph";
+      << "allocateAndBindKVCache: incomplete cache_k_l" << i << " / cache_v_l"
+      << i << " placeholders in compiled graph";
 
     kp->setData(kc.getMemoryData(), kc.getOffset(), false);
     vp->setData(vc.getMemoryData(), vc.getOffset(), false);
@@ -174,8 +165,11 @@ void CausalLM::setKVCachePosition(unsigned int pos) {
 #endif
   std::function<void(ml::train::Layer &, nntrainer::RunLayerContext &, void *)>
     fn = [pos](ml::train::Layer &l, nntrainer::RunLayerContext &, void *) {
-      if (l.getType() == causallm::MHACoreLayer::type)
-        dynamic_cast<causallm::MHACoreLayer &>(l).setCacheIndex(pos);
+      if (l.getType() == causallm::MHACoreLayer::type) {
+        auto *mha = dynamic_cast<causallm::MHACoreLayer *>(&l);
+        if (mha != nullptr)
+          mha->setCacheIndex(pos);
+      }
     };
   model->forEachLayer(fn, nullptr);
 }
@@ -420,8 +414,9 @@ void CausalLM::run(const WSTR prompt, bool do_sample, const WSTR system_prompt,
   _input.clear();
 
   unsigned int init_len = init_input.size();
-  float *input_sample =
-    (float *)malloc(sizeof(float) * BATCH_SIZE * MAX_SEQ_LEN);
+  std::vector<float> input_sample_storage(
+    static_cast<size_t>(BATCH_SIZE) * MAX_SEQ_LEN, 0.0f);
+  float *input_sample = input_sample_storage.data();
   std::vector<bool> eos_list(BATCH_SIZE, false);
 
   unsigned int input_len = init_len;
@@ -439,28 +434,64 @@ void CausalLM::run(const WSTR prompt, bool do_sample, const WSTR system_prompt,
    * PREFILL
    */
   std::vector<int64_t> token_ids;
-  input.push_back(input_sample);
   auto build_inference_inputs = [&]() {
-    std::vector<std::pair<std::string, float *>> cache_inputs;
+    auto has_cache_placeholder = [this](int layer_idx,
+                                        const std::string &kind) {
+      const std::string base_name =
+        "cache_" + kind + "_l" + std::to_string(layer_idx);
+      for (const auto &suffix : {":0", ":input0", ":out0", ""}) {
+        if (model->getTensor(base_name + suffix) != nullptr)
+          return true;
+      }
+      return false;
+    };
+
+    std::vector<float *> cache_inputs;
     cache_inputs.reserve(static_cast<size_t>(NUM_LAYERS) * 2);
     for (int i = 0; i < NUM_LAYERS; ++i) {
-      cache_inputs.emplace_back(
-        "cache_k_l" + std::to_string(i),
+      const bool has_key = has_cache_placeholder(i, "k");
+      const bool has_value = has_cache_placeholder(i, "v");
+      if (!has_key && !has_value)
+        continue;
+      NNTR_THROW_IF(!has_key || !has_value, std::runtime_error)
+        << "run: incomplete cache_k_l" << i << " / cache_v_l" << i
+        << " placeholders in compiled graph";
+
+      cache_inputs.push_back(
         reinterpret_cast<float *>(kv_cache.getKeyCache(i).getData()));
-      cache_inputs.emplace_back(
-        "cache_v_l" + std::to_string(i),
+      cache_inputs.push_back(
         reinterpret_cast<float *>(kv_cache.getValueCache(i).getData()));
     }
 
-    std::sort(
-      cache_inputs.begin(), cache_inputs.end(),
-      [](const auto &lhs, const auto &rhs) { return lhs.first < rhs.first; });
-
+    const auto input_dims = model->getInputDimension();
     std::vector<float *> inference_inputs;
-    inference_inputs.reserve(1 + cache_inputs.size());
-    inference_inputs.push_back(input_sample);
-    for (const auto &cache_input : cache_inputs)
-      inference_inputs.push_back(cache_input.second);
+    inference_inputs.reserve(input_dims.size());
+
+    size_t cache_input_idx = 0;
+    bool bound_token_input = false;
+    for (const auto &input_dim : input_dims) {
+      const bool is_token_input =
+        input_dim.height() == 1 && input_dim.width() == INIT_SEQ_LEN &&
+        input_dim.getDataType() == ml::train::TensorDim::DataType::FP32;
+
+      if (is_token_input && !bound_token_input) {
+        inference_inputs.push_back(input_sample);
+        bound_token_input = true;
+        continue;
+      }
+
+      NNTR_THROW_IF(cache_input_idx >= cache_inputs.size(), std::runtime_error)
+        << "run: no KV cache buffer for model input index "
+        << inference_inputs.size();
+      inference_inputs.push_back(cache_inputs[cache_input_idx++]);
+    }
+
+    NNTR_THROW_IF(!bound_token_input, std::runtime_error)
+      << "run: token input placeholder not found in model inputs";
+    NNTR_THROW_IF(cache_input_idx != cache_inputs.size(), std::runtime_error)
+      << "run: unused KV cache buffers: "
+      << (cache_inputs.size() - cache_input_idx);
+
     return inference_inputs;
   };
   input = build_inference_inputs();
@@ -599,7 +630,6 @@ void CausalLM::run(const WSTR prompt, bool do_sample, const WSTR system_prompt,
     }
 
     if (is_finish) {
-      free(input_sample);
       break;
     }
   }

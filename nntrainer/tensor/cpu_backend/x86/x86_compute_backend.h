@@ -495,10 +495,7 @@ void causal_depthwise_conv1d_k3_decode(const float *x_cur,
          const float *packed_weight, float *state,
          float *y_cur, unsigned int W);
 
-/**
- * @brief Initialization of ggml backend
- */
-void init_backend();
+// init_backend() is declared in compute_ops.h (canonical location).
 
 /**
  * @copydoc unpack_q4_0x8_transpose16 in cpu_backend.h

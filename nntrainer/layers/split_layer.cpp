@@ -213,7 +213,9 @@ void SplitLayer::forwarding(RunLayerContext &context, bool training) {
    * elements). The batch-major loop improves input cache locality by
    * processing all splits for one batch before moving to the next.
    */
+#ifdef _OPENMP
 #pragma omp parallel for schedule(static)
+#endif
   for (int batch = 0; batch < static_cast<int>(batch_count); batch++) {
     const float *in_batch = in_base + batch * in_batch_elems;
     for (unsigned int idx = 0; idx < split_number; idx++) {
@@ -261,7 +263,9 @@ void SplitLayer::calcDerivative(RunLayerContext &context) {
 
   float *in_base = input_.getAddress<float>(0, 0, 0, 0);
 
+#ifdef _OPENMP
 #pragma omp parallel for schedule(static)
+#endif
   for (int batch = 0; batch < static_cast<int>(batch_count); batch++) {
     float *in_batch = in_base + batch * in_batch_elems;
     for (unsigned int idx = 0; idx < split_number; idx++) {

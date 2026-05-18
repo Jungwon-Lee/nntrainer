@@ -232,11 +232,6 @@ int main(int argc, char *argv[]) {
       return std::make_unique<causallm::Lfm2CausalLM>(cfg, generation_cfg,
                                                       nntr_cfg);
     });
-  causallm::Factory::Instance().registerModel(
-    "Lfm2ForCausalLM", [](json cfg, json generation_cfg, json nntr_cfg) {
-      return std::make_unique<causallm::Lfm2CausalLM>(cfg, generation_cfg,
-                                                      nntr_cfg);
-    });
 #if !defined(_WIN32) && !defined(__ANDROID__)
   causallm::Factory::Instance().registerModel(
     "MultilingualTinyBert", [](json cfg, json generation_cfg, json nntr_cfg) {
@@ -267,6 +262,22 @@ int main(int argc, char *argv[]) {
     json generation_cfg =
       causallm::LoadJsonFile(model_path + "/generation_config.json");
     json nntr_cfg = causallm::LoadJsonFile(model_path + "/nntr_config.json");
+
+    if (nntr_cfg.contains("tokenizer_file")) {
+      std::filesystem::path tokenizer_path =
+        nntr_cfg["tokenizer_file"].get<std::string>();
+      if (tokenizer_path.is_relative()) {
+        std::filesystem::path model_relative =
+          std::filesystem::path(model_path) / tokenizer_path;
+        std::filesystem::path model_local =
+          std::filesystem::path(model_path) / tokenizer_path.filename();
+        if (std::filesystem::exists(model_relative)) {
+          nntr_cfg["tokenizer_file"] = model_relative.string();
+        } else if (std::filesystem::exists(model_local)) {
+          nntr_cfg["tokenizer_file"] = model_local.string();
+        }
+      }
+    }
 
     if (nntr_cfg.contains("system_prompt")) {
       system_head_prompt =
@@ -335,7 +346,6 @@ int main(int argc, char *argv[]) {
         input_text = nntr_cfg["sample_input"].get<std::string>();
       }
     }
-    std::cout << "0000" << "\n";
     auto model = causallm::Factory::Instance().create(architecture, cfg,
                                                       generation_cfg, nntr_cfg);
     if (!model) {
@@ -346,7 +356,6 @@ int main(int argc, char *argv[]) {
       return EXIT_FAILURE;
     }
     model->initialize();
-    std::cout << "2222" << "\n";
     model->load_weight(weight_file);
 
     bool do_sample = generation_cfg.value("do_sample", false);

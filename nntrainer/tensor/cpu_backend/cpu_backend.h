@@ -634,10 +634,7 @@ extern void causal_depthwise_conv1d_k3_fp16(
   float *input, const uint16_t *packed_weight,
   float *output, unsigned int B,
   unsigned int H, unsigned int W);
-/**
- * @brief Initialization of ggml backend
- */
-extern void init_backend();
+// init_backend() is declared in compute_ops.h (canonical location).
 
 /**
  * @brief Unpack Q4_0x8 data

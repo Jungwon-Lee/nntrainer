@@ -23,89 +23,66 @@
 
 namespace causallm {
 
-std::vector<LayerHandle>
-Lfm2Transformer::createAttention(const int layer_id, int seq_len, int n_heads,
-                                 int head_dim, std::string query_name,
-                                 std::string key_name, std::string value_name) {
+Tensor Lfm2Transformer::createAttention(const int layer_id, int seq_len,
+                                        int n_heads, int head_dim,
+                                        Tensor query, Tensor key,
+                                        Tensor value) {
 
-  std::vector<LayerHandle> layers;
+  LayerHandle wq(createLayer(
+    "fully_connected",
+    {withKey("name", "layer" + std::to_string(layer_id) + "_wq"),
+     withKey("unit", head_dim * n_heads), withKey("disable_bias", "true"),
+     withKey("weight_initializer", "ones")}));
+  Tensor q = wq(query);
 
-  auto Q = "layer" + std::to_string(layer_id) + "_wq";
-  auto Q_norm = "layer" + std::to_string(layer_id) + "_q_norm";
-  auto K = "layer" + std::to_string(layer_id) + "_wk";
-  auto K_norm = "layer" + std::to_string(layer_id) + "_k_norm";
-  auto V = "layer" + std::to_string(layer_id) + "_wv";
-  auto A = "layer" + std::to_string(layer_id) + "_attention";
-  auto O = "layer" + std::to_string(layer_id) + "_attention_out";
+  LayerHandle q_norm(createLayer(
+    "reshaped_rms_norm",
+    {withKey("name", "layer" + std::to_string(layer_id) + "_q_norm"),
+     withKey("packed", "false"), withKey("epsilon", std::to_string(NORM_EPS)),
+     withKey("feature_size", std::to_string(head_dim))}));
+  Tensor q_normed = q_norm(q);
 
-  // Q projection
-  std::vector<std::string> q_params = {
-    withKey("name", Q),
-    withKey("unit", head_dim * n_heads),
-    withKey("disable_bias", "true"),
-    withKey("input_layers", query_name),
-    withKey("weight_initializer", "ones")};
-  layers.push_back(createLayer("fully_connected", q_params));
+  LayerHandle wk(createLayer(
+    "fully_connected",
+    {withKey("name", "layer" + std::to_string(layer_id) + "_wk"),
+     withKey("unit", head_dim * n_heads / GQA_SIZE),
+     withKey("disable_bias", "true"), withKey("weight_initializer", "ones")}));
+  Tensor k = wk(key);
 
-  // Q norm (reshaped RMS norm)
-  std::vector<std::string> q_norm_params = {
-    withKey("name", Q_norm),
-    withKey("input_layers", Q),
-    withKey("packed", "false"),
-    withKey("epsilon", std::to_string(NORM_EPS)),
-    withKey("feature_size", std::to_string(head_dim))};
-  layers.push_back(createLayer("reshaped_rms_norm", q_norm_params));
+  LayerHandle k_norm(createLayer(
+    "reshaped_rms_norm",
+    {withKey("name", "layer" + std::to_string(layer_id) + "_k_norm"),
+     withKey("packed", "false"), withKey("epsilon", std::to_string(NORM_EPS)),
+     withKey("feature_size", std::to_string(head_dim))}));
+  Tensor k_normed = k_norm(k);
 
-  // K projection
-  std::vector<std::string> k_params = {
-    withKey("name", K),
-    withKey("unit", head_dim * n_heads / GQA_SIZE),
-    withKey("disable_bias", "true"),
-    withKey("input_layers", key_name),
-    withKey("weight_initializer", "ones")};
-  layers.push_back(createLayer("fully_connected", k_params));
+  LayerHandle wv(createLayer(
+    "fully_connected",
+    {withKey("name", "layer" + std::to_string(layer_id) + "_wv"),
+     withKey("unit", head_dim * n_heads / GQA_SIZE),
+     withKey("disable_bias", "true"), withKey("weight_initializer", "ones")}));
+  Tensor v = wv(value);
 
-  // K norm (reshaped RMS norm)
-  std::vector<std::string> k_norm_params = {
-    withKey("name", K_norm),
-    withKey("input_layers", K),
-    withKey("packed", "false"),
-    withKey("epsilon", std::to_string(NORM_EPS)),
-    withKey("feature_size", std::to_string(head_dim))};
-  layers.push_back(createLayer("reshaped_rms_norm", k_norm_params));
+  auto [cache_k, cache_v] = createKVCachePlaceholders(layer_id, n_heads);
 
-  // V projection
-  std::vector<std::string> v_params = {
-    withKey("name", V),
-    withKey("unit", head_dim * n_heads / GQA_SIZE),
-    withKey("disable_bias", "true"),
-    withKey("input_layers", value_name),
-    withKey("weight_initializer", "ones")};
-  layers.push_back(createLayer("fully_connected", v_params));
+  LayerHandle mha(createLayer(
+    "mha_core",
+    {withKey("name", "layer" + std::to_string(layer_id) + "_attention"),
+     withKey("num_heads", n_heads), withKey("num_heads_kv", n_heads / GQA_SIZE),
+     withKey("max_timestep", std::to_string(MAX_SEQ_LEN)),
+     withKey("sliding_window", SLIDING_WINDOW),
+     withKey("rope_theta", ROPE_THETA),
+     withKey("max_position_embeddings", MAX_POSITION_EMBEDDINGS),
+     withKey("max_new_tokens", std::to_string(NUM_TO_GENERATE)),
+     withKey("is_causal", IS_CAUSAL ? "true" : "false")}));
+  Tensor a = mha({q_normed, k_normed, v, cache_k, cache_v});
 
-  // Attention core layer
-  std::vector<std::string> a_params = {
-    withKey("name", A),
-    withKey("num_heads", n_heads),
-    withKey("num_heads_kv", n_heads / GQA_SIZE),
-    withKey("max_timestep", std::to_string(INIT_SEQ_LEN + NUM_TO_GENERATE)),
-    withKey("sliding_window", SLIDING_WINDOW),
-    withKey("rope_theta", ROPE_THETA),
-    withKey("max_position_embeddings", MAX_POSITION_EMBEDDINGS),
-    withKey("max_new_tokens", std::to_string(NUM_TO_GENERATE)),
-    withKey("input_layers", {Q_norm, K_norm, V})};
-  layers.push_back(createLayer("mha_core", a_params));
-
-  // O projection
-  std::vector<std::string> o_params = {
-    withKey("name", O),
-    withKey("unit", DIM),
-    withKey("disable_bias", "true"),
-    withKey("input_layers", A),
-    withKey("weight_initializer", "ones")};
-  layers.push_back(createLayer("fully_connected", o_params));
-
-  return layers;
+  LayerHandle wo(createLayer(
+    "fully_connected",
+    {withKey("name", "layer" + std::to_string(layer_id) + "_attention_out"),
+     withKey("unit", DIM), withKey("disable_bias", "true"),
+     withKey("weight_initializer", "ones")}));
+  return wo(a);
 }
 
 void Lfm2Transformer::registerCustomLayers() {
@@ -193,224 +170,152 @@ void Lfm2CausalLM::setupParameters(json &cfg, json &generation_cfg,
   }
 }
 
-std::vector<LayerHandle>
-Lfm2CausalLM::createTransformerDecoderBlock(const int layer_id,
-                                             std::string input_name) {
-
-  std::vector<LayerHandle> layers;
-
-  // Determine block type based on layer_id
+Tensor Lfm2CausalLM::createTransformerDecoderBlock(const int layer_id,
+                                                   Tensor input) {
   std::string block_type = (layer_id < static_cast<int>(LAYER_TYPES.size()))
                              ? LAYER_TYPES[layer_id]
                              : "full_attention";
 
   if (block_type == "attention" || block_type == "full_attention") {
-    // Attention block: norm -> attention -> residual -> norm -> FFN -> residual
-    layers.push_back(createLayer(
+    LayerHandle attn_norm(createLayer(
       "rms_norm",
       {withKey("name", "layer" + std::to_string(layer_id) + "_attention_norm"),
-       withKey("input_layers", input_name),
        withKey("epsilon", std::to_string(NORM_EPS)),
        withKey("packed", "false")}));
+    Tensor normed = attn_norm(input);
 
-    auto att_layers = createAttention(
-      layer_id, INIT_SEQ_LEN, NUM_HEADS, HEAD_DIM,
-      "layer" + std::to_string(layer_id) + "_attention_norm",
-      "layer" + std::to_string(layer_id) + "_attention_norm",
-      "layer" + std::to_string(layer_id) + "_attention_norm");
-    layers.insert(layers.end(), att_layers.begin(), att_layers.end());
+    Tensor att_out =
+      createAttention(layer_id, INIT_SEQ_LEN, NUM_HEADS, HEAD_DIM, normed,
+                      normed, normed);
 
-    layers.push_back(createLayer(
+    LayerHandle decoder_add(createLayer(
       "addition",
-      {withKey("name", "layer" + std::to_string(layer_id) + "_decoder_add"),
-       withKey("input_layers",
-               input_name + ",layer" + std::to_string(layer_id) +
-                 "_attention_out")}));
+      {withKey("name", "layer" + std::to_string(layer_id) + "_decoder_add")}));
+    Tensor residual = decoder_add({input, att_out});
 
-    layers.push_back(createLayer(
+    LayerHandle ffn_norm(createLayer(
       "rms_norm",
       {withKey("name", "layer" + std::to_string(layer_id) + "_ffn_norm"),
-       withKey("input_layers",
-               "layer" + std::to_string(layer_id) + "_decoder_add"),
        withKey("epsilon", std::to_string(NORM_EPS)),
        withKey("packed", "false")}));
+    Tensor ffn_normed = ffn_norm(residual);
 
-    auto ffn_layers = createMlp(
-      layer_id, DIM, INTERMEDIATE_SIZE,
-      "layer" + std::to_string(layer_id) + "_ffn_norm");
-    layers.insert(layers.end(), ffn_layers.begin(), ffn_layers.end());
+    Tensor ffn_out = createMlp(layer_id, DIM, INTERMEDIATE_SIZE, ffn_normed);
 
-    layers.push_back(createLayer(
+    LayerHandle decoder_output(createLayer(
       "addition",
-      {withKey("name", "layer" + std::to_string(layer_id) + "_decoder_output"),
-       withKey("input_layers",
-               "layer" + std::to_string(layer_id) + "_decoder_add,layer" +
-                 std::to_string(layer_id) + "_ffn_down")}));
-
-  } else {
-    // Conv block: norm -> conv -> residual -> norm -> FFN -> residual
-    auto conv_layers = createConvBlock(layer_id, input_name);
-    layers.insert(layers.end(), conv_layers.begin(), conv_layers.end());
+      {withKey("name",
+               "layer" + std::to_string(layer_id) + "_decoder_output")}));
+    return decoder_output({residual, ffn_out});
   }
 
-  return layers;
+  return createConvBlock(layer_id, input);
 }
 
-std::vector<LayerHandle>
-Lfm2CausalLM::createConvBlock(const int layer_id, std::string input_name) {
-
-  std::vector<LayerHandle> layers;
+Tensor Lfm2CausalLM::createConvBlock(const int layer_id, Tensor input) {
   auto prefix = "layer" + std::to_string(layer_id);
 
-  // Pre-conv normalization
-  layers.push_back(createLayer(
+  LayerHandle conv_norm(createLayer(
     "rms_norm",
     {withKey("name", prefix + "_conv_norm"),
-     withKey("input_layers", input_name),
      withKey("epsilon", std::to_string(NORM_EPS)),
      withKey("packed", "false")}));
+  Tensor normed = conv_norm(input);
 
-  // Expand features: [B, 1, T, DIM] → [B, 1, T, 3*CONV_DIM]
-  layers.push_back(createLayer(
+  LayerHandle conv_in_proj(createLayer(
     "fully_connected",
     {withKey("name", prefix + "_conv_in_proj"),
      withKey("unit", 3 * CONV_DIM),
      withKey("disable_bias", "true"),
-     withKey("input_layers", prefix + "_conv_norm"),
      withKey("weight_initializer", "ones")}));
+  Tensor conv_in = conv_in_proj(normed);
 
-  // Split along width (axis=3): [B,1,T,3*CONV_DIM] → 3 × [B,1,T,CONV_DIM]
-  layers.push_back(createLayer(
+  LayerHandle split_layer(createLayer(
     "split",
     {withKey("name", prefix + "_conv_chunk"),
-     withKey("input_layers", prefix + "_conv_in_proj"),
      withKey("axis", 3),
      withKey("split_number", 3)}));
+  Tensor chunks = split_layer(conv_in);
+  Tensor chunk0 = chunks.output(0);
+  Tensor chunk1 = chunks.output(1);
+  Tensor chunk2 = chunks.output(2);
 
-  // Gating before conv: chunk_0 ⊙ chunk_2
-  layers.push_back(createLayer(
+  LayerHandle conv_mul_pre(createLayer(
     "custom_multiply",
     {withKey("name", prefix + "_conv_mul_pre"),
-     withKey("input_layers",
-             prefix + "_conv_chunk(0)," + prefix + "_conv_chunk(2)"),
      withKey("inplace", "true")}));
+  Tensor pre_gate = conv_mul_pre({chunk0, chunk2});
 
-  // Causal depthwise conv1d
-  layers.push_back(createLayer(
+  LayerHandle conv(createLayer(
     "causal_conv1d",
     {withKey("name", prefix + "_conv_conv"),
-     withKey("input_layers", prefix + "_conv_mul_pre"),
      withKey("weight_dtype", "FP32")}));
+  Tensor conv_out = conv(pre_gate);
 
-  // Gating after conv: chunk_1 ⊙ conv_out
-  layers.push_back(createLayer(
+  LayerHandle conv_mul_post(createLayer(
     "custom_multiply",
     {withKey("name", prefix + "_conv_mul_post"),
-     withKey("input_layers",
-             prefix + "_conv_chunk(1)," + prefix + "_conv_conv"),
      withKey("inplace", "true")}));
+  Tensor post_gate = conv_mul_post({chunk1, conv_out});
 
-  // Project back to DIM
-  layers.push_back(createLayer(
+  LayerHandle conv_out_proj(createLayer(
     "fully_connected",
     {withKey("name", prefix + "_conv_out_proj"),
      withKey("unit", DIM),
      withKey("disable_bias", "true"),
-     withKey("input_layers", prefix + "_conv_mul_post"),
      withKey("weight_initializer", "ones")}));
+  Tensor projected = conv_out_proj(post_gate);
 
-  // Conv residual connection
-  layers.push_back(createLayer(
+  LayerHandle conv_add(createLayer(
     "addition",
-    {withKey("name", prefix + "_conv_add"),
-     withKey("input_layers", input_name + "," + prefix + "_conv_out_proj")}));
+    {withKey("name", prefix + "_conv_add")}));
+  Tensor residual = conv_add({input, projected});
 
-  // Pre-FFN normalization
-  layers.push_back(createLayer(
+  LayerHandle ffn_norm(createLayer(
     "rms_norm",
     {withKey("name", prefix + "_ffn_norm"),
-     withKey("input_layers", prefix + "_conv_add"),
      withKey("epsilon", std::to_string(NORM_EPS)),
      withKey("packed", "false")}));
+  Tensor ffn_normed = ffn_norm(residual);
 
-  // Feed forward
-  auto ffn_layers = createMlp(layer_id, DIM, INTERMEDIATE_SIZE,
-                               prefix + "_ffn_norm");
-  layers.insert(layers.end(), ffn_layers.begin(), ffn_layers.end());
+  Tensor ffn_out = createMlp(layer_id, DIM, INTERMEDIATE_SIZE, ffn_normed);
 
-  // FFN residual connection
-  layers.push_back(createLayer(
+  LayerHandle decoder_output(createLayer(
     "addition",
-    {withKey("name", prefix + "_decoder_output"),
-     withKey("input_layers",
-             prefix + "_conv_add,layer" + std::to_string(layer_id) +
-               "_ffn_down")}));
-
-  return layers;
+    {withKey("name", prefix + "_decoder_output")}));
+  return decoder_output({residual, ffn_out});
 }
 
-std::vector<LayerHandle>
-Lfm2CausalLM::createMlp(const int layer_id, int dim, int hidden_dim,
-                        std::string input_name) {
-
-  std::vector<LayerHandle> layers;
-
-  layers.push_back(createLayer(
+Tensor Lfm2CausalLM::createMlp(const int layer_id, int dim, int hidden_dim,
+                               Tensor input) {
+  LayerHandle ffn_up(createLayer(
     "fully_connected",
     {withKey("name", "layer" + std::to_string(layer_id) + "_ffn_up"),
      withKey("unit", hidden_dim),
      withKey("disable_bias", "true"),
-     withKey("input_layers", input_name),
      withKey("weight_initializer", "ones")}));
+  Tensor up = ffn_up(input);
 
-  layers.push_back(createLayer(
+  LayerHandle ffn_gate(createLayer(
     "fully_connected",
     {withKey("name", "layer" + std::to_string(layer_id) + "_ffn_gate"),
      withKey("unit", hidden_dim),
      withKey("disable_bias", "true"),
-     withKey("input_layers", input_name),
      withKey("weight_initializer", "ones")}));
+  Tensor gate = ffn_gate(input);
 
-  layers.push_back(createLayer(
+  LayerHandle swiglu(createLayer(
     "swiglu",
-    {withKey("name", "layer" + std::to_string(layer_id) + "_ffn_swiglu"),
-     withKey("input_layers",
-             "layer" + std::to_string(layer_id) + "_ffn_up,layer" +
-               std::to_string(layer_id) + "_ffn_gate")}));
+    {withKey("name", "layer" + std::to_string(layer_id) + "_ffn_swiglu")}));
+  Tensor act = swiglu({gate, up});
 
-  layers.push_back(createLayer(
+  LayerHandle ffn_down(createLayer(
     "fully_connected",
     {withKey("name", "layer" + std::to_string(layer_id) + "_ffn_down"),
      withKey("unit", dim),
      withKey("disable_bias", "true"),
-     withKey("input_layers",
-             "layer" + std::to_string(layer_id) + "_ffn_swiglu"),
      withKey("weight_initializer", "ones")}));
-
-  return layers;
-}
-
-void Lfm2CausalLM::constructModel() {
-  // Call parent constructModel which builds transformer blocks
-  Transformer::constructModel();
-
-  // Add LM head
-  const std::string lmhead_type =
-    TIE_WORD_EMBEDDINGS ? "tie_word_embeddings" : "lm_head";
-
-  std::vector<std::string> lmhead_props = {
-    withKey("name", "output_of_causallm"),
-    withKey("unit", NUM_VOCAB),
-    withKey("disable_bias", "true"),
-    withKey("input_layers", "output_norm"),
-    withKey("weight_dtype", LMHEAD_DTYPE),
-  };
-
-  if (TIE_WORD_EMBEDDINGS) {
-    lmhead_props.emplace_back(withKey("shared_from", "embedding0"));
-  }
-
-  model->addLayer(createLayer(lmhead_type, lmhead_props));
+  return ffn_down(act);
 }
 
 void Lfm2CausalLM::registerCustomLayers() {

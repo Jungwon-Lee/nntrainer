@@ -324,16 +324,10 @@ Transformer::createKVCachePlaceholders(const int layer_id, int n_heads) {
   ml::train::TensorDim cache_dim(
     {BATCH_SIZE, 1, max_timestep, kv_width},
     {ml::train::TensorDim::Format::NCHW, ml::train::TensorDim::DataType::FP16});
-#elif defined(_WIN32)
-  // Must match CausalLM::allocateAndBindKVCache(). The UINT16 KV cache path
-  // breaks Qwen3 generation on Windows today, so Windows placeholders use FP32.
+#else
   ml::train::TensorDim cache_dim(
     {BATCH_SIZE, 1, max_timestep, kv_width},
     {ml::train::TensorDim::Format::NCHW, ml::train::TensorDim::DataType::FP32});
-#else
-  ml::train::TensorDim cache_dim({BATCH_SIZE, 1, max_timestep, kv_width},
-                                 {ml::train::TensorDim::Format::NCHW,
-                                  ml::train::TensorDim::DataType::UINT16});
 #endif
 
   Tensor cache_k(cache_dim, "cache_k_l" + std::to_string(layer_id));
