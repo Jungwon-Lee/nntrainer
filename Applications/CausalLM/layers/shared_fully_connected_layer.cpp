@@ -22,6 +22,9 @@
 #include <tensor_dim.h>
 #include <util_func.h>
 
+/**
+ * @brief Namespace for CausalLM application components
+ */
 namespace causallm {
 using namespace nntrainer;
 

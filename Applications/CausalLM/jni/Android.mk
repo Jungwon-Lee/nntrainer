@@ -28,6 +28,8 @@ CAUSALLM_COMMON_INCLUDES := \
     $(LOCAL_PATH)/../models/gemma3 \
     $(LOCAL_PATH)/../models/timm_vit \
     $(LOCAL_PATH)/../models/deberta_v2 \
+    $(LOCAL_PATH)/../third_party/minja/include \
+    $(LOCAL_PATH)/../third_party \
 
 # Prebuilt nntrainer libraries
 include $(CLEAR_VARS)

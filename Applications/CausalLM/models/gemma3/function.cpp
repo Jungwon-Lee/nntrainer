@@ -17,7 +17,13 @@
 #include <unordered_map>
 #include <vector>
 
+/**
+ * @brief Namespace for CausalLM application components
+ */
 namespace causallm {
+/**
+ * @brief Namespace for Gemma3 chat formatting helpers
+ */
 namespace gemma3 {
 
 // Helper to escape string values
@@ -168,9 +174,9 @@ std::string apply_function_gemma_template(const json &chat_input) {
     if (!tools_inserted &&
         (chat_input.contains("tools") || chat_input.contains("functions")) &&
         (role == "developer" || role == "system")) {
-      const auto &tools =
-        chat_input.contains("tools") ? chat_input["tools"]
-                                     : chat_input["functions"];
+      const auto &tools = chat_input.contains("tools")
+                            ? chat_input["tools"]
+                            : chat_input["functions"];
       for (const auto &tool : tools) {
         prompt << "<start_function_declaration>";
         prompt << format_function_declaration(tool);

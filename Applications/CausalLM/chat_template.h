@@ -17,12 +17,28 @@
 #include <memory>
 #include <string>
 
+/**
+ * @brief Namespace for CausalLM application components
+ */
 namespace causallm {
 
+/**
+ * @brief Applies Hugging Face chat templates to structured chat requests.
+ */
 class ChatTemplate {
 public:
+  /**
+   * @brief Options controlling chat template rendering behavior.
+   */
   struct Options {
+    /**
+     * @brief Controls whether a generation prompt is appended.
+     */
     enum class GenerationPromptMode { Auto, Always, Never };
+
+    /**
+     * @brief Controls how developer messages are represented.
+     */
     enum class DeveloperRolePolicy { Auto, Preserve, MergeIntoSystem };
 
     GenerationPromptMode generation_prompt = GenerationPromptMode::Auto;

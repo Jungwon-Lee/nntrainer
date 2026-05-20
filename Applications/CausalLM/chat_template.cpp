@@ -20,8 +20,14 @@
 #include <unordered_map>
 #include <utility>
 
+/**
+ * @brief Namespace for CausalLM application components
+ */
 namespace causallm {
 
+/**
+ * @brief Anonymous namespace for chat template helpers
+ */
 namespace {
 
 using OrderedJson = nlohmann::ordered_json;
@@ -146,6 +152,9 @@ bool shouldAddGenerationPrompt(const OrderedJson &messages,
 
 } // namespace
 
+/**
+ * @brief Stores parsed template data and cached minja renderers.
+ */
 struct ChatTemplate::Impl {
   std::string model_path;
   std::string source_path;

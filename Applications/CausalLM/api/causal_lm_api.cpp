@@ -149,8 +149,8 @@ static std::string apply_chat_template(const std::string &architecture,
   // Use dynamic chat template from tokenizer_config.json if available
   if (g_chat_template) {
     try {
-      nlohmann::json request = nlohmann::json::array(
-        {{{"role", "user"}, {"content", input}}});
+      nlohmann::json request =
+        nlohmann::json::array({{{"role", "user"}, {"content", input}}});
       return g_chat_template->apply(request);
     } catch (const std::exception &e) {
       std::cerr << "[Warning] Failed to apply chat template: " << e.what()
@@ -490,9 +490,8 @@ ErrorCode loadModel(BackendType compute, ModelType modeltype,
     // Load chat template from model directory if available
     if (causallm::ChatTemplate::Exists(model_dir_path)) {
       try {
-        g_chat_template =
-          std::make_unique<causallm::ChatTemplate>(
-            causallm::ChatTemplate::Load(model_dir_path));
+        g_chat_template = std::make_unique<causallm::ChatTemplate>(
+          causallm::ChatTemplate::Load(model_dir_path));
         std::cout << "[Info] Chat template loaded from "
                   << g_chat_template->sourcePath() << std::endl;
       } catch (const std::exception &e) {

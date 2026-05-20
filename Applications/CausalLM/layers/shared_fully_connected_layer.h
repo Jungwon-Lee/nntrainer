@@ -28,8 +28,14 @@
 
 #include <array>
 
+/**
+ * @brief Namespace for CausalLM application components
+ */
 namespace causallm {
 
+/**
+ * @brief Namespace for CausalLM layer properties
+ */
 namespace props {
 
 /**
@@ -80,11 +86,12 @@ public:
             bool read_from_offset = false, int file_fd = -1) override;
 
   /**
-   * @copydic Layer::save()
+   * @copydoc Layer::save()
    */
   void save(std::ofstream &file, nntrainer::RunLayerContext &run_context,
             bool opt_var, ml::train::ExecutionMode mode, bool trainable,
-            nntrainer::TensorDim::DataType definedWeightDataType,
+            nntrainer::TensorDim::DataType definedWeightDataType =
+              nntrainer::TensorDim::DataType::NONE,
             ml::train::ISA target_isa = ml::train::ISA::DEFAULT) const override;
 
   /**
