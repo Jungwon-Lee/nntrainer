@@ -35,6 +35,7 @@ causallm_layer_dependencies += [
     causallm_custom_multiply_dep,
     causallm_deberta_attention_layer_dep,
     causallm_shared_fully_connected_layer_dep,
+    causallm_siglip2_layers_dep,
 ]
 
 subdir('models')

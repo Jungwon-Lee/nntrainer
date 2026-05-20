@@ -53,6 +53,10 @@
 #include "qwen3_slim_moe_causallm.h"
 #include "timm_vit/timm_vit_transformer.h"
 #include "lfm2_700m.h"
+#include "siglip2_vision.h"
+#include "lfm2_vl_embedding_merge.h"
+#include "lfm2_vl_for_conditional_generation.h"
+#include "lfm2_vl_prefill.h"
 #include <models/gemma3/function.h>
 #if !defined(_WIN32)
 #include <sys/resource.h>
@@ -170,6 +174,10 @@ std::string resolve_architecture(std::string model_type,
     } else if (architecture == "TimmViT" ||
                architecture == "vit_base_patch16_siglip_224") {
       return "TimmViT";
+    } else if (architecture == "Siglip2NaFlexVision" ||
+               architecture == "Siglip2VisionModel" ||
+               architecture == "siglip2_vision_model") {
+      return "Siglip2NaFlexVision";
     } else if (architecture == "deberta-v2" ||
                architecture == "DebertaV2Model" ||
                architecture == "DebertaV2ForMaskedLM") {
@@ -183,6 +191,25 @@ std::string resolve_architecture(std::string model_type,
   if (architecture == "TimmViT" ||
       architecture == "vit_base_patch16_siglip_224") {
     return "TimmViT";
+  }
+
+  if (architecture == "Siglip2NaFlexVision" ||
+      architecture == "Siglip2VisionModel" ||
+      architecture == "siglip2_vision_model") {
+    return "Siglip2NaFlexVision";
+  }
+
+  if (architecture == "Lfm2VlEmbeddingMerge") {
+    return "Lfm2VlEmbeddingMerge";
+  }
+
+  if (architecture == "Lfm2VlForConditionalGeneration" ||
+      architecture == "Lfm2VLForConditionalGeneration") {
+    return "Lfm2VlForConditionalGeneration";
+  }
+
+  if (architecture == "Lfm2VlPrefill") {
+    return "Lfm2VlPrefill";
   }
 
   return architecture;
@@ -279,6 +306,27 @@ int main(int argc, char *argv[]) {
     "TimmViT", [](json cfg, json generation_cfg, json nntr_cfg) {
       return std::make_unique<causallm::TimmViTTransformer>(cfg, generation_cfg,
                                                             nntr_cfg);
+    });
+  causallm::Factory::Instance().registerModel(
+    "Siglip2NaFlexVision", [](json cfg, json generation_cfg, json nntr_cfg) {
+      return std::make_unique<causallm::Siglip2NaFlexVision>(
+        cfg, generation_cfg, nntr_cfg);
+    });
+  causallm::Factory::Instance().registerModel(
+    "Lfm2VlEmbeddingMerge", [](json cfg, json generation_cfg, json nntr_cfg) {
+      return std::make_unique<causallm::Lfm2VlEmbeddingMerge>(
+        cfg, generation_cfg, nntr_cfg);
+    });
+  causallm::Factory::Instance().registerModel(
+    "Lfm2VlForConditionalGeneration",
+    [](json cfg, json generation_cfg, json nntr_cfg) {
+      return std::make_unique<causallm::Lfm2VlForConditionalGeneration>(
+        cfg, generation_cfg, nntr_cfg);
+    });
+  causallm::Factory::Instance().registerModel(
+    "Lfm2VlPrefill", [](json cfg, json generation_cfg, json nntr_cfg) {
+      return std::make_unique<causallm::Lfm2VlPrefill>(
+        cfg, generation_cfg, nntr_cfg);
     });
   causallm::Factory::Instance().registerModel(
     "Lfm2ForCausalLM", [](json cfg, json generation_cfg, json nntr_cfg) {

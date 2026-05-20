@@ -15,6 +15,8 @@ subdir('qwen3_slim_moe')
 subdir('gemma3')
 subdir('timm_vit')
 subdir('lfm2')
+subdir('siglip2_vision')
+subdir('lfm2_vl')
 if get_option('platform') != 'windows'
     subdir('bert')
     subdir('gpt_oss_cached_slim')

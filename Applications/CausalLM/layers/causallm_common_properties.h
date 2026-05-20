@@ -31,6 +31,7 @@
 #endif
 
 #include <base_properties.h>
+#include <common_properties.h>
 #include <tensor.h>
 #include <utility>
 
@@ -75,6 +76,47 @@ public:
   static constexpr const char *key =
     "feature_size";                          /**< unique key to access */
   using prop_tag = nntrainer::uint_prop_tag; /**< property type */
+};
+
+/**
+ * @brief Square base grid size for resized 2D position embeddings.
+ */
+class BaseGridSize : public nntrainer::PositiveIntegerProperty {
+public:
+  static constexpr const char *key =
+    "base_grid_size";                        /**< unique key to access */
+  using prop_tag = nntrainer::uint_prop_tag; /**< property type */
+};
+
+/**
+ * @brief Spatial downsample factor for vision projector reshaping.
+ */
+class DownsampleFactor : public nntrainer::PositiveIntegerProperty {
+public:
+  DownsampleFactor(unsigned int value = 2) { set(value); }
+  static constexpr const char *key =
+    "downsample_factor";                     /**< unique key to access */
+  using prop_tag = nntrainer::uint_prop_tag; /**< property type */
+};
+
+/**
+ * @brief Token id used as an image-feature placeholder in input_ids.
+ */
+class ImageTokenId : public nntrainer::PositiveIntegerProperty {
+public:
+  static constexpr const char *key =
+    "image_token_id";                        /**< unique key to access */
+  using prop_tag = nntrainer::uint_prop_tag; /**< property type */
+};
+
+/**
+ * @brief Additive attention value for masked entries.
+ */
+class MaskValue : public nntrainer::Property<float> {
+public:
+  MaskValue(float value = -1.0e10f) : nntrainer::Property<float>(value) {}
+  static constexpr const char *key = "mask_value"; /**< unique key */
+  using prop_tag = nntrainer::float_prop_tag;      /**< property type */
 };
 
 /**
