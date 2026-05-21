@@ -19,6 +19,7 @@
 #include <fp16.h>
 #include <fstream>
 #include <nntrainer_error.h>
+#include <sstream>
 #include <tensor.h>
 #include <tensor_dim.h>
 #include <thread_manager.h>
@@ -1042,6 +1043,9 @@ TEST(nntrainer_Tensor, QTensor_20_p) {
 
   EXPECT_EQ(q4_0_tensor.q_scheme(), nntrainer::QScheme::Q4_0);
   EXPECT_EQ(q4_0_tensor.size(), 1152);
+
+  std::ostringstream oss;
+  EXPECT_NO_THROW(q4_0_tensor.print(oss));
 }
 
 /**
