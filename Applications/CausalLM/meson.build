@@ -229,7 +229,11 @@ if get_option('enable-test')
   # Ubuntu native builds use platform=none.
   model_unittest_platforms = ['none', 'windows', 'android']
   platform = get_option('platform')
-  enable_causallm_model_unittest = platform in model_unittest_platforms
+  # Tiny model-level tests cover FP32 and Q4_0-FP32 correctness. Keep them out
+  # of FP16 builds, where cache tensors intentionally use FP16 storage.
+  enable_causallm_model_unittest = (
+    platform in model_unittest_platforms and not get_option('enable-fp16')
+  )
   if enable_causallm_model_unittest
     unittest_causallm_models = executable(
       'unittest_causallm_models',
