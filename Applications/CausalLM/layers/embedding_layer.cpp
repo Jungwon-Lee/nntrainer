@@ -462,15 +462,11 @@ void EmbeddingLayer::finalize(nntrainer::InitLayerContext &context) {
   const bool has_quantized_lut = !quantized_lut_path.empty();
   if (has_quantized_lut)
     context.setInputDataType(nntrainer::TensorDim::DataType::FP32);
+
   const nntrainer::TensorDim &input_dim =
     context.getInputDimensions()[SINGLE_INOUT_IDX];
   NNTR_THROW_IF(input_dim.channel() != 1, std::invalid_argument)
     << "Embedding layer takes only one for channel size";
-
-  NNTR_THROW_IF(!has_quantized_lut && input_dim.getDataType() !=
-                                        nntrainer::TensorDim::DataType::FP32,
-                std::invalid_argument)
-    << "Embedding layer takes only FP32 input data";
 
   auto &weight_regularizer =
     std::get<nntrainer::props::WeightRegularizer>(*layer_impl_props);
