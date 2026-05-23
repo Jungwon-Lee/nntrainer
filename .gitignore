@@ -24,6 +24,10 @@ Applications/**/res/*
 !Applications/CausalLM/res/deberta_v2/
 Applications/CausalLM/res/deberta_v2/*
 !Applications/CausalLM/res/deberta_v2/weight_converter.py
+!Applications/CausalLM/res/lfm2_vl/
+Applications/CausalLM/res/lfm2_vl/*
+!Applications/CausalLM/res/lfm2_vl/README.md
+!Applications/CausalLM/res/lfm2_vl/*.py
 Applications/**/tokenizers-cpp-build/*
 
 # CTag
