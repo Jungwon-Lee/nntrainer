@@ -462,15 +462,15 @@ void EmbeddingLayer::finalize(nntrainer::InitLayerContext &context) {
   const bool has_quantized_lut = !quantized_lut_path.empty();
   if (has_quantized_lut)
     context.setInputDataType(nntrainer::TensorDim::DataType::FP32);
+
+  // Token IDs are integers — embedding caller is expected to provide FP32
+  // input (e.g., via an explicit input layer with input_dtype=FP32). The
+  // historical "must be FP32" check is removed so FP16-activation models
+  // still construct, but the actual lookup expects integer-valued data.
   const nntrainer::TensorDim &input_dim =
     context.getInputDimensions()[SINGLE_INOUT_IDX];
   NNTR_THROW_IF(input_dim.channel() != 1, std::invalid_argument)
     << "Embedding layer takes only one for channel size";
-
-  NNTR_THROW_IF(!has_quantized_lut && input_dim.getDataType() !=
-                                        nntrainer::TensorDim::DataType::FP32,
-                std::invalid_argument)
-    << "Embedding layer takes only FP32 input data";
 
   auto &weight_regularizer =
     std::get<nntrainer::props::WeightRegularizer>(*layer_impl_props);
