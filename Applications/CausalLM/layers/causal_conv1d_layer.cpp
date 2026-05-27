@@ -21,6 +21,7 @@
 #include <cpu_backend.h>
 #include <nntrainer_error.h>
 #include <nntrainer_log.h>
+#include <thread_manager.h>
 
 namespace causallm {
 
@@ -108,28 +109,32 @@ void CausalConv1DLayer::incremental_forwarding(
   const float *w_ptr   = w_tensor.getData<float>();
   float       *state_data = state.getData<float>(); // [B, 1, KERNEL_SIZE-1, W]
 
+  auto &tm = nntrainer::ThreadManager::Global();
+  const float *in_data  = input.getData<float>();
+  float       *out_data = output.getData<float>();
+
   if (to - from == 1) {
     // ----------------------------------------------------------------
     // Decode path (hot): single-token inference.
     // NNTrainer places the current token at offset 0 within each batch
     // slice (not at offset `from`).
     // ----------------------------------------------------------------
-    for (unsigned int b = 0; b < B; ++b) {
-      const float *x_cur = input.getData<float>()  + b * H * W;
-      float       *y_cur = output.getData<float>()  + b * H * W;
+    tm.parallel_for(0, static_cast<size_t>(B), [=](size_t b) {
+      const float *x_cur = in_data  + b * H * W;
+      float       *y_cur = out_data + b * H * W;
       float       *s     = state_data + b * (KERNEL_SIZE - 1) * W;
 
       // y = w0*x + w1*s1 + w2*s0; state updated in-place by kernel
       nntrainer::causal_depthwise_conv1d_k3_decode(x_cur, w_ptr, s, y_cur, W);
-    }
+    });
 
   } else {
     // ----------------------------------------------------------------
     // Prefill path: process all positions [0, to).
     // ----------------------------------------------------------------
-    for (unsigned int b = 0; b < B; ++b) {
-      const float *x = input.getData<float>()  + b * H * W;
-      float       *y = output.getData<float>()  + b * H * W;
+    tm.parallel_for(0, static_cast<size_t>(B), [=](size_t b) {
+      const float *x = in_data  + b * H * W;
+      float       *y = out_data + b * H * W;
 
       nntrainer::causal_depthwise_conv1d_k3(x, w_ptr, nullptr, y, 1, to, W);
 
@@ -142,7 +147,7 @@ void CausalConv1DLayer::incremental_forwarding(
         std::memset(s, 0, W * sizeof(float));
 
       std::memcpy(s + W, x + (to - 1) * W, W * sizeof(float));  // x_{to-1}
-    }
+    });
   }
 }
 
