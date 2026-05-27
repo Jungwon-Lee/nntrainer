@@ -270,7 +270,10 @@ void Lfm2CausalLM::setupParameters(json &cfg, json &generation_cfg,
                                         json &nntr_cfg) {
 
   try {
-    unsigned int ff_dim = cfg["block_ff_dim"].get<unsigned int>();  // 10240
+    unsigned int ff_dim = INTERMEDIATE_SIZE;
+    if (cfg.contains("block_ff_dim")) {
+      ff_dim = cfg["block_ff_dim"].get<unsigned int>();  // 10240
+    }
 
     if (cfg.contains("block_auto_adjust_ff_dim") &&
         cfg["block_auto_adjust_ff_dim"].get<bool>()) {
@@ -329,7 +332,9 @@ void Lfm2CausalLM::setupParameters(json &cfg, json &generation_cfg,
       }
     }
 
-    TIE_WORD_EMBEDDINGS = false;
+    TIE_WORD_EMBEDDINGS = cfg.contains("tie_word_embeddings")
+                            ? cfg["tie_word_embeddings"].get<bool>()
+                            : false;
   } catch (const std::exception &e) {
     throw std::runtime_error(std::string("Lfm2CausalLM: config parsing error: ") +
                              e.what());
