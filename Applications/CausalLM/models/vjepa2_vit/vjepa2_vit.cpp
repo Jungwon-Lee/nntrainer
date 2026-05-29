@@ -360,4 +360,81 @@ void VJEPA2ViT::run(const WSTR prompt, bool do_sample, const WSTR system_prompt,
   }
 }
 
+/**
+ * @brief Run the encoder on multiple video frames.
+ *
+ * Each element of @p images is a single frame in [C, H, W] layout
+ * (already resized and normalized). The frames are assembled into a
+ * [C, T, H, W] video tensor and processed in one pass, following the
+ * same pipeline as run(): patchify → incremental_inference.
+ */
+multimodal_pointer VJEPA2ViT::run_image(
+  const std::vector<std::vector<float>> &images,
+  unsigned int original_height, unsigned int original_width, bool log_output) {
+  (void)original_height;
+  (void)original_width;
+
+  if (!is_initialized) {
+    throw std::runtime_error("VJEPA2ViT model is not initialized. Please call "
+                             "initialize() before run_image().");
+  }
+
+  if (images.size() != NUM_FRAMES) {
+    throw std::runtime_error(
+      "Expected " + std::to_string(NUM_FRAMES) +
+      " frames for run_image(), got " + std::to_string(images.size()) + ".");
+  }
+
+  const size_t frame_size =
+    static_cast<size_t>(IN_CHANS) * IMG_SIZE * IMG_SIZE;
+
+  // Assemble frames into [C, T, H, W] video buffer (same layout as run()).
+  const size_t video_size =
+    static_cast<size_t>(IN_CHANS) * NUM_FRAMES * IMG_SIZE * IMG_SIZE;
+  std::vector<float> video(video_size);
+  for (unsigned int t = 0; t < NUM_FRAMES; ++t) {
+    if (images[t].size() != frame_size) {
+      throw std::runtime_error(
+        "Frame " + std::to_string(t) + " size mismatch; expected " +
+        std::to_string(frame_size) + " floats ([C,H,W] = [" +
+        std::to_string(IN_CHANS) + "," + std::to_string(IMG_SIZE) + "," +
+        std::to_string(IMG_SIZE) + "]), got " +
+        std::to_string(images[t].size()) + ".");
+    }
+    for (unsigned int c = 0; c < IN_CHANS; ++c) {
+      const size_t src_offset = c * IMG_SIZE * IMG_SIZE;
+      const size_t dst_offset =
+        (static_cast<size_t>(c) * NUM_FRAMES + t) * IMG_SIZE * IMG_SIZE;
+      std::copy(images[t].data() + src_offset,
+                images[t].data() + src_offset + IMG_SIZE * IMG_SIZE,
+                video.data() + dst_offset);
+    }
+  }
+
+  // patchify → tokens (same as run())
+  std::vector<float> tokens = patchify(video);
+
+  // incremental_inference (same as run())
+  std::vector<float *> input;
+  input.push_back(tokens.data());
+  std::vector<float *> label;
+
+  std::vector<float *> output = model->incremental_inference(
+    BATCH_SIZE, input, label, NUM_PATCHES, 0, NUM_PATCHES, false);
+
+  // Store the full output: NUM_PATCHES tokens × DIM hidden dim.
+  last_output_.assign(output[0], output[0] + NUM_PATCHES * DIM);
+
+  if (log_output) {
+    std::cout << std::setprecision(9) << "First 10 values (last token): ";
+    const int print_count = DIM > 10 ? 10 : DIM;
+    for (int i = 0; i < print_count; ++i) {
+      std::cout << "[" << i << "]=" << output[0][i] << " ";
+    }
+    std::cout << std::endl;
+  }
+
+  return {last_output_.data(), last_output_.size() * sizeof(float)};
+}
+
 } // namespace causallm

@@ -64,6 +64,24 @@ public:
    */
   Tensor createMlp(const int layer_id, Tensor input);
 
+  /**
+   * @brief Run the encoder on multiple video frames.
+   *
+   * Each element of @p images is a single frame in [C, H, W] layout
+   * (already resized and normalized). The frames are assembled into a
+   * [C, T, H, W] video tensor and processed in one pass.
+   *
+   * @param images          Vector of frame tensors, each [C, H, W].
+   * @param original_height Original image height before resize.
+   * @param original_width  Original image width before resize.
+   * @param log_output      Whether to log output.
+   * @return multimodal_pointer {data_ptr, size_in_bytes} pointing to the
+   *         encoded hidden states. Valid until the next call or destruction.
+   */
+  multimodal_pointer run_image(const std::vector<std::vector<float>> &images,
+                               unsigned int original_height,
+                               unsigned int original_width,
+                               bool log_output = true);
 protected:
   /**
    * @brief Construct the symbolic ViT inference graph.
@@ -98,7 +116,7 @@ private:
   unsigned int IMG_SIZE = 384;   /**< Image height/width */
   unsigned int PATCH_SIZE = 16;  /**< Spatial patch size */
   unsigned int TUBELET = 2;      /**< Temporal tubelet size */
-  unsigned int NUM_FRAMES = 64;  /**< Number of input frames */
+  unsigned int NUM_FRAMES = 16;  /**< Number of input frames */
   unsigned int IN_CHANS = 3;     /**< Input channels (RGB) */
   unsigned int GRID_T = 32;      /**< Temporal grid (NUM_FRAMES / TUBELET) */
   unsigned int GRID_H = 24;      /**< Height grid (IMG_SIZE / PATCH_SIZE) */
@@ -107,6 +125,9 @@ private:
   unsigned int PATCH_VEC = 1536; /**< IN_CHANS * TUBELET * PATCH_SIZE^2 */
   unsigned int PRETRAINED_GRID = 16;  /**< 256 / PATCH_SIZE for rope interp */
   bool INTERPOLATE_ROPE = true;       /**< V-JEPA 2.1 uses rope interpolation */
+
+  /** Output from the last run_image() call (NUM_PATCHES * DIM floats). */
+  std::vector<float> last_output_;
 
   /**
    * @brief Extract non-overlapping tubelets from a [C,T,H,W] float buffer into

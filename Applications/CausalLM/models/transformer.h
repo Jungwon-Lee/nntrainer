@@ -58,6 +58,9 @@ using ModelHandle = std::unique_ptr<ml::train::Model>;
 
 using json = nlohmann::json;
 
+// Memory pointer and its size
+typedef std::pair<void *, size_t> multimodal_pointer;
+
 /**
  * @brief Model Type Enum
  */
