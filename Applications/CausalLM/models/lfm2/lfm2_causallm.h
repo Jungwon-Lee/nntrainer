@@ -88,15 +88,60 @@ public:
    * @note Creates model with small dimensions for testing
    */
   static Lfm2CausalLM createTestModel();
+  
+  /**
+   * @brief Run prefill with in-memory input embeddings (skips file I/O).
+   *
+   * @param inputs_embeds  Pointer to merged embeddings [B * INIT_SEQ_LEN * DIM]
+   */
+  void run_with_embeddings(const void *inputs_embeds, size_t n_tokens,
+                           std::vector<int> seed_tokens, bool do_sample,
+                           bool log_output);
+  /**
+   * @brief Look up the embedding vector for a given token ID.
+   *
+   * Supports FP32, Q4_0, and Q6_K embedding weight types.
+   * Must be called after load_weight() so that embedding weights are loaded.
+   *
+   * @param token_id Token ID to look up
+   * @return Embedding vector of size DIM (FP32)
+   */
+  std::vector<float> lookupEmbedding(unsigned int token_id);
+
+  /**
+   * @brief Get the generated token IDs from the last run_with_embeddings call.
+   */
+  const std::vector<unsigned int> &getGeneratedIds() const {
+    return generated_ids_;
+  }
 
   ModelHandle &getModel() { return model; }
 
-public:
-  std::vector<std::string> layer_types_;
-  int CONV_DIM;
-  int CONV_DIM_OUT;
-  int CONV_L_CACHE;
-  bool CONV_BIAS;
+  /**
+   * @brief Load model weights and optionally cache embedding weights.
+   * @param weight_path Path to the model weight file
+   */
+  void load_weight(const std::string &weight_path) override;
+
+private:
+
+  std::vector<unsigned int> generated_ids_; /**< Generated token IDs from last run */
+
+  /** Embedding weight cache for lookupEmbedding() */
+  bool embedding_weight_cached_ = false;
+  nntrainer::TensorDim::DataType embedding_weight_dtype_ =
+    nntrainer::TensorDim::DataType::FP32;
+  std::vector<float> embedding_weight_cache_;          /**< FP32 embedding weights */
+  std::vector<uint8_t> embedding_weight_cache_uint8_;  /**< Quantized embedding weights */
+  size_t embedding_row_bytes_ = 0;                     /**< Bytes per row for quantized types */
+
+  /**
+   * @brief Load embedding weights from EMBEDDING_BIN_PATH into cache.
+   *
+   * Reads the standalone embedding binary file whose path is specified
+   * in nntr_config["embedding_bin_path"]. Supports FP32, Q4_0, and Q6_K.
+   */
+  void loadEmbeddingWeight();
 };
 
 } // namespace causallm
