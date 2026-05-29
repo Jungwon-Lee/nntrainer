@@ -13,16 +13,22 @@
 #ifndef __LFM2_CAUSALLM_H__
 #define __LFM2_CAUSALLM_H__
 
+#include <cstdint>
+#include <fstream>
 #include <string>
 #include <vector>
+
+#include <tensor_dim.h>
 
 #include "causal_lm.h"
 
 namespace causallm {
 
 /**
- * @brief Lfm2Transformer - model-specific attention variant
+ * @brief Lfm2Transformer - model-specific attention variant and conv block
  * @note Overrides createAttention() for lfm2-specific behavior
+ * @note Provides createConvBlock() and setupLfm2Parameters() shared by
+ *       Lfm2CausalLM and Lfm2VlDecoder
  */
 class Lfm2Transformer : virtual public Transformer {
 public:
@@ -34,7 +40,33 @@ public:
                          Tensor query, Tensor key,
                          Tensor value) override;
 
+  /**
+   * @brief Create a conv block for LFM2 hybrid layers.
+   * @param layer_id index of the layer
+   * @param input symbolic input tensor
+   * @return symbolic output tensor of the conv block
+   */
+  Tensor createConvBlock(const int layer_id, Tensor input);
+
   void registerCustomLayers() override;
+
+  /**
+   * @brief Setup LFM2-specific parameters shared by CausalLM and VL decoder.
+   * @param cfg Model config (config.json or text_config)
+   * @param generation_cfg Generation config
+   * @param nntr_cfg NNTrainer config
+   * @param require_layer_types If true, throw when layer_types is missing
+   */
+  void setupLfm2Parameters(json &cfg, json &generation_cfg,
+                           json &nntr_cfg, bool require_layer_types = true);
+
+  std::vector<std::string> layer_types_;
+  int CONV_DIM = 0;
+  int CONV_DIM_OUT = 0;
+  int CONV_L_CACHE = 0;
+  bool CONV_BIAS = false;
+  bool USE_EMBEDDING = false;
+  std::string EMBEDDING_BIN_PATH; /**< Path to standalone embedding bin file */
 };
 
 /**
@@ -49,8 +81,6 @@ public:
   std::pair<Tensor, Tensor> constructModel() override;
   void setupParameters(json &cfg, json &generation_cfg,
                        json &nntr_cfg) override;
-  Tensor createConvBlock(const int layer_id,
-                         Tensor input);
   void registerCustomLayers() override;
 
   /**
