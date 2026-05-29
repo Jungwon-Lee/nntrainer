@@ -85,6 +85,7 @@
 #include "qwen3_embedding.h"
 #include "qwen3_moe_causallm.h"
 #include "qwen3_slim_moe_causallm.h"
+#include "lfm2/lfm2_causallm.h"
 
 using json = nlohmann::json;
 using DataType = ml::train::TensorDim::DataType;
@@ -343,6 +344,10 @@ void registerAllModels() {
                           return std::make_unique<causallm::EmbeddingGemma>(
                             cfg, generation_cfg, nntr_cfg);
                         });
+  factory.registerModel(
+    "Lfm2ForCausalLM", [](json cfg, json generation_cfg, json nntr_cfg) {
+      return std::make_unique<causallm::Lfm2CausalLM>(cfg, generation_cfg, nntr_cfg);
+    });
 }
 
 /**
@@ -465,7 +470,6 @@ buildLayerDtypeMap(int num_layers, DataType fc_dtype, DataType embd_dtype,
       dtype_map[prefix + "_ffn_gate"] = fc_dtype;
       dtype_map[prefix + "_ffn_up"] = fc_dtype;
       dtype_map[prefix + "_ffn_down"] = fc_dtype;
-
       dtype_map[prefix + "_ffn_output"] = fc_dtype;
 
       // for PLE
@@ -477,6 +481,10 @@ buildLayerDtypeMap(int num_layers, DataType fc_dtype, DataType embd_dtype,
 
       dtype_map[prefix + "_ple_projection"] = fc_dtype;
       dtype_map[prefix + "_ple_input_gate"] = fc_dtype;
+
+      // LFM FFN layers
+      dtype_map[prefix + "_conv_in_proj"] = fc_dtype;
+      dtype_map[prefix + "_conv_out_proj"] = fc_dtype;
     }
   }
 
