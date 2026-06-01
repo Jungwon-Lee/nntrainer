@@ -44,6 +44,21 @@ causallm_layer_dependencies += [
 
 subdir('models')
 
+# FFmpeg dependency for video preprocessing
+ffmpeg_dep = dependency('libavcodec', required: false)
+ffmpeg_format_dep = dependency('libavformat', required: false)
+ffmpeg_swscale_dep = dependency('libswscale', required: false)
+ffmpeg_avutil_dep = dependency('libavutil', required: false)
+ffmpeg_available = ffmpeg_dep.found() and ffmpeg_format_dep.found() and ffmpeg_swscale_dep.found() and ffmpeg_avutil_dep.found()
+
+if ffmpeg_available
+    causallm_src += [meson.current_source_dir() / 'video_preprocessor.cpp']
+    ffmpeg_deps = [ffmpeg_dep, ffmpeg_format_dep, ffmpeg_swscale_dep, ffmpeg_avutil_dep]
+else
+    ffmpeg_deps = []
+    warning('FFmpeg not found; video preprocessor and test_vjepa_lfm2 will not be built')
+endif
+
 if (get_option('platform') == 'windows') and (build_machine.system() == 'windows')
     run_command(powershell_prog, '-ExecutionPolicy', 'Bypass', '-File', join_paths(meson.source_root(), 'jni', 'prepare_encoder.ps1'), meson.build_root(), '0.2', check: true)
 elif get_option('platform') != 'tizen'
@@ -129,7 +144,8 @@ if get_option('platform') == 'windows'
             nntrainer_dep,
             nntrainer_ccapi_dep,
             causallm_layer_dependencies,
-            tokenizer_dependencies
+            tokenizer_dependencies,
+            ffmpeg_deps
         ],
         include_directories: [
             causallm_inc,
@@ -146,7 +162,8 @@ else
             nntrainer_dep,
             nntrainer_ccapi_dep,
             causallm_layer_dependencies,
-            tokenizer_dependencies
+            tokenizer_dependencies,
+            ffmpeg_deps
         ],
         include_directories: [
             causallm_inc,
@@ -195,6 +212,9 @@ test_api = executable('test_api',
     build_by_default: true,
     install: false,
 )
+
+# Test executables
+subdir('tests')
 
 # KVCacheManager unit tests
 if get_option('enable-test')
