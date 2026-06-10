@@ -35,13 +35,16 @@ void ReshapedRMSNormLayer::finalize(nntrainer::InitLayerContext &context) {
     << "feature size must be a divisor of width";
 
   if (use_gamma) {
+    // gamma is unquantized FP32 on disk; request FP32 regardless of activation
+    // dtype (FP16 would reinterpret the FP32 bytes and corrupt gamma). The FP16
+    // path casts gamma down at the multiply site.
     nntrainer::TensorDim gamma_dim(
       1, 1, 1, feature_size,
       nntrainer::TensorDim::TensorType(context.getFormat(),
-                                       context.getWeightDataType()));
+                                       nntrainer::TensorDim::DataType::FP32));
     wt_idx[RMSParams::gamma] = context.requestWeight(
       gamma_dim, nntrainer::props::InitializerInfo::Enum::NONE,
-      nntrainer::WeightRegularizer::NONE, 1.0f, 0.0f, "gamma", false);
+      nntrainer::WeightRegularizer::NONE, 1.0f, 0.0f, "gamma", true);
   }
 }
 

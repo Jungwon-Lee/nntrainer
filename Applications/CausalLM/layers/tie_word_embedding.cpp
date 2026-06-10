@@ -241,20 +241,42 @@ void TieWordEmbedding::incremental_forwarding_embedding(
       nntrainer::Tensor out_tensor =
         batchsliced_hidden.getSharedDataTensor(out_tensor_dim, out_dim * (i));
 
-      if (weight.getDataType() == nntrainer::TensorDim::DataType::Q6_K) {
+      if (weight.getDataType() == nntrainer::TensorDim::DataType::Q6_K ||
+          weight.getDataType() == nntrainer::TensorDim::DataType::Q4_0) {
         ///@note this should be replaced with quantizer operation
-        int num_blocks_per_row = (weight.width() + 256 - 1) / 256;
-        nntrainer::dequantize_row_q6_K(
+        const bool is_q6k =
+          weight.getDataType() == nntrainer::TensorDim::DataType::Q6_K;
+        const int blk = is_q6k ? 256 : 32;
+        const int bytes_per_blk = is_q6k ? 210 : 18;
+        const int num_blocks_per_row = (weight.width() + blk - 1) / blk;
+        const void *src =
           (void *)((char *)weight.getData<uint8_t>() +
-                   (210 * num_blocks_per_row) * embed_idx),
-          out_tensor.getData(), out_dim);
-      } else if (weight.getDataType() == nntrainer::TensorDim::DataType::Q4_0) {
-        ///@note this should be replaced with quantizer operation
-        int num_blocks_per_row = (weight.width() + 32 - 1) / 32;
-        nntrainer::dequantize_row_q4_0(
-          (void *)((char *)weight.getData<uint8_t>() +
-                   (18 * num_blocks_per_row) * embed_idx),
-          out_tensor.getData(), out_dim);
+                   (bytes_per_blk * num_blocks_per_row) * embed_idx);
+
+        if (out_tensor.getDataType() ==
+            nntrainer::TensorDim::DataType::FP32) {
+          if (is_q6k)
+            nntrainer::dequantize_row_q6_K(src, out_tensor.getData(), out_dim);
+          else
+            nntrainer::dequantize_row_q4_0(src, out_tensor.getData(), out_dim);
+        } else {
+          // dequantize_row_* writes FP32. Under a non-FP32 (e.g. FP16)
+          // activation, writing straight into out_tensor would scribble each
+          // 4-byte float across the narrower slots and corrupt the embedding
+          // (multilingual-garbage symptom). Dequantize into an FP32 temp then
+          // cast into the activation dtype.
+          nntrainer::TensorDim fp32_dim(
+            {1, 1, 1, out_dim},
+            nntrainer::TensorDim::TensorType(
+              out_tensor_dim.getFormat(),
+              nntrainer::TensorDim::DataType::FP32));
+          nntrainer::Tensor tmp(fp32_dim, true);
+          if (is_q6k)
+            nntrainer::dequantize_row_q6_K(src, tmp.getData(), out_dim);
+          else
+            nntrainer::dequantize_row_q4_0(src, tmp.getData(), out_dim);
+          out_tensor.copyData(tmp);
+        }
       } else {
         out_tensor.copyData(cur_weight);
       }
@@ -345,6 +367,16 @@ void TieWordEmbedding::incremental_forwarding_lmhead(
             nntrainer::sdot(hidden_size, input_data, 1, dequant_row.data(), 1);
         }
       });
+    } else if (input_step.getDataType() !=
+               nntrainer::TensorDim::DataType::FP32) {
+      // The logits (hidden_step) are FP32 — generate() reads them as float* for
+      // argmax/sampling. Under a non-FP32 (e.g. FP16) activation the HalfTensor
+      // dot path would write FP16 logits into the FP32 buffer and corrupt them
+      // (constant-garbage tokens). Cast the input up and use the FP32 dot so
+      // the matmul writes FP32 logits directly.
+      nntrainer::Tensor input_fp32 =
+        input_step.clone(nntrainer::TensorDim::DataType::FP32);
+      input_fp32.dot(weight, hidden_step, false, true);
     } else {
       input_step.dot(weight, hidden_step, false, true);
     }
