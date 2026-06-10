@@ -28,13 +28,17 @@ void RMSNormLayer::finalize(nntrainer::InitLayerContext &context) {
   if (!std::get<nntrainer::props::SkipPrefill>(rms_props).empty())
     skip_prefill = std::get<nntrainer::props::SkipPrefill>(rms_props).get();
 
+  // gamma is unquantized and stored as FP32 in the bin. Request it as FP32
+  // regardless of the activation dtype; declaring it FP16 reinterprets the
+  // on-disk FP32 bytes as FP16 and corrupts gamma (≈FP16-max garbage). The
+  // FP16 forward path casts gamma down to FP16 at the multiply site.
   nntrainer::TensorDim gamma_dim(
     1, 1, 1, dim[0].width(),
     nntrainer::TensorDim::TensorType(context.getFormat(),
-                                     context.getWeightDataType()));
+                                     nntrainer::TensorDim::DataType::FP32));
   wt_idx[RMSParams::gamma] = context.requestWeight(
     gamma_dim, nntrainer::props::InitializerInfo::Enum::NONE,
-    nntrainer::WeightRegularizer::NONE, 1.0f, 0.0f, "gamma", false);
+    nntrainer::WeightRegularizer::NONE, 1.0f, 0.0f, "gamma", true);
 }
 
 void RMSNormLayer::forwarding(nntrainer::RunLayerContext &context,
@@ -111,7 +115,6 @@ void RMSNormLayer::incremental_forwarding(nntrainer::RunLayerContext &context,
     } else {
       out_step.multiply_i(gamma);
     }
-
 #ifdef DEBUG
     std::cout << context.getName() << " \n input:" << in_step
               << "output:" << out_step << "gamma:" << gamma << std::endl;
