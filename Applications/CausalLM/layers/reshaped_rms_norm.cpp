@@ -109,13 +109,25 @@ void ReshapedRMSNormLayer::incremental_forwarding(
         in_step.getData<float>(), out_step.getData<float>(),
         in_step.getDim().height(), in_step.getDim().width(), epsilon);
 #endif
+#ifdef ENABLE_FP16
+    } else if (in_step.getDataType() == ml::train::TensorDim::DataType::FP16) {
+      // FP16 activation: kernel accumulates squares in FP32 (no overflow).
+      nntrainer::rms_norm_wrt_width_fp16_intrinsic(
+        in_step.getData<_FP16>(), out_step.getData<_FP16>(),
+        in_step.getDim().height(), in_step.getDim().width(), epsilon);
+#endif
     } else {
       throw std::invalid_argument(
         "Error: not yet implemented for this data type");
     }
     if (use_gamma) {
       nntrainer::Tensor &gamma = context.getWeight(wt_idx[RMSParams::gamma]);
-      out_step.multiply_i(gamma);
+      if (gamma.getDataType() != out_step.getDataType()) {
+        nntrainer::Tensor gamma_cast = gamma.clone(out_step.getDataType());
+        out_step.multiply_i(gamma_cast);
+      } else {
+        out_step.multiply_i(gamma);
+      }
     }
 
     // reshape again out_step

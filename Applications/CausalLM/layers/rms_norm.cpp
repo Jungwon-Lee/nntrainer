@@ -90,11 +90,27 @@ void RMSNormLayer::incremental_forwarding(nntrainer::RunLayerContext &context,
         in_step.getData<float>(), out_step.getData<float>(), dim.height(),
         dim.width(), epsilon);
 #endif
+#ifdef ENABLE_FP16
+    } else if (in_step.getDataType() == ml::train::TensorDim::DataType::FP16) {
+      const auto &dim = in_step.getDim();
+      // FP16 activation: this kernel accumulates the sum-of-squares in FP32
+      // (so a wide residual row cannot overflow FP16) and reads/writes FP16.
+      nntrainer::rms_norm_wrt_width_fp16_intrinsic(
+        in_step.getData<_FP16>(), out_step.getData<_FP16>(), dim.height(),
+        dim.width(), epsilon);
+#endif
     } else {
       throw std::invalid_argument(
         "Error: not yet implemented for this data type");
     }
-    out_step.multiply_i(gamma);
+    // gamma (unquantized) may be stored at a different dtype than the FP16
+    // activation; cast it to match before the elementwise multiply.
+    if (gamma.getDataType() != out_step.getDataType()) {
+      nntrainer::Tensor gamma_cast = gamma.clone(out_step.getDataType());
+      out_step.multiply_i(gamma_cast);
+    } else {
+      out_step.multiply_i(gamma);
+    }
 
 #ifdef DEBUG
     std::cout << context.getName() << " \n input:" << in_step
