@@ -16,7 +16,8 @@
  * @date   04 March 2026
  * @brief  Quantization utility for CausalLM models.
  *         Reads a FP32 model and converts weights to a target data type,
- *         saving both the quantized .bin file and a new nntr_config.json.
+ *         saving the quantized weights (.bin or .safetensors) and a new
+ *         nntr_config.json.
  * @see    https://github.com/nntrainer/nntrainer
  * @author Eunju Yang <ej.yang@samsung.com>
  * @bug    No known bugs except for NYI items
@@ -34,9 +35,10 @@
  *     --fc_dtype <type>   Target dtype for FC layers (default: Q4_0)
  *     --embd_dtype <type> Target dtype for embedding layer (default: FP32)
  *     --lmhead_dtype <type> Target dtype for LM head layer (default: FP32)
- *     --output_bin <name> Output bin filename (auto-generated if omitted)
+ *     --output_bin <name> Output weight filename (auto-generated if omitted)
+ *     --output_format <fmt> Output container: 'bin' (default) or 'safetensors'
  *
- *   Supported data types: FP32, FP16, Q4_0, Q6_K
+ *   Supported data types: FP32, FP16, Q4_0, Q4_K, Q6_K
  *
  *   Example:
  *     # Quantize Qwen3-4B to Q4_0 FC layers (embedding stays FP32):
@@ -69,6 +71,7 @@
 #include "causal_lm.h"
 #include "embedding_gemma.h"
 #include "gemma3_causallm.h"
+#include "gemma4_causallm.h"
 #if !defined(_WIN32)
 #include "gptoss_cached_slim_causallm.h"
 #endif
@@ -179,7 +182,8 @@ std::string toLower(std::string value) {
  */
 std::string generateOutputBinName(const std::string &original_bin,
                                   const std::string &fc_dtype,
-                                  const std::string &embd_dtype) {
+                                  const std::string &embd_dtype,
+                                  const std::string &target_isa) {
   // Extract model name from original (e.g., "nntr_qwen3_4b_fp32.bin" ->
   // "nntr_qwen3_4b")
   std::string base = original_bin;
@@ -217,9 +221,10 @@ std::string generateOutputBinName(const std::string &original_bin,
                    embd_clean.end());
 
   if (embd_clean == fc_clean) {
-    return base + "_" + fc_clean + ".bin";
+    return base + "_" + fc_clean + "_" + target_isa + ".bin";
   }
-  return base + "_" + fc_clean + "_embd" + embd_clean + ".bin";
+  return base + "_" + fc_clean + "_embd" + embd_clean + "_" + target_isa +
+         ".bin";
 }
 
 /**
@@ -242,6 +247,11 @@ std::string resolve_architecture(std::string model_type,
       throw std::invalid_argument(
         "Unsupported architecture for embedding model: " + architecture);
   }
+
+  if (architecture == "Gemma4ForConditionalGeneration") {
+    return "Gemma4ForCausalLM";
+  }
+
   return architecture;
 }
 
@@ -323,6 +333,11 @@ void registerAllModels() {
                           return std::make_unique<causallm::Gemma3CausalLM>(
                             cfg, generation_cfg, nntr_cfg);
                         });
+  factory.registerModel("Gemma4ForCausalLM",
+                        [](json cfg, json generation_cfg, json nntr_cfg) {
+                          return std::make_unique<causallm::Gemma4CausalLM>(
+                            cfg, generation_cfg, nntr_cfg);
+                        });
   factory.registerModel("EmbeddingGemma",
                         [](json cfg, json generation_cfg, json nntr_cfg) {
                           return std::make_unique<causallm::EmbeddingGemma>(
@@ -354,8 +369,10 @@ void printUsage(const char *prog) {
        "quantized weights\n"
     << "                        (default: DEFAULT). Options: DEFAULT, X86, "
        "ARM.\n"
-    << "  --output_bin <name>   Output .bin filename (auto-generated if "
+    << "  --output_bin <name>   Output weight filename (auto-generated if "
        "omitted)\n"
+    << "  --output_format <fmt> Output container: 'bin' (default) or "
+       "'safetensors'\n"
     << "  --config <path>       Use a target nntr_config.json instead of\n"
     << "                        individual dtype options. The fc_layer_dtype,\n"
     << "                        embedding_dtype, and lmhead_dtype fields\n"
@@ -415,6 +432,11 @@ buildLayerDtypeMap(int num_layers, DataType fc_dtype, DataType embd_dtype,
     dtype_map["embedding0"] = embd_dtype;
   }
 
+  // Gemma4 PLE layers - set to Q4_0 first
+  dtype_map["per_layer_input_embedding"] = fc_dtype;
+  // Gemma4 PLE projection
+  dtype_map["per_layer_input_projection"] = fc_dtype;
+
   // Transformer decoder layers
   for (int i = 0; i < num_layers; ++i) {
     std::string prefix = "layer" + std::to_string(i);
@@ -426,10 +448,35 @@ buildLayerDtypeMap(int num_layers, DataType fc_dtype, DataType embd_dtype,
       dtype_map[prefix + "_wv"] = fc_dtype;
       dtype_map[prefix + "_attention_out"] = fc_dtype;
 
-      // FFN FC layers
-      dtype_map[prefix + "_ffn_up"] = fc_dtype;
+      // Attention Gates
+      dtype_map[prefix + "_attention_gate_down"] = fc_dtype;
+      dtype_map[prefix + "_attention_gate_up"] = fc_dtype;
+
+      // Attention Gates
+      dtype_map[prefix + "_attention_gate_down"] = fc_dtype;
+      dtype_map[prefix + "_attention_gate_up"] = fc_dtype;
+
+      // FFN FC layers - version4
+      dtype_map[prefix + "_ffn_gate_up"] = fc_dtype;
+      dtype_map[prefix + "_ffn_gate_down"] = fc_dtype;
+      dtype_map[prefix + "_ffn_linear_up"] = fc_dtype;
+
+      // FFN FC layers - version3
       dtype_map[prefix + "_ffn_gate"] = fc_dtype;
+      dtype_map[prefix + "_ffn_up"] = fc_dtype;
       dtype_map[prefix + "_ffn_down"] = fc_dtype;
+
+      dtype_map[prefix + "_ffn_output"] = fc_dtype;
+
+      // for PLE
+      dtype_map[prefix + "_per_layer_input_gate"] = fc_dtype;
+      dtype_map[prefix + "_per_layer_input_proj"] = fc_dtype;
+      if (embd_dtype != DataType::FP32 && embd_dtype != DataType::NONE) {
+        dtype_map[prefix + "_ple"] = fc_dtype;
+      }
+
+      dtype_map[prefix + "_ple_projection"] = fc_dtype;
+      dtype_map[prefix + "_ple_input_gate"] = fc_dtype;
     }
   }
 
@@ -510,6 +557,7 @@ int main(int argc, char *argv[]) {
   std::string isa_str = "DEFAULT";
   std::string output_bin_name = "";
   std::string target_config_path = "";
+  std::string output_format = "bin";
 
   for (int i = 2; i < argc; ++i) {
     std::string arg = argv[i];
@@ -525,6 +573,13 @@ int main(int argc, char *argv[]) {
       isa_str = argv[++i];
     } else if (arg == "--output_bin" && i + 1 < argc) {
       output_bin_name = argv[++i];
+    } else if (arg == "--output_format" && i + 1 < argc) {
+      output_format = toLower(argv[++i]);
+      if (output_format != "bin" && output_format != "safetensors") {
+        std::cerr << "Unknown output format: " << output_format
+                  << " (expected 'bin' or 'safetensors')\n";
+        return EXIT_FAILURE;
+      }
     } else if (arg == "--config" && i + 1 < argc) {
       target_config_path = argv[++i];
     } else if (arg == "--help" || arg == "-h") {
@@ -592,11 +647,23 @@ int main(int argc, char *argv[]) {
       output_dir = model_path;
     std::filesystem::create_directories(output_dir);
 
-    // Determine output bin filename
+    // Determine output filename
     std::string original_bin = nntr_cfg["model_file_name"].get<std::string>();
     if (output_bin_name.empty()) {
-      output_bin_name = generateOutputBinName(
-        original_bin, dataTypeToStr(fc_dtype), dataTypeToStr(embd_dtype));
+      output_bin_name =
+        generateOutputBinName(original_bin, dataTypeToStr(fc_dtype),
+                              dataTypeToStr(embd_dtype), isa_str);
+    }
+    if (output_format == "safetensors") {
+      // The output format is decided by the file extension on save, so make
+      // sure the generated/explicit name ends with ".safetensors".
+      const std::string bin_ext = ".bin";
+      auto pos = output_bin_name.rfind(bin_ext);
+      if (pos != std::string::npos &&
+          pos + bin_ext.size() == output_bin_name.size())
+        output_bin_name = output_bin_name.substr(0, pos) + ".safetensors";
+      else if (output_bin_name.find(".safetensors") == std::string::npos)
+        output_bin_name += ".safetensors";
     }
 
     std::string src_weight_path = model_path + "/" + original_bin;
@@ -712,6 +779,30 @@ int main(int argc, char *argv[]) {
 
     std::cout << "  Config saved to: " << output_config_path << "\n";
 
+    // When writing to a separate directory, copy the auxiliary files the
+    // runtime needs (config.json / generation_config.json are required by
+    // CausalLM; tokenizer files are needed for generation) so the output
+    // directory is self-contained and runnable on its own.
+    if (output_dir != model_path) {
+      const char *aux_files[] = {"config.json",
+                                 "generation_config.json",
+                                 "tokenizer.json",
+                                 "tokenizer_config.json",
+                                 "special_tokens_map.json",
+                                 "vocab.json",
+                                 "merges.txt",
+                                 "modules.json"};
+      for (const char *fname : aux_files) {
+        std::filesystem::path src = std::filesystem::path(model_path) / fname;
+        if (!std::filesystem::exists(src))
+          continue;
+        std::filesystem::copy_file(
+          src, std::filesystem::path(output_dir) / fname,
+          std::filesystem::copy_options::overwrite_existing);
+        std::cout << "  Copied " << fname << " to output directory\n";
+      }
+    }
+
     // =========================================================================
     // Done
     // =========================================================================
@@ -726,9 +817,7 @@ int main(int argc, char *argv[]) {
                    "nntr_config.json\n";
       std::cout << "  2. nntr_causallm " << model_path << "\n";
     } else {
-      std::cout << "  1. Copy config.json and generation_config.json to "
-                << output_dir << "\n";
-      std::cout << "  2. nntr_causallm " << output_dir << "\n\n";
+      std::cout << "  nntr_causallm " << output_dir << "\n\n";
     }
 
   } catch (const std::exception &e) {

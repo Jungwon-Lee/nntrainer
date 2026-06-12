@@ -37,6 +37,9 @@ causallm_layer_dependencies += [
     causallm_custom_multiply_dep,
     causallm_deberta_attention_layer_dep,
     causallm_shared_fully_connected_layer_dep,
+    causallm_per_layer_slice_dep,
+    causallm_scalar_multiply_dep,
+    causallm_logit_softcapping_dep,
 ]
 
 subdir('models')
@@ -178,6 +181,17 @@ e_quantize = executable('nntr_quantize',
     quantize_src,
     include_directories: causallm_inc,
     dependencies: [nntrainer_dep, nntrainer_ccapi_dep, causallm_layer_dependencies, causallm_dep],
+)
+
+
+safetensors_info_src = [
+    meson.current_source_dir() / 'safetensors_info.cpp',
+]
+
+e_safetensors_info = executable('nntr_safetensors_info',
+    safetensors_info_src,
+    include_directories: causallm_inc,
+    dependencies: [nntrainer_dep],
 )
 
 
