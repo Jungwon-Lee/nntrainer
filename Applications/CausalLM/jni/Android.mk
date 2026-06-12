@@ -29,6 +29,7 @@ CAUSALLM_COMMON_INCLUDES := \
     $(LOCAL_PATH)/../models/timm_vit \
     $(LOCAL_PATH)/../models/deberta_v2 \
     $(LOCAL_PATH)/../models/lfm2 \
+    $(LOCAL_PATH)/../models/gemma4 \
     $(LOCAL_PATH)/../third_party/minja/include \
     $(LOCAL_PATH)/../third_party \
 
@@ -82,6 +83,9 @@ LOCAL_SRC_FILES := \
     ../layers/embedding_layer.cpp \
     ../layers/embedding_pooling_layer.cpp \
     ../layers/embedding_normalize_layer.cpp \
+    ../layers/per_layer_slice.cpp \
+    ../layers/scalar_multiply.cpp \
+    ../layers/logit_softcapping.cpp \
     ../layers/mha_core.cpp \
     ../layers/lm_head.cpp \
     ../models/qwen3_moe/qwen_moe_layer.cpp \
@@ -96,6 +100,7 @@ LOCAL_SRC_FILES := \
     ../models/gpt_oss_cached_slim/gpt_oss_moe_layer_cached.cpp \
     ../models/gemma3/gemma3_causallm.cpp \
     ../models/gemma3/embedding_gemma.cpp \
+    ../models/gemma4/gemma4_causallm.cpp \
     ../models/gemma3/function.cpp \
     ../models/timm_vit/timm_vit_transformer.cpp \
     ../models/deberta_v2/deberta_v2.cpp \
@@ -189,12 +194,12 @@ LOCAL_ARM_NEON := true
 LOCAL_CFLAGS += -std=c++17 -Ofast -mcpu=cortex-a53 -Ilz4-nougat/lib -DENABLE_FP16=1 -DUSE__FP16=1 -D__ARM_NEON__=1 -march=armv8.2-a+fp16+dotprod+i8mm -DUSE_NEON=1 -mtune=cortex-a76 -O3 -ffast-math
 LOCAL_LDFLAGS += -Llz4-nougat/lib/obj/local/$(TARGET_ARCH_ABI)/
 LOCAL_CXXFLAGS += -std=c++17 -frtti
-LOCAL_CFLAGS += -pthread -fexceptions -fopenmp -static-openmp -DENABLE_FP16=1 -DUSE__FP16=1 -D__ARM_NEON__=1 -march=armv8.2-a+fp16+dotprod+i8mm -DUSE_NEON=1 -mtune=cortex-a76 -O3 -ffast-math
-LOCAL_LDFLAGS += -fexceptions -fopenmp -static-openmp -DENABLE_FP16=1 -DUSE__FP16=1 -D__ARM_NEON__=1 -march=armv8.2-a+fp16+dotprod+i8mm -DUSE_NEON=1 -mtune=cortex-a76 -O3 -ffast-math
+LOCAL_CFLAGS += -pthread -fexceptions -DENABLE_FP16=1 -DUSE__FP16=1 -D__ARM_NEON__=1 -march=armv8.2-a+fp16+dotprod+i8mm -DUSE_NEON=1 -mtune=cortex-a76 -O3 -ffast-math
+LOCAL_LDFLAGS += -fexceptions -DENABLE_FP16=1 -DUSE__FP16=1 -D__ARM_NEON__=1 -march=armv8.2-a+fp16+dotprod+i8mm -DUSE_NEON=1 -mtune=cortex-a76 -O3 -ffast-math
 LOCAL_MODULE_TAGS := optional
 LOCAL_ARM_MODE := arm
 LOCAL_MODULE := nntr_quantize
-LOCAL_LDLIBS := -llog -landroid -fopenmp -static-openmp -DENABLE_FP16=1 -DUSE__FP16=1 -D__ARM_NEON__=1 -march=armv8.2-a+fp16+dotprod+i8mm -DUSE_NEON=1
+LOCAL_LDLIBS := -llog -landroid -DENABLE_FP16=1 -DUSE__FP16=1 -D__ARM_NEON__=1 -march=armv8.2-a+fp16+dotprod+i8mm -DUSE_NEON=1
 
 # Source files
 LOCAL_SRC_FILES := ../quantize.cpp \
@@ -215,6 +220,9 @@ LOCAL_SRC_FILES := ../quantize.cpp \
     ../layers/embedding_layer.cpp \
     ../layers/embedding_pooling_layer.cpp \
     ../layers/embedding_normalize_layer.cpp \
+    ../layers/per_layer_slice.cpp \
+    ../layers/scalar_multiply.cpp \
+    ../layers/logit_softcapping.cpp \
     ../layers/mha_core.cpp \
     ../models/qwen3_moe/qwen_moe_layer.cpp \
     ../layers/reshaped_rms_norm.cpp \
@@ -229,6 +237,7 @@ LOCAL_SRC_FILES := ../quantize.cpp \
     ../models/gpt_oss_cached_slim/gpt_oss_moe_layer_cached.cpp \
     ../models/gemma3/gemma3_causallm.cpp \
     ../models/gemma3/embedding_gemma.cpp \
+    ../models/gemma4/gemma4_causallm.cpp \
     ../models/gemma3/function.cpp \
     ../models/deberta_v2/deberta_v2.cpp \
     ../layers/deberta_attention_layer.cpp \
@@ -251,5 +260,30 @@ LOCAL_C_INCLUDES += $(NNTRAINER_INCLUDES) \
     $(LOCAL_PATH)/../models/gemma3 \
     $(LOCAL_PATH)/../models/deberta_v2 \
     $(LOCAL_PATH)/../models/lfm2 \
+    $(LOCAL_PATH)/../models/gemma4 \
+
+include $(BUILD_EXECUTABLE)
+
+# Build nntr_safetensors_info executable
+include $(CLEAR_VARS)
+
+LOCAL_ARM_NEON := true
+LOCAL_CFLAGS += -std=c++17 -Ofast -mcpu=cortex-a53 -Ilz4-nougat/lib -DENABLE_FP16=1 -DUSE__FP16=1 -D__ARM_NEON__=1 -march=armv8.2-a+fp16+dotprod+i8mm -DUSE_NEON=1 -mtune=cortex-a76 -O3 -ffast-math
+LOCAL_LDFLAGS += -Llz4-nougat/lib/obj/local/$(TARGET_ARCH_ABI)/
+LOCAL_CXXFLAGS += -std=c++17 -frtti
+LOCAL_CFLAGS += -pthread -fexceptions -fopenmp -static-openmp -DENABLE_FP16=1 -DUSE__FP16=1 -D__ARM_NEON__=1 -march=armv8.2-a+fp16+dotprod+i8mm -DUSE_NEON=1 -mtune=cortex-a76 -O3 -ffast-math
+LOCAL_LDFLAGS += -fexceptions -fopenmp -static-openmp -DENABLE_FP16=1 -DUSE__FP16=1 -D__ARM_NEON__=1 -march=armv8.2-a+fp16+dotprod+i8mm -DUSE_NEON=1 -mtune=cortex-a76 -O3 -ffast-math
+LOCAL_MODULE_TAGS := optional
+LOCAL_ARM_MODE := arm
+LOCAL_MODULE := nntr_safetensors_info
+LOCAL_LDLIBS := -llog -landroid -fopenmp -static-openmp -DENABLE_FP16=1 -DUSE__FP16=1 -D__ARM_NEON__=1 -march=armv8.2-a+fp16+dotprod+i8mm -DUSE_NEON=1
+
+# Source files (header-only inspector; uses safetensors_util from libnntrainer)
+LOCAL_SRC_FILES := ../safetensors_info.cpp
+
+LOCAL_SHARED_LIBRARIES := nntrainer ccapi-nntrainer
+
+LOCAL_C_INCLUDES += $(NNTRAINER_INCLUDES) \
+    $(LOCAL_PATH)/..
 
 include $(BUILD_EXECUTABLE)
