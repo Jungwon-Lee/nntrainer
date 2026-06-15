@@ -17,6 +17,7 @@
 #   gpt_oss       GPT-OSS 20B MoE  (HF model_type may differ; use --model_type)
 #   kalm          KaLM-embedding (SentenceTransformer, Qwen2 backbone)
 #   deberta_v2    DeBERTa V2 encoder / SentenceTransformer
+#   bert          (multilingual tiny) BERT encoder
 #   vit           timm ViT  (--model_path is a .safetensors/.bin file, not an HF id)
 #
 # Outputs are saved to the same directory as --output_name.
@@ -65,6 +66,7 @@ _MODULE_MAP = {
     "kalm":       "qwen2",
     "deberta-v2": "deberta_v2",
     "deberta_v2": "deberta_v2",
+    "bert":       "tiny_bert",
     "vit":        "vit",
 }
 

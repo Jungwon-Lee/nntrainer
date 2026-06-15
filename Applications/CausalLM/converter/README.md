@@ -33,6 +33,7 @@ Applications/CausalLM/
 | `gpt_oss`      | GPT-OSS 20B MoE | `AutoModelForCausalLM` | attn bias + sink, split `gate_up_proj` |
 | `kalm`         | KaLM-embedding | `SentenceTransformer` | Qwen2 backbone |
 | `deberta_v2`   | DeBERTa V2 encoder | `DebertaV2Model` / `SentenceTransformer` | encoder-only, relative attention |
+| `bert`         | (multilingual tiny) BERT encoder | `AutoModel` | encoder-only, optional pooler |
 | `vit`          | timm ViT | checkpoint file | `--model_path` is a `.safetensors`/`.bin` file |
 
 If `--model_type` is omitted, it is auto-detected from the HuggingFace config
