@@ -40,7 +40,9 @@ def _save_weights(params, n_layers, dtype, file, layer_prefix_fn=None, save_lm_h
 
     def save_feed_forward(layer_name):
         save(params[f"{layer_name}post_attention_layernorm.weight"])
-        for proj in ["gate_proj", "up_proj", "down_proj"]:
+        # nntrainer's createMlp builds ffn_up before ffn_gate, so the binary must
+        # store mlp weights in up, gate, down order (see models/transformer.cpp).
+        for proj in ["up_proj", "gate_proj", "down_proj"]:
             save_proj(layer_name, f"mlp.{proj}")
 
     embed_key = "0.auto_model.embed_tokens.weight" if "0.auto_model.embed_tokens.weight" in params else "model.embed_tokens.weight"
