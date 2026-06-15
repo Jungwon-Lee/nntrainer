@@ -12,7 +12,7 @@
 #   qwen2         Qwen2 (e.g. Qwen/Qwen2-0.5B)
 #   qwen3         Qwen3 dense (e.g. Qwen/Qwen3-0.6B, Qwen3-4B)
 #   qwen3_moe     Qwen3 MoE (e.g. Qwen/Qwen3-30B-A3B)
-#   gemma3        Gemma3 causal LM
+#   gemma3        Gemma3 causal LM (config model_type "gemma3" or "gemma3_text")
 #   gemma3_emb    Gemma3 SentenceTransformer embedding model
 #   gpt_oss       GPT-OSS 20B MoE  (HF model_type may differ; use --model_type)
 #   kalm          KaLM-embedding (SentenceTransformer, Qwen2 backbone)
@@ -58,8 +58,9 @@ _MODULE_MAP = {
     "qwen2":      "qwen2",
     "qwen3":      "qwen3",
     "qwen3_moe":  "qwen3_moe",
-    "gemma3":     "gemma3",
-    "gemma3_emb": "gemma3",
+    "gemma3":      "gemma3",
+    "gemma3_text": "gemma3",  # text-only Gemma3 (Gemma3ForCausalLM) reports this
+    "gemma3_emb":  "gemma3",
     "gpt_oss":    "gpt_oss",
     "kalm":       "qwen2",
     "deberta-v2": "deberta_v2",

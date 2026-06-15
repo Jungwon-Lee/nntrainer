@@ -28,7 +28,7 @@ Applications/CausalLM/
 | `qwen2`        | Qwen2 (e.g. `Qwen/Qwen2-0.5B`) | `AutoModelForCausalLM` | QKV bias, tied embedding |
 | `qwen3`        | Qwen3 dense (e.g. `Qwen/Qwen3-0.6B`, `Qwen3-4B`) | `AutoModelForCausalLM` | Q/K norm, supports safetensors output |
 | `qwen3_moe`    | Qwen3 MoE (e.g. `Qwen/Qwen3-30B-A3B`) | `AutoModelForCausalLM` | gate routing + per-expert FFN |
-| `gemma3`       | Gemma3 causal LM | `AutoModelForCausalLM` | RMSNorm (+1), pre/post FFN norm |
+| `gemma3` / `gemma3_text` | Gemma3 causal LM | `AutoModelForCausalLM` | RMSNorm (+1), pre/post FFN norm; text-only configs report `gemma3_text` |
 | `gemma3_emb`   | Gemma3 embedding model | `SentenceTransformer` | embedding variant |
 | `gpt_oss`      | GPT-OSS 20B MoE | `AutoModelForCausalLM` | attn bias + sink, split `gate_up_proj` |
 | `kalm`         | KaLM-embedding | `SentenceTransformer` | Qwen2 backbone |
