@@ -786,20 +786,19 @@ void Gemma4Transformer::registerCustomLayers() {
   auto app_context =
     static_cast<nntrainer::AppContext *>(ct_engine.getRegisteredContext("cpu"));
 
-  try {
-    app_context->registerFactory(
-      nntrainer::createLayer<causallm::ReshapedRMSNormLayer>);
-    app_context->registerFactory(
-      nntrainer::createLayer<causallm::PerLayerSliceLayer>);
-    app_context->registerFactory(
-      nntrainer::createLayer<causallm::ScalarMultiplyLayer>);
-    app_context->registerFactory(
-      nntrainer::createLayer<causallm::LogitSoftCappingLayer>);
+  auto tryRegister = [&](auto factory_fn) {
+    try {
+      app_context->registerFactory(factory_fn);
+    } catch (std::invalid_argument &e) {
+      std::cerr << "failed to register factory, reason: " << e.what()
+                << std::endl;
+    }
+  };
 
-  } catch (std::invalid_argument &e) {
-    std::cerr << "failed to register factory, reason: " << e.what()
-              << std::endl;
-  }
+  tryRegister(nntrainer::createLayer<causallm::ReshapedRMSNormLayer>);
+  tryRegister(nntrainer::createLayer<causallm::PerLayerSliceLayer>);
+  tryRegister(nntrainer::createLayer<causallm::ScalarMultiplyLayer>);
+  tryRegister(nntrainer::createLayer<causallm::LogitSoftCappingLayer>);
 }
 
 void Gemma4CausalLM::registerCustomLayers() {

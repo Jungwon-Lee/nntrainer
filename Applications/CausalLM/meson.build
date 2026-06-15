@@ -252,6 +252,7 @@ if get_option('enable-test')
         meson.source_root() / 'test' / 'unittest' / 'models' / 'causallm_test_utils.cpp',
         meson.source_root() / 'test' / 'unittest' / 'models' / 'unittest_causallm_gemma3.cpp',
         meson.source_root() / 'test' / 'unittest' / 'models' / 'unittest_causallm_gemma3_reference.cpp',
+        meson.source_root() / 'test' / 'unittest' / 'models' / 'unittest_causallm_gemma4.cpp',
         meson.source_root() / 'test' / 'unittest' / 'models' / 'unittest_causallm_qwen2.cpp',
         meson.source_root() / 'test' / 'unittest' / 'models' / 'unittest_causallm_qwen2_reference.cpp',
         meson.source_root() / 'test' / 'unittest' / 'models' / 'unittest_causallm_qwen3.cpp',
