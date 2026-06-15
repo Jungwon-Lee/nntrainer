@@ -240,8 +240,11 @@ if get_option('enable-test')
       [
         meson.source_root() / 'test' / 'unittest' / 'models' / 'causallm_test_utils.cpp',
         meson.source_root() / 'test' / 'unittest' / 'models' / 'unittest_causallm_gemma3.cpp',
+        meson.source_root() / 'test' / 'unittest' / 'models' / 'unittest_causallm_gemma3_reference.cpp',
         meson.source_root() / 'test' / 'unittest' / 'models' / 'unittest_causallm_qwen2.cpp',
+        meson.source_root() / 'test' / 'unittest' / 'models' / 'unittest_causallm_qwen2_reference.cpp',
         meson.source_root() / 'test' / 'unittest' / 'models' / 'unittest_causallm_qwen3.cpp',
+        meson.source_root() / 'test' / 'unittest' / 'models' / 'unittest_causallm_qwen3_reference.cpp',
       ],
       dependencies: [
         nntrainer_dep,
@@ -258,7 +261,8 @@ if get_option('enable-test')
     test('unittest_causallm_models', unittest_causallm_models,
       args: '--gtest_output=xml:@0@/@1@.xml'.format(meson.build_root(), 'unittest_causallm_models'),
       timeout: 60,
-      suite: 'unittests'
+      suite: 'unittests',
+      env: {'NNTR_QUANTIZE_BIN': e_quantize.full_path()}
     )
   endif
 endif

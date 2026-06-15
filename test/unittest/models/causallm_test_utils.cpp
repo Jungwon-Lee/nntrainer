@@ -14,11 +14,14 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdlib>
 #include <fstream>
 #include <sstream>
 #include <stdexcept>
 
 #include <gtest/gtest.h>
+
+using json = causallm::json;
 
 namespace causallm_test {
 
@@ -116,7 +119,7 @@ makeLoadedDeterministicModel(const TinyCausalLMCase &test_case,
   auto source = test_case.create_model(
     source_config.model, source_config.generation, source_config.nntrainer);
   source->initializeModel();
-  source->setDeterministicWeights();
+  test_case.setup_weights(*source);
   source->saveWeightWithDtype(
     files.weight_path.string(),
     test_case.make_layer_dtype_map(test_case.data_type));
@@ -286,6 +289,292 @@ void expectPromptProducesExpectedLogits(const TinyCausalLMCase &test_case,
     EXPECT_NEAR(logits[i], test_case.expected_logits.logits[i],
                 test_case.expected_logits.logits_tolerance)
       << "logit mismatch at index " << i;
+}
+
+/**
+ * @brief Locate the fixture directory for a fixture name
+ */
+std::filesystem::path findFixtureDir(const std::string &fixture_name) {
+  if (const char *env = std::getenv("NNTRAINER_CAUSALLM_FIXTURE_DIR")) {
+    return std::filesystem::path(env) / fixture_name;
+  }
+  // Resolve relative to this source file: .../test/unittest/models/
+  std::filesystem::path src(__FILE__);
+  return src.parent_path() / "causallm_reference" / fixture_name;
+}
+
+/**
+ * @brief Load reference fixture from disk
+ */
+ReferenceFixture loadReferenceFixture(const std::filesystem::path &dir) {
+  ReferenceFixture fix;
+  fix.dir = dir;
+  fix.logits_atol_fp32 = 1e-2f;
+  fix.logits_atol_q40 = 5.0f;
+  fix.prefix_match_min = 2;
+
+  auto meta_path = dir / "meta.json";
+  if (std::filesystem::exists(meta_path)) {
+    std::ifstream f(meta_path);
+    json meta = json::parse(f);
+    if (meta.contains("logits_atol_fp32"))
+      fix.logits_atol_fp32 = meta["logits_atol_fp32"].get<float>();
+    if (meta.contains("logits_atol_q40"))
+      fix.logits_atol_q40 = meta["logits_atol_q40"].get<float>();
+    if (meta.contains("prefix_match_min"))
+      fix.prefix_match_min = meta["prefix_match_min"].get<size_t>();
+  }
+
+  auto load_json_array = [&](const std::string &name) -> json {
+    auto p = dir / name;
+    if (!std::filesystem::exists(p))
+      return json{};
+    std::ifstream f(p);
+    return json::parse(f);
+  };
+
+  auto ids_j = load_json_array("input_ids.json");
+  for (auto &v : ids_j)
+    fix.input_ids.push_back(v.get<unsigned int>());
+
+  auto logits_j = load_json_array("reference_logits.json");
+  for (auto &v : logits_j)
+    fix.reference_logits.push_back(v.get<float>());
+
+  auto tokens_j = load_json_array("reference_tokens.json");
+  for (auto &v : tokens_j)
+    fix.reference_tokens.push_back(v.get<unsigned int>());
+
+  return fix;
+}
+
+/**
+ * @brief Assert logit vectors agree within absolute tolerance
+ */
+void expectLogitsNear(const std::vector<float> &got,
+                      const std::vector<float> &ref, float atol) {
+  ASSERT_EQ(got.size(), ref.size()) << "logit vector size mismatch";
+
+  // argmax must match
+  auto got_max = std::max_element(got.begin(), got.end());
+  auto ref_max = std::max_element(ref.begin(), ref.end());
+  EXPECT_EQ(std::distance(got.begin(), got_max),
+            std::distance(ref.begin(), ref_max))
+    << "argmax mismatch: nntrainer=" << std::distance(got.begin(), got_max)
+    << " ref=" << std::distance(ref.begin(), ref_max);
+
+  for (size_t i = 0; i < ref.size(); ++i)
+    EXPECT_NEAR(got[i], ref[i], atol) << "logit mismatch at index " << i;
+}
+
+/**
+ * @brief Assert greedy token prefix agreement
+ */
+void expectTokenPrefixMatch(const std::vector<unsigned int> &got,
+                            const std::vector<unsigned int> &ref,
+                            size_t min_match) {
+  ASSERT_FALSE(got.empty()) << "nntrainer produced no tokens";
+  ASSERT_FALSE(ref.empty()) << "reference has no tokens";
+
+  size_t match = 0;
+  size_t check = std::min(got.size(), ref.size());
+  for (size_t i = 0; i < check; ++i) {
+    if (got[i] == ref[i])
+      ++match;
+    else
+      break;
+  }
+
+  EXPECT_GE(match, min_match)
+    << "greedy prefix match " << match << " < min " << min_match
+    << " (got[0]=" << (got.empty() ? -1 : (int)got[0])
+    << " ref[0]=" << (ref.empty() ? -1 : (int)ref[0]) << ")";
+}
+
+namespace {
+
+constexpr const char *QUANTIZE_BIN_ENV = "NNTR_QUANTIZE_BIN";
+
+/**
+ * @brief nntrainer configs loaded from a fixture directory
+ */
+struct FixtureConfigs {
+  json model_cfg;
+  json gen_cfg;
+  json nntr_cfg;
+  std::filesystem::path weight_path;
+};
+
+/**
+ * @brief Load model/generation/nntrainer configs from a fixture directory
+ *
+ * Overrides tokenizer_file to the tokenizer shipped in the fixture directory
+ * so the test is self-contained.
+ */
+FixtureConfigs loadFixtureConfigs(const std::filesystem::path &dir) {
+  FixtureConfigs fc;
+  fc.model_cfg = causallm::LoadJsonFile((dir / "config.json").string());
+  fc.gen_cfg =
+    causallm::LoadJsonFile((dir / "generation_config.json").string());
+  fc.nntr_cfg = causallm::LoadJsonFile((dir / "nntr_config.json").string());
+
+  fc.nntr_cfg["tokenizer_file"] = (dir / "tokenizer.json").string();
+
+  std::string bin_name = fc.nntr_cfg["model_file_name"].get<std::string>();
+  fc.weight_path = dir / bin_name;
+  return fc;
+}
+
+/**
+ * @brief Run the nntr_quantize binary on a fixture dir into an output dir
+ */
+bool runQuantize(const std::string &quantize_bin,
+                 const std::filesystem::path &fp32_dir,
+                 const std::filesystem::path &out_dir) {
+  std::string cmd = quantize_bin + " " + fp32_dir.string() + " -o " +
+                    out_dir.string() + " --fc_dtype Q4_0 2>&1";
+  int ret = std::system(cmd.c_str());
+  return ret == 0;
+}
+
+/**
+ * @brief Locate and load a fixture, returning false (and reason) if absent
+ */
+bool tryLoadFixture(const DifferentialModel &model,
+                    std::filesystem::path &fixture_dir, ReferenceFixture &fixture,
+                    std::string &skip_reason) {
+  fixture_dir = findFixtureDir(model.fixture_name);
+
+  if (!std::filesystem::exists(fixture_dir) ||
+      !std::filesystem::exists(fixture_dir / "nntr_config.json") ||
+      !std::filesystem::exists(fixture_dir / "reference_logits.json")) {
+    skip_reason = "Fixtures absent — run the generate_*_reference.py script";
+    return false;
+  }
+
+  auto fc = loadFixtureConfigs(fixture_dir);
+  if (!std::filesystem::exists(fc.weight_path)) {
+    skip_reason = "FP32 weight file absent: " + fc.weight_path.string();
+    return false;
+  }
+
+  fixture = loadReferenceFixture(fixture_dir);
+  if (fixture.input_ids.empty() || fixture.reference_logits.empty() ||
+      fixture.reference_tokens.empty()) {
+    skip_reason = "Fixture JSON arrays are empty";
+    return false;
+  }
+  return true;
+}
+
+} // namespace
+
+/**
+ * @brief Run the FP32 differential checks for a model against its fixture
+ */
+void runFp32DifferentialChecks(const DifferentialModel &model) {
+  std::filesystem::path fixture_dir;
+  ReferenceFixture fixture;
+  std::string skip_reason;
+  if (!tryLoadFixture(model, fixture_dir, fixture, skip_reason))
+    GTEST_SKIP() << skip_reason;
+
+  auto fc = loadFixtureConfigs(fixture_dir);
+
+  // Use separate model instances for prefill-logits and greedy-generate so
+  // that internal KV-cache state from the first pass does not affect the second.
+  auto m_logits = model.make_model(fc.model_cfg, fc.gen_cfg, fc.nntr_cfg);
+  m_logits->initializeModel();
+  m_logits->loadWeight(fc.weight_path.string());
+
+  std::vector<float> got_logits;
+  ASSERT_NO_THROW(got_logits = m_logits->prefillLogitsFromIds(fixture.input_ids));
+  expectLogitsNear(got_logits, fixture.reference_logits,
+                   fixture.logits_atol_fp32);
+
+  auto m_gen = model.make_model(fc.model_cfg, fc.gen_cfg, fc.nntr_cfg);
+  m_gen->initializeModel();
+  m_gen->loadWeight(fc.weight_path.string());
+
+  std::vector<unsigned int> got_tokens;
+  ASSERT_NO_THROW(got_tokens = m_gen->greedyGenerateFromIds(
+                    fixture.input_ids, fixture.reference_tokens.size()));
+  expectTokenPrefixMatch(got_tokens, fixture.reference_tokens,
+                         fixture.reference_tokens.size());
+}
+
+/**
+ * @brief Run the Q4_0 differential checks for a model against its fixture
+ */
+void runQ40DifferentialChecks(const DifferentialModel &model) {
+  std::filesystem::path fixture_dir;
+  ReferenceFixture fixture;
+  std::string skip_reason;
+  if (!tryLoadFixture(model, fixture_dir, fixture, skip_reason))
+    GTEST_SKIP() << skip_reason;
+
+  const char *quantize_bin_env = std::getenv(QUANTIZE_BIN_ENV);
+  if (!quantize_bin_env || std::string(quantize_bin_env).empty())
+    GTEST_SKIP() << "NNTR_QUANTIZE_BIN not set — Q4_0 test skipped";
+  const std::string quantize_bin(quantize_bin_env);
+
+  auto q4_dir = std::filesystem::temp_directory_path() /
+                ("nntrainer_" + model.fixture_name + "_q40_ref");
+  std::filesystem::remove_all(q4_dir);
+  std::filesystem::create_directories(q4_dir);
+
+  ASSERT_TRUE(runQuantize(quantize_bin, fixture_dir, q4_dir))
+    << "nntr_quantize failed — check that the FP32 fixture is valid";
+
+  auto q4_nntr_cfg_path = q4_dir / "nntr_config.json";
+  ASSERT_TRUE(std::filesystem::exists(q4_nntr_cfg_path))
+    << "nntr_quantize did not produce nntr_config.json";
+
+  std::string q4_bin_name;
+  {
+    std::ifstream f(q4_nntr_cfg_path);
+    auto q4_cfg_j = json::parse(f);
+    q4_bin_name = q4_cfg_j["model_file_name"].get<std::string>();
+  }
+  auto q4_bin_path = q4_dir / q4_bin_name;
+  ASSERT_TRUE(std::filesystem::exists(q4_bin_path))
+    << "Q4_0 weight file not found: " << q4_bin_path;
+
+  // --- Load Q4_0 model ---
+  auto fc = loadFixtureConfigs(fixture_dir);
+  auto q4_nntr_cfg = causallm::LoadJsonFile(q4_nntr_cfg_path.string());
+  q4_nntr_cfg["tokenizer_file"] = (fixture_dir / "tokenizer.json").string();
+
+  auto q4_model = model.make_model(fc.model_cfg, fc.gen_cfg, q4_nntr_cfg);
+  q4_model->initializeModel();
+  q4_model->loadWeight(q4_bin_path.string());
+
+  std::vector<float> q4_logits;
+  ASSERT_NO_THROW(q4_logits = q4_model->prefillLogitsFromIds(fixture.input_ids));
+
+  // Q4_0 logits vs HF FP32 reference
+  expectLogitsNear(q4_logits, fixture.reference_logits, fixture.logits_atol_q40);
+
+  // --- Load nntrainer FP32 model for a direct comparison ---
+  auto fp32_fc = loadFixtureConfigs(fixture_dir);
+  auto fp32_model =
+    model.make_model(fp32_fc.model_cfg, fp32_fc.gen_cfg, fp32_fc.nntr_cfg);
+  fp32_model->initializeModel();
+  fp32_model->loadWeight(fp32_fc.weight_path.string());
+
+  std::vector<float> fp32_logits;
+  ASSERT_NO_THROW(fp32_logits =
+                    fp32_model->prefillLogitsFromIds(fixture.input_ids));
+
+  // Q4_0 logits vs nntrainer FP32 logits
+  expectLogitsNear(q4_logits, fp32_logits, fixture.logits_atol_q40);
+
+  // --- Greedy prefix check ---
+  std::vector<unsigned int> q4_tokens;
+  ASSERT_NO_THROW(q4_tokens = q4_model->greedyGenerateFromIds(
+                    fixture.input_ids, fixture.reference_tokens.size()));
+  expectTokenPrefixMatch(q4_tokens, fixture.reference_tokens,
+                         fixture.prefix_match_min);
 }
 
 } // namespace causallm_test
