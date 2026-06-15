@@ -4,7 +4,9 @@
 import torch
 from transformers import AutoConfig, AutoModelForCausalLM
 
-from utils import save_tensor, save_lora_or_weight, save_configs
+from utils import save_tensor, save_lora_or_weight, save_configs, make_chat_input
+
+CHAT_QUESTION = "What is on-device AI?"
 
 
 SAMPLE_INPUT = (
@@ -77,5 +79,6 @@ def convert(model_path, output_name, dtype, **kwargs):
         "model_type": "CausalLM",
         "lmhead_dtype": "FP32" if dtype == "float32" else "FP16",
         "sample_input": SAMPLE_INPUT,
+        "chat_input": make_chat_input(CHAT_QUESTION),
     }
     save_configs(output_name, dtype, hf_config=config, model_path=model_path, nntr_extra=nntr_extra)

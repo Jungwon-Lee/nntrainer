@@ -4,9 +4,14 @@
 import torch
 from transformers import AutoConfig, AutoModelForCausalLM
 
-from utils import save_tensor, save_lora_or_weight, save_configs
+from utils import save_tensor, save_lora_or_weight, save_configs, make_chat_input
 
-SAMPLE_INPUT = "Explain the concept of AI"
+# Plain user question; the chat_template is applied at inference time via chat_input.
+CHAT_QUESTION = "Explain the concept of AI"
+# Gemma3 chat-formatted fallback, used only when no chat_template is available.
+SAMPLE_INPUT = (
+    "<start_of_turn>user\nExplain the concept of AI<end_of_turn>\n<start_of_turn>model\n"
+)
 # Embedding variant — use a plain sentence to embed.
 SAMPLE_INPUT_EMBEDDING = "This is an example sentence"
 
@@ -105,6 +110,7 @@ def convert(model_path, output_name, dtype, **kwargs):
         nntr_extra = {
             "model_type": "CausalLM",
             "sample_input": SAMPLE_INPUT,
+            "chat_input": make_chat_input(CHAT_QUESTION),
         }
 
     print(f"Saved binary: {output_name}")

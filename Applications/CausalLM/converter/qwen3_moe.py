@@ -4,8 +4,10 @@
 import torch
 from transformers import AutoConfig, AutoModelForCausalLM
 
-from utils import save_tensor, save_lora_or_weight, save_configs
+from utils import save_tensor, save_lora_or_weight, save_configs, make_chat_input
 
+CHAT_QUESTION = "Give me a short introduction to large language model."
+# Pre-formatted fallback used only when no chat_template is available.
 SAMPLE_INPUT = (
     "<|im_start|>user\nGive me a short introduction to large language model."
     "<|im_end|>\n<|im_start|>assistant\n"
@@ -61,5 +63,6 @@ def convert(model_path, output_name, dtype, **kwargs):
     nntr_extra = {
         "model_type": "CausalLM",
         "sample_input": SAMPLE_INPUT,
+        "chat_input": make_chat_input(CHAT_QUESTION),
     }
     save_configs(output_name, dtype, hf_config=config, model_path=model_path, nntr_extra=nntr_extra)

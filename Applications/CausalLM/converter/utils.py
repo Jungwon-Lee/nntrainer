@@ -109,6 +109,16 @@ def save_safetensors(weights, output_path, dtype):
 # Config saving helpers
 # ---------------------------------------------------------------------------
 
+def make_chat_input(text):
+    """Build a chat_input payload for nntr_config.json.
+
+    nntrainer applies the model's chat_template to chat_input at inference time.
+    sample_input (plain text) is only used as a fallback when no chat_template
+    is available, so causal models should provide both.
+    """
+    return {"messages": [{"role": "user", "content": text}]}
+
+
 def _dtype_tag(dtype):
     return "FP32" if dtype == "float32" else "FP16"
 
@@ -172,6 +182,7 @@ def save_configs(output_name, dtype, hf_config=None, model_path=None, nntr_extra
     # save_pretrained re-emits the chat_template (embedded in tokenizer_config.json
     # or as a standalone chat_template.jinja), so it follows the model automatically
     # even when the source only ships the template file.
+    tokenizer = None
     if model_path is not None:
         try:
             from transformers import AutoTokenizer
@@ -185,6 +196,20 @@ def save_configs(output_name, dtype, hf_config=None, model_path=None, nntr_extra
     nntr = _default_nntr_config(output_name, dtype, hf_config=hf_config)
     if nntr_extra:
         nntr.update(nntr_extra)
+
+    # Render sample_input from chat_input using the model's own chat_template, so
+    # the fallback prompt is already correctly formatted for this exact model
+    # (matches what the runtime produces from chat_input at inference time).
+    chat_input = nntr.get("chat_input")
+    if tokenizer is not None and chat_input and getattr(tokenizer, "chat_template", None):
+        messages = chat_input["messages"] if isinstance(chat_input, dict) else chat_input
+        try:
+            nntr["sample_input"] = tokenizer.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=True
+            )
+        except Exception as e:
+            print(f"Warning: could not render sample_input from chat_template ({e})")
+
     nntr_path = os.path.join(output_dir, "nntr_config.json")
     with open(nntr_path, "w") as f:
         json.dump(nntr, f, indent=4)
