@@ -3,6 +3,7 @@
 
 import json
 import os
+import shutil
 import struct
 
 import numpy as np
@@ -149,7 +150,64 @@ def _default_nntr_config(output_name, dtype, hf_config=None):
     }
 
 
-def save_configs(output_name, dtype, hf_config=None, model_path=None, nntr_extra=None):
+def _resolve_local_dir(model_path):
+    """Return a local directory for model_path, downloading config-only files if it
+    is a HuggingFace hub id. Returns None if it cannot be resolved."""
+    if os.path.isdir(model_path):
+        return model_path
+    try:
+        from huggingface_hub import snapshot_download
+        return snapshot_download(
+            model_path,
+            allow_patterns=[
+                "modules.json",
+                "config_sentence_transformers.json",
+                "*/config.json",
+                "*/sentence_bert_config.json",
+            ],
+        )
+    except Exception as e:
+        print(f"Warning: could not fetch SentenceTransformer module configs ({e})")
+        return None
+
+
+def save_st_module_configs(model_path, output_dir):
+    """Copy a SentenceTransformer's modules.json and per-module config.json into
+    output_dir, preserving the module subdirectory layout.
+
+    The nntrainer runtime reads modules.json and a config.json per module
+    (models/sentence_transformer.cpp), so only those small files are copied — not
+    the duplicate transformer weights. Returns the copied modules.json path, or
+    None if the source has no modules.json.
+    """
+    src = _resolve_local_dir(model_path)
+    if src is None:
+        return None
+
+    modules_src = os.path.join(src, "modules.json")
+    if not os.path.isfile(modules_src):
+        return None
+
+    shutil.copy(modules_src, os.path.join(output_dir, "modules.json"))
+
+    with open(modules_src) as f:
+        modules = json.load(f)
+
+    for module in modules:
+        rel_path = module.get("path", "")
+        if not rel_path:
+            continue
+        cfg_src = os.path.join(src, rel_path, "config.json")
+        if os.path.isfile(cfg_src):
+            dst_dir = os.path.join(output_dir, rel_path)
+            os.makedirs(dst_dir, exist_ok=True)
+            shutil.copy(cfg_src, os.path.join(dst_dir, "config.json"))
+
+    return os.path.join(output_dir, "modules.json")
+
+
+def save_configs(output_name, dtype, hf_config=None, model_path=None, nntr_extra=None,
+                 sentence_transformer=False):
     """Save config.json, generation_config.json, tokenizer files, and nntr_config.json.
 
     Args:
@@ -159,6 +217,9 @@ def save_configs(output_name, dtype, hf_config=None, model_path=None, nntr_extra
         model_path:  HuggingFace model id or local directory. Used to load the
                      generation config and tokenizer (incl. chat_template).
         nntr_extra:  dict of model-specific fields that override the defaults in nntr_config.json.
+        sentence_transformer: if True, copy modules.json + per-module config.json and
+                     set module_config_path (required for embedding models run as a
+                     SentenceTransformer pipeline by the nntrainer runtime).
     """
     output_dir = os.path.dirname(os.path.abspath(output_name))
     os.makedirs(output_dir, exist_ok=True)
@@ -192,10 +253,21 @@ def save_configs(output_name, dtype, hf_config=None, model_path=None, nntr_extra
         except Exception as e:
             print(f"Warning: could not save tokenizer ({e})")
 
+    # -- SentenceTransformer module configs (modules.json + per-module config) -
+    module_config_path = None
+    if sentence_transformer and model_path is not None:
+        module_config_path = save_st_module_configs(model_path, output_dir)
+        if module_config_path is not None:
+            print(f"Saved SentenceTransformer module configs to: {output_dir}")
+        else:
+            print("Warning: no modules.json found; module_config_path not set")
+
     # -- nntr_config.json -----------------------------------------------------
     nntr = _default_nntr_config(output_name, dtype, hf_config=hf_config)
     if nntr_extra:
         nntr.update(nntr_extra)
+    if module_config_path is not None:
+        nntr["module_config_path"] = module_config_path
 
     # Render sample_input from chat_input using the model's own chat_template, so
     # the fallback prompt is already correctly formatted for this exact model

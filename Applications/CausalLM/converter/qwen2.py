@@ -108,4 +108,5 @@ def convert(model_path, output_name, dtype, **kwargs):
         nntr_extra["is_causal"] = False
     else:
         nntr_extra["chat_input"] = make_chat_input(CHAT_QUESTION)
-    save_configs(output_name, dtype, hf_config=config, model_path=model_path, nntr_extra=nntr_extra)
+    save_configs(output_name, dtype, hf_config=config, model_path=model_path,
+                 nntr_extra=nntr_extra, sentence_transformer=is_kalm)

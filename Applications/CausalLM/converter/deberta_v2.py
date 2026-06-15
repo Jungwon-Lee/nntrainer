@@ -110,4 +110,5 @@ def convert(model_path, output_name, dtype, **kwargs):
         "model_type": "embedding",
         "sample_input": SAMPLE_INPUT,
     }
-    save_configs(output_name, dtype, hf_config=config, model_path=model_path, nntr_extra=nntr_extra)
+    save_configs(output_name, dtype, hf_config=config, model_path=model_path,
+                 nntr_extra=nntr_extra, sentence_transformer=True)

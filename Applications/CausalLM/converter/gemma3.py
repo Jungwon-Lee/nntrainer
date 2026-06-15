@@ -114,4 +114,5 @@ def convert(model_path, output_name, dtype, **kwargs):
         }
 
     print(f"Saved binary: {output_name}")
-    save_configs(output_name, dtype, hf_config=hf_config, model_path=model_path, nntr_extra=nntr_extra)
+    save_configs(output_name, dtype, hf_config=hf_config, model_path=model_path,
+                 nntr_extra=nntr_extra, sentence_transformer=is_embedding)
