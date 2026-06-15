@@ -1,0 +1,191 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (C) 2026 Samsung Electronics Co., Ltd. All Rights Reserved.
+
+import json
+import os
+import struct
+
+import numpy as np
+
+
+SAFETENSORS_DTYPE_MAP = {
+    "float32": "F32",
+    "float16": "F16",
+}
+
+
+def tensor_to_numpy(tensor, dtype, transpose=False, add_one=False):
+    """Convert a torch tensor to a contiguous numpy array.
+
+    transpose: permute the first two dims (PyTorch OI -> nntrainer IO).
+    add_one:   add 1.0 before casting (Gemma3 RMSNorm convention).
+    """
+    if transpose:
+        tensor = tensor.permute(1, 0)
+    arr = tensor.detach().cpu().numpy()
+    if add_one:
+        arr = arr + 1.0
+    return np.ascontiguousarray(arr.astype(dtype))
+
+
+def write_array(file, arr):
+    """Write a numpy array to an open binary file."""
+    if not arr.flags["C_CONTIGUOUS"]:
+        arr = np.ascontiguousarray(arr)
+    arr.tofile(file)
+
+
+def save_tensor(file, tensor, dtype, transpose=False, add_one=False):
+    """Convert tensor and write to file."""
+    write_array(file, tensor_to_numpy(tensor, dtype, transpose=transpose, add_one=add_one))
+
+
+def has_lora(params, layer_name, proj_name):
+    return f"{layer_name}{proj_name}.lora_A.default.weight" in params
+
+
+def save_lora_or_weight(file, params, layer_name, proj_name, dtype, transpose=True):
+    """Save projection weight. If LoRA weights exist, save base + lora_A + lora_B."""
+    prefix = f"{layer_name}{proj_name}"
+    if has_lora(params, layer_name, proj_name):
+        save_tensor(file, params[f"{prefix}.base_layer.weight"], dtype, transpose=transpose)
+        save_tensor(file, params[f"{prefix}.lora_A.default.weight"], dtype, transpose=transpose)
+        save_tensor(file, params[f"{prefix}.lora_B.default.weight"], dtype, transpose=transpose)
+    else:
+        save_tensor(file, params[f"{prefix}.weight"], dtype, transpose=transpose)
+
+
+def get_tie_word_embeddings(config):
+    return getattr(config, "tie_word_embeddings", True)
+
+
+def get_safetensors_output_name(output_name):
+    if output_name.endswith(".bin"):
+        return output_name[:-4] + ".safetensors"
+    if output_name.endswith(".safetensors"):
+        return output_name
+    return output_name + ".safetensors"
+
+
+def save_safetensors(weights, output_path, dtype):
+    """Write (name, ndarray) pairs to a safetensors file."""
+    if dtype not in SAFETENSORS_DTYPE_MAP:
+        raise ValueError(f"Unsupported safetensors dtype: {dtype}")
+
+    safetensors_dtype = SAFETENSORS_DTYPE_MAP[dtype]
+    offset = 0
+    tensor_meta = {}
+    raw_buffers = []
+
+    for name, arr in weights:
+        if not arr.flags["C_CONTIGUOUS"]:
+            arr = np.ascontiguousarray(arr)
+        nbytes = arr.nbytes
+        tensor_meta[name] = {
+            "dtype": safetensors_dtype,
+            "shape": list(arr.shape),
+            "data_offsets": [offset, offset + nbytes],
+        }
+        raw_buffers.append(arr.tobytes(order="C"))
+        offset += nbytes
+
+    header = {"__metadata__": {"format": "pt"}}
+    header.update(tensor_meta)
+    header_bytes = json.dumps(header, separators=(",", ":")).encode("utf-8")
+    pad = (8 - len(header_bytes) % 8) % 8
+    header_bytes += b" " * pad
+
+    with open(output_path, "wb") as f:
+        f.write(struct.pack("<Q", len(header_bytes)))
+        f.write(header_bytes)
+        for buf in raw_buffers:
+            f.write(buf)
+
+    print(f"Saved safetensors: {output_path}")
+    print(f"Tensor data size: {offset / 1e9:.2f} GB")
+
+
+# ---------------------------------------------------------------------------
+# Config saving helpers
+# ---------------------------------------------------------------------------
+
+def _dtype_tag(dtype):
+    return "FP32" if dtype == "float32" else "FP16"
+
+
+def _default_nntr_config(output_name, dtype, hf_config=None):
+    """Build the default nntr_config dict from common fields."""
+    tag = _dtype_tag(dtype)
+    max_seq = getattr(hf_config, "max_position_embeddings", 2048) if hf_config else 2048
+    output_dir = os.path.dirname(os.path.abspath(output_name))
+    return {
+        "model_type": "CausalLM",
+        "model_tensor_type": f"{tag}-{tag}",
+        "model_file_name": os.path.basename(output_name),
+        "fc_layer_dtype": tag,
+        "embedding_dtype": tag,
+        "lora_rank": 0,
+        "lora_alpha": 0,
+        "lora_target": [],
+        "bad_word_ids": [],
+        "fsu": False,
+        "fsu_lookahead": 2,
+        "num_to_generate": 512,
+        "init_seq_len": 1024,
+        "max_seq_len": max_seq,
+        "batch_size": 1,
+        "tokenizer_file": os.path.join(output_dir, "tokenizer.json"),
+        "sample_input": "",
+    }
+
+
+def save_configs(output_name, dtype, hf_config=None, model_path=None, nntr_extra=None):
+    """Save config.json, generation_config.json, tokenizer files, and nntr_config.json.
+
+    Args:
+        output_name: path to the converted weight file (used to derive output dir and filename).
+        dtype:       data type string ("float32" or "float16").
+        hf_config:   loaded HuggingFace PretrainedConfig object (or None for timm ViT).
+        model_path:  HuggingFace model id or local directory. Used to load the
+                     generation config and tokenizer (incl. chat_template).
+        nntr_extra:  dict of model-specific fields that override the defaults in nntr_config.json.
+    """
+    output_dir = os.path.dirname(os.path.abspath(output_name))
+    os.makedirs(output_dir, exist_ok=True)
+
+    # -- config.json ----------------------------------------------------------
+    if hf_config is not None:
+        hf_config.save_pretrained(output_dir)
+        print(f"Saved config.json: {os.path.join(output_dir, 'config.json')}")
+
+    # -- generation_config.json -----------------------------------------------
+    if model_path is not None:
+        try:
+            from transformers import GenerationConfig
+            gen_config = GenerationConfig.from_pretrained(model_path)
+            gen_config.save_pretrained(output_dir)
+            print(f"Saved generation_config.json: {os.path.join(output_dir, 'generation_config.json')}")
+        except Exception:
+            pass  # not all models ship a generation_config
+
+    # -- tokenizer (tokenizer.json, tokenizer_config.json, chat_template) ------
+    # save_pretrained re-emits the chat_template (embedded in tokenizer_config.json
+    # or as a standalone chat_template.jinja), so it follows the model automatically
+    # even when the source only ships the template file.
+    if model_path is not None:
+        try:
+            from transformers import AutoTokenizer
+            tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
+            tokenizer.save_pretrained(output_dir)
+            print(f"Saved tokenizer files to: {output_dir}")
+        except Exception as e:
+            print(f"Warning: could not save tokenizer ({e})")
+
+    # -- nntr_config.json -----------------------------------------------------
+    nntr = _default_nntr_config(output_name, dtype, hf_config=hf_config)
+    if nntr_extra:
+        nntr.update(nntr_extra)
+    nntr_path = os.path.join(output_dir, "nntr_config.json")
+    with open(nntr_path, "w") as f:
+        json.dump(nntr, f, indent=4)
+    print(f"Saved nntr_config.json: {nntr_path}")
