@@ -227,15 +227,20 @@ if get_option('enable-test')
   )
 
   # Extract causallm_reference fixture binaries from packaging/
-  causallm_fixture_tar = meson.source_root() / 'packaging' / 'causallm_reference.tar.gz'
+  causallm_fixture_tars = [
+    meson.source_root() / 'packaging' / 'causallm_reference_generation.tar.gz',
+    meson.source_root() / 'packaging' / 'causallm_reference_embedding.tar.gz',
+  ]
   causallm_fixture_dest = meson.source_root() / 'test' / 'unittest' / 'models' / 'causallm_reference'
-  if build_machine.system() == 'windows'
-    run_command([prog_win_cmd, '/C', 'tar', 'xzf',
-                 causallm_fixture_tar.replace('/', '\\'),
-                 '-C', causallm_fixture_dest.replace('/', '\\')], check: false)
-  else
-    run_command(['tar', 'xzf', causallm_fixture_tar, '-C', causallm_fixture_dest], check: false)
-  endif
+  foreach fixture_tar : causallm_fixture_tars
+    if build_machine.system() == 'windows'
+      run_command([prog_win_cmd, '/C', 'tar', 'xzf',
+                   fixture_tar.replace('/', '\\'),
+                   '-C', causallm_fixture_dest.replace('/', '\\')], check: false)
+    else
+      run_command(['tar', 'xzf', fixture_tar, '-C', causallm_fixture_dest], check: false)
+    endif
+  endforeach
 
   # Ubuntu native builds use platform=none.
   model_unittest_platforms = ['none', 'windows', 'android']

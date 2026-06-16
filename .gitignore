@@ -88,5 +88,3 @@ ctre-unicode.hpp
 encoder.hpp
 json.hpp
 
-# Large fixture tarball — distributed separately, not tracked in git
-packaging/causallm_reference.tar.gz
