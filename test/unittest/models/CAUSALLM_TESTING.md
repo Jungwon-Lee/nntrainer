@@ -186,13 +186,16 @@ causes an out-of-bounds access in the RoPE table during the first decode step.
 
 #### 3-1. Write the generation script
 
-Create `Applications/CausalLM/res/<model>/test/generate_<model>_reference.py`.
+Create
+`test/unittest/models/causallm_reference/generators/generate_<model>_reference.py`.
 Use the existing `generate_qwen3_reference.py` as a template.
 
 Key points:
 - `TINY_CONFIG` dimensions must exactly match C++ `makeTiny<Model>Config()`.
 - **Reuse the production weight converter** (`res/<model>/weight_converter.py`).
   Do not write a separate conversion — reusing the converter validates it too.
+  Import it via `REPO_ROOT / "Applications" / "CausalLM" / "res" / ...` (see the
+  `CONVERTER_DIR` line in the qwen3 template).
 - Use `input_ids = [1, 4, 2, 3]` and `n_gen = 4` as the standard test input.
 - For models with `tie_word_embeddings=True`, do not save lm_head separately
   (`save_lm_head = not config.tie_word_embeddings`).
@@ -200,7 +203,7 @@ Key points:
   so the HF attention scale matches the C++ MHA core (`1/sqrt(head_dim)`).
 
 ```bash
-python3 Applications/CausalLM/res/<model>/test/generate_<model>_reference.py
+python3 test/unittest/models/causallm_reference/generators/generate_<model>_reference.py
 ```
 
 Outputs:
@@ -234,7 +237,7 @@ correct converter, `0.01` is sufficient.
 
 ```bash
 git add test/unittest/models/causallm_reference/<model>_tiny/
-git add Applications/CausalLM/res/<model>/test/generate_<model>_reference.py
+git add test/unittest/models/causallm_reference/generators/generate_<model>_reference.py
 ```
 
 Include the binary file (`.bin`). Tiny fixtures are approximately 100–200 KB,

@@ -28,8 +28,10 @@ import torch
 from transformers import Qwen3MoeForCausalLM, Qwen3MoeConfig
 
 THIS_DIR = pathlib.Path(__file__).resolve().parent
-REPO_ROOT = THIS_DIR.parents[4]  # res/qwen3/test -> res/qwen3 -> res -> CausalLM -> Applications -> root
-DEFAULT_OUT = REPO_ROOT / "test" / "unittest" / "models" / "causallm_reference" / "qwen3_moe_tiny"
+# generators -> causallm_reference -> models -> unittest -> test -> repo root
+REPO_ROOT = THIS_DIR.parents[4]
+# Fixtures live one level up, next to this generators/ directory.
+DEFAULT_OUT = THIS_DIR.parent / "qwen3_moe_tiny"
 
 # Tiny model dimensions — must match makeTinyQwen3MoEConfig() in C++
 TINY_CONFIG = dict(

@@ -52,8 +52,10 @@ from transformers.models.gemma4.modeling_gemma4 import Gemma4TextModel
 from transformers.models.gemma4.configuration_gemma4 import Gemma4TextConfig
 
 THIS_DIR = pathlib.Path(__file__).resolve().parent
+# generators -> causallm_reference -> models -> unittest -> test -> repo root
 REPO_ROOT = THIS_DIR.parents[4]
-DEFAULT_OUT = REPO_ROOT / "test" / "unittest" / "models" / "causallm_reference" / "gemma4_tiny"
+# Fixtures live one level up, next to this generators/ directory.
+DEFAULT_OUT = THIS_DIR.parent / "gemma4_tiny"
 
 TINY_TEXT_CONFIG = dict(
     hidden_size=64,

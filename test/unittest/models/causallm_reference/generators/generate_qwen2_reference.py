@@ -1,76 +1,63 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (C) 2026 Samsung Electronics Co., Ltd. All Rights Reserved.
 
-## @file generate_qwen3_reference.py
-## @brief Generate golden fixtures for Qwen3 differential tests.
+## @file generate_qwen2_reference.py
+## @brief Generate golden fixtures for Qwen2 differential tests.
 ##
-## This script creates a tiny Qwen3 model (matching the C++ test adapter
-## dimensions) with a fixed random seed, converts its weights via the
-## existing weight_converter, runs a HuggingFace forward pass and greedy
-## generation, then saves the results as JSON fixtures.
+## Creates a tiny Qwen2 model (matching the C++ test dimensions) with a fixed
+## seed, converts its weights via the existing weight_converter, runs a
+## HuggingFace forward pass and greedy generation, then saves the results as
+## JSON fixtures.
 ##
 ## Usage:
-##   python3 generate_qwen3_reference.py [--out <dir>] [--seed <int>] [--n <int>]
+##   python3 generate_qwen2_reference.py [--out <dir>] [--seed <int>] [--n <int>]
 ##
 ## The default output directory is:
-##   test/unittest/models/causallm_reference/qwen3_tiny/
-## (relative to the nntrainer repo root, resolved from this file's location).
+##   test/unittest/models/causallm_reference/qwen2_tiny/
 ##
-## Requirements: torch >= 2.0, transformers >= 4.51 (Qwen3 support)
+## Requirements: torch >= 2.0, transformers >= 4.40 (Qwen2 support)
 
 import argparse
 import json
-import os
-import sys
 import pathlib
+import sys
 
 import numpy as np
 import torch
-from transformers import Qwen3Config, Qwen3ForCausalLM
-
-# ---------------------------------------------------------------------------
-# Repo layout helpers
-# ---------------------------------------------------------------------------
+from transformers import Qwen2Config, Qwen2ForCausalLM
 
 THIS_DIR = pathlib.Path(__file__).resolve().parent
-REPO_ROOT = THIS_DIR.parents[4]  # res/qwen3/test -> res/qwen3 -> res -> CausalLM -> Applications -> repo root
-CONVERTER_DIR = THIS_DIR.parent / "qwen3-0.6b"
-DEFAULT_OUT = REPO_ROOT / "test" / "unittest" / "models" / "causallm_reference" / "qwen3_tiny"
+# generators -> causallm_reference -> models -> unittest -> test -> repo root
+REPO_ROOT = THIS_DIR.parents[4]
+CONVERTER_DIR = (REPO_ROOT / "Applications" / "CausalLM" / "res" / "qwen2"
+                 / "qwen2-0.5b")
+# Fixtures live one level up, next to this generators/ directory.
+DEFAULT_OUT = THIS_DIR.parent / "qwen2_tiny"
 
 sys.path.insert(0, str(CONVERTER_DIR))
-from weight_converter import save_qwen3_for_nntrainer  # noqa: E402
+from weight_converter import save_qwen2_for_nntrainer  # noqa: E402
 
-# ---------------------------------------------------------------------------
-# Tiny model dimensions — must match makeTinyQwen3Config() in C++
-# ---------------------------------------------------------------------------
-
+# Tiny model dimensions — must match makeTinyQwen2Config() in C++
 TINY_CONFIG = dict(
     hidden_size=64,
     intermediate_size=64,
     num_hidden_layers=1,
     num_attention_heads=8,
     num_key_value_heads=4,
-    head_dim=8,
     vocab_size=32,
     max_position_embeddings=8,
     rope_theta=10000.0,
     rms_norm_eps=1e-5,
     tie_word_embeddings=True,
-    # Disable dropout/cache features that change numerical results
     attention_dropout=0.0,
     hidden_act="silu",
 )
 
 # Fixed input token IDs — all < vocab_size (32), length == init_seq_len (4)
 INPUT_IDS = [1, 4, 2, 3]
-
-# Number of greedy tokens to generate
 N_GEN = 4
 
-# ---------------------------------------------------------------------------
 # Tiny tokenizer JSON — matches writeTinyTokenizer() in C++
-# ---------------------------------------------------------------------------
-
 TINY_TOKENIZER = {
     "version": "1.0",
     "truncation": None,
@@ -104,38 +91,29 @@ TINY_TOKENIZER = {
 }
 
 
-def build_tiny_config() -> Qwen3Config:
-    return Qwen3Config(**TINY_CONFIG)
-
-
-def build_model(config: Qwen3Config, seed: int) -> Qwen3ForCausalLM:
+def build_model(seed: int) -> Qwen2ForCausalLM:
     torch.manual_seed(seed)
-    model = Qwen3ForCausalLM(config)
+    model = Qwen2ForCausalLM(Qwen2Config(**TINY_CONFIG))
     model.eval()
     return model
 
 
-def convert_weights(model: Qwen3ForCausalLM, config: Qwen3Config, bin_path: pathlib.Path) -> None:
-    """Write weights in nntrainer binary format using the existing converter."""
+def convert_weights(model: Qwen2ForCausalLM, n_layers: int,
+                    bin_path: pathlib.Path) -> None:
     params = model.state_dict()
-    tie = getattr(config, "tie_word_embeddings", True)
     with open(bin_path, "wb") as f:
-        save_qwen3_for_nntrainer(params, config.num_hidden_layers, "float32", f, tie)
+        save_qwen2_for_nntrainer(params, n_layers, "float32", f)
     print(f"[converter] saved {bin_path} ({bin_path.stat().st_size / 1024:.1f} KB)")
 
 
-def run_forward(model: Qwen3ForCausalLM, input_ids: list[int]) -> list[float]:
-    """Return last-token logits from a forward pass (no KV-cache tricks)."""
+def run_forward(model: Qwen2ForCausalLM, input_ids: list[int]) -> list[float]:
     ids = torch.tensor([input_ids], dtype=torch.long)
     with torch.no_grad():
         out = model(ids, use_cache=False)
-    # logits: [1, seq_len, vocab_size] — take the last token
-    logits = out.logits[0, -1, :].float().tolist()
-    return logits
+    return out.logits[0, -1, :].float().tolist()
 
 
-def run_greedy(model: Qwen3ForCausalLM, input_ids: list[int], n: int) -> list[int]:
-    """Return n greedy tokens generated after the prompt."""
+def run_greedy(model: Qwen2ForCausalLM, input_ids: list[int], n: int) -> list[int]:
     ids = torch.tensor([input_ids], dtype=torch.long)
     with torch.no_grad():
         out = model.generate(
@@ -145,19 +123,17 @@ def run_greedy(model: Qwen3ForCausalLM, input_ids: list[int], n: int) -> list[in
             temperature=1.0,
             repetition_penalty=1.0,
             use_cache=True,
-            eos_token_id=None,  # disable early stopping so we always get n tokens
+            eos_token_id=None,
         )
-    # out: [1, init_len + n]
-    tokens = out[0, len(input_ids):].tolist()
-    return tokens[:n]
+    return out[0, len(input_ids):].tolist()[:n]
 
 
-def write_nntr_configs(out_dir: pathlib.Path, bin_name: str, tokenizer_path: str) -> None:
+def write_nntr_configs(out_dir: pathlib.Path, bin_name: str,
+                       tokenizer_path: str) -> None:
     config_json = {
-        "architectures": ["Qwen3ForCausalLM"],
+        "architectures": ["Qwen2ForCausalLM"],
         "bos_token_id": 0,
         "eos_token_id": [31],
-        "head_dim": 8,
         "hidden_size": 64,
         "intermediate_size": 64,
         "is_causal": True,
@@ -170,7 +146,6 @@ def write_nntr_configs(out_dir: pathlib.Path, bin_name: str, tokenizer_path: str
         "tie_word_embeddings": True,
         "vocab_size": 32,
     }
-
     generation_config_json = {
         "bos_token_id": 0,
         "eos_token_id": 31,
@@ -179,7 +154,6 @@ def write_nntr_configs(out_dir: pathlib.Path, bin_name: str, tokenizer_path: str
         "top_p": 1.0,
         "temperature": 1.0,
     }
-
     nntr_config_json = {
         "bad_word_ids": [],
         "batch_size": 1,
@@ -194,7 +168,6 @@ def write_nntr_configs(out_dir: pathlib.Path, bin_name: str, tokenizer_path: str
         "num_to_generate": 1,
         "tokenizer_file": tokenizer_path,
     }
-
     with open(out_dir / "config.json", "w") as f:
         json.dump(config_json, f, indent=2)
     with open(out_dir / "generation_config.json", "w") as f:
@@ -204,64 +177,51 @@ def write_nntr_configs(out_dir: pathlib.Path, bin_name: str, tokenizer_path: str
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Generate Qwen3 tiny reference fixtures")
-    parser.add_argument("--out", type=pathlib.Path, default=DEFAULT_OUT,
-                        help="Output directory (default: %(default)s)")
-    parser.add_argument("--seed", type=int, default=42, help="Random seed")
-    parser.add_argument("--n", type=int, default=N_GEN,
-                        help="Number of greedy tokens to generate")
+    parser = argparse.ArgumentParser(description="Generate Qwen2 tiny reference fixtures")
+    parser.add_argument("--out", type=pathlib.Path, default=DEFAULT_OUT)
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--n", type=int, default=N_GEN)
     args = parser.parse_args()
 
     out_dir: pathlib.Path = args.out.resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
-
     print(f"[generate] output dir: {out_dir}")
-    print(f"[generate] seed={args.seed}, n_gen={args.n}, input_ids={INPUT_IDS}")
 
-    # --- Build model ---
-    config = build_tiny_config()
-    model = build_model(config, args.seed)
+    model = build_model(args.seed)
     print(f"[generate] model params: {sum(p.numel() for p in model.parameters()):,}")
 
-    # --- Convert weights ---
-    bin_name = "nntr_qwen3_tiny_fp32.bin"
-    bin_path = out_dir / bin_name
-    convert_weights(model, config, bin_path)
+    bin_name = "nntr_qwen2_tiny_fp32.bin"
+    convert_weights(model, TINY_CONFIG["num_hidden_layers"], out_dir / bin_name)
 
-    # --- Write tokenizer ---
     tokenizer_path = out_dir / "tokenizer.json"
     with open(tokenizer_path, "w") as f:
         json.dump(TINY_TOKENIZER, f, indent=2)
-    print(f"[generate] tokenizer: {tokenizer_path}")
 
-    # --- Write nntrainer configs ---
     write_nntr_configs(out_dir, bin_name, str(tokenizer_path))
-    print("[generate] config.json / generation_config.json / nntr_config.json written")
 
-    # --- HF forward: reference logits ---
     ref_logits = run_forward(model, INPUT_IDS)
     with open(out_dir / "reference_logits.json", "w") as f:
         json.dump(ref_logits, f)
-    argmax_tok = int(np.argmax(ref_logits))
-    print(f"[generate] reference logits: {len(ref_logits)} values, argmax={argmax_tok}")
+    print(f"[generate] reference logits: {len(ref_logits)} values, "
+          f"argmax={int(np.argmax(ref_logits))}, "
+          f"max|logit|={max(abs(v) for v in ref_logits):.4f}")
 
-    # --- HF greedy: reference tokens ---
     ref_tokens = run_greedy(model, INPUT_IDS, args.n)
     with open(out_dir / "reference_tokens.json", "w") as f:
         json.dump(ref_tokens, f)
     print(f"[generate] reference tokens: {ref_tokens}")
 
-    # --- Fixed input_ids ---
     with open(out_dir / "input_ids.json", "w") as f:
         json.dump(INPUT_IDS, f)
 
-    # --- Meta ---
     import transformers
     meta = {
         "seed": args.seed,
         "n_gen": args.n,
         "input_ids": INPUT_IDS,
         "logits_atol_fp32": 1e-2,
+        # Q4_0 tolerance: tune by running the differential test once and reading
+        # the reported max deviation; set to (observed max) x safety factor.
         "logits_atol_q40": 5.0,
         "prefix_match_min": 2,
         "transformers_version": transformers.__version__,
@@ -269,12 +229,8 @@ def main() -> None:
     }
     with open(out_dir / "meta.json", "w") as f:
         json.dump(meta, f, indent=2)
-    print(f"[generate] meta.json written (transformers={transformers.__version__})")
 
-    print("\n[generate] done. Commit the following directory:")
-    print(f"  {out_dir}")
-    print("\nTo regenerate fixtures:")
-    print(f"  python3 {pathlib.Path(__file__).relative_to(REPO_ROOT)}")
+    print(f"\n[generate] done. Commit: {out_dir}")
 
 
 if __name__ == "__main__":
