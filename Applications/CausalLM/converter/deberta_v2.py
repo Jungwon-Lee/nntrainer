@@ -24,17 +24,29 @@ def _save_linear(file, params, prefix, dtype):
 
 
 def _save_weights(params, config, dtype, file):
+    """Save DeBERTa V2 encoder weights in nntrainer layer order.
+
+    Order matches the graph construction sequence in deberta_v2.cpp:
+      embeddings (word + LayerNorm)
+      encoder.rel_embeddings.weight        <- global, before any layer
+      [encoder.LayerNorm] if norm_rel_ebd contains "layer_norm"
+      per layer: query_proj key_proj value_proj
+                 attention.output.dense attention.output.LayerNorm
+                 intermediate.dense output.dense output.LayerNorm
+    """
     _save_weight(file, params["embeddings.word_embeddings.weight"], dtype)
     _save_weight(file, params["embeddings.LayerNorm.weight"], dtype)
     _save_weight(file, params["embeddings.LayerNorm.bias"], dtype)
 
-    norm_rel_ebd = getattr(config, "norm_rel_ebd", "none").lower().split("|")
-    norm_rel_ebd = [item.strip() for item in norm_rel_ebd]
-    pos_att_type = getattr(config, "pos_att_type", None) or []
-    uses_relative_bias = getattr(config, "relative_attention", False) and (
-        "c2p" in pos_att_type or "p2c" in pos_att_type
-    )
-    saved_relative_embeddings = False
+    # Relative embeddings are a single global tensor created before the encoder
+    # loop in constructTransformerModule(), so they are saved here — before any
+    # per-layer weights.
+    _save_weight(file, params["encoder.rel_embeddings.weight"], dtype)
+
+    norm_rel_ebd = getattr(config, "norm_rel_ebd", "none") or "none"
+    if "layer_norm" in norm_rel_ebd.lower():
+        _save_weight(file, params["encoder.LayerNorm.weight"], dtype)
+        _save_weight(file, params["encoder.LayerNorm.bias"], dtype)
 
     for i in range(config.num_hidden_layers):
         layer_prefix = f"encoder.layer.{i}"
@@ -44,14 +56,7 @@ def _save_weights(params, config, dtype, file):
         _save_linear(file, params, f"{self_prefix}.query_proj", dtype)
         _save_linear(file, params, f"{self_prefix}.key_proj", dtype)
         _save_linear(file, params, f"{self_prefix}.value_proj", dtype)
-
-        if uses_relative_bias and not saved_relative_embeddings:
-            _save_weight(file, params["encoder.rel_embeddings.weight"], dtype)
-            if "layer_norm" in norm_rel_ebd:
-                _save_weight(file, params["encoder.LayerNorm.weight"], dtype)
-                _save_weight(file, params["encoder.LayerNorm.bias"], dtype)
-            saved_relative_embeddings = True
-
+        # wq_rel/wk_rel share weights with wq/wk; deberta_attention has no params.
         _save_linear(file, params, f"{attn_prefix}.output.dense", dtype)
         _save_weight(file, params[f"{attn_prefix}.output.LayerNorm.weight"], dtype)
         _save_weight(file, params[f"{attn_prefix}.output.LayerNorm.bias"], dtype)
