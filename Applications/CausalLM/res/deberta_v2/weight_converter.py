@@ -38,8 +38,13 @@ def get_safetensors_output_name(output_name):
     return output_name + ".safetensors"
 
 
+def _encoder_state_dict(model):
+    if hasattr(model, "deberta"):
+        return model.deberta.state_dict()
+    return model.state_dict()
+
+
 def strip_encoder_prefix(params):
-    """Return a state dict keyed from the DeBERTa encoder root."""
     if "embeddings.word_embeddings.weight" in params:
         return params
 
