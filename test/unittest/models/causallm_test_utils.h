@@ -171,6 +171,21 @@ public:
   greedyGenerateFromIds(const std::vector<unsigned int> &ids, size_t n) {
     throw std::logic_error("greedyGenerateFromIds not implemented for this model");
   }
+
+  /**
+   * @brief Encode one prompt and return its output embedding vector
+   *
+   * Used by embedding/encoder models (SentenceTransformer / BERT / DeBERTa).
+   * @param prompt Prompt text
+   * @param out_len Number of floats to copy from the model output (the fixture
+   *                reference embedding length; pooled models = hidden_size,
+   *                raw encoders = seq_len * hidden_size)
+   * @return Output embedding vector of length out_len
+   */
+  virtual std::vector<float> embedPrompt(const std::string &prompt,
+                                         size_t out_len) {
+    throw std::logic_error("embedPrompt not implemented for this model");
+  }
 };
 
 /**
@@ -406,6 +421,98 @@ private:
 };
 
 /**
+ * @brief Generic tiny embedding/encoder model test adapter
+ *
+ * Wraps a concrete embedding model (ModelBase) — any class exposing an
+ * encode() that returns a std::vector<float *> (SentenceTransformer-derived
+ * models, BertTransformer, DebertaV2). It initializes the virtual Transformer
+ * base with ModelType::EMBEDDING and drives the model through its own encode(),
+ * so it absorbs each family's input format (1-input, 3-input, KV-cache) for
+ * free.
+ *
+ * Models that sanitize their configs in the constructor (EmbeddingGemma,
+ * MultilingualTinyBert, DebertaV2) must derive a thin subclass that initializes
+ * Transformer with the processed configs (see TinyGemma3CausalLM for the
+ * CausalLM analogue); this mem-initializer is then ignored for that subclass
+ * per virtual-base rules.
+ *
+ * @tparam ModelBase Concrete embedding model (e.g. causallm::Qwen3Embedding)
+ */
+template <typename ModelBase>
+class EmbeddingTestAdapter : public ModelBase, public TinyCausalLMRunner {
+public:
+  /**
+   * @brief Construct the adapter from the three standard configs
+   */
+  EmbeddingTestAdapter(causallm::json &cfg, causallm::json &generation_cfg,
+                       causallm::json &nntr_cfg) :
+    causallm::Transformer(cfg, generation_cfg, nntr_cfg,
+                          causallm::ModelType::EMBEDDING),
+    ModelBase(cfg, generation_cfg, nntr_cfg) {}
+
+  /**
+   * @brief Initialize the model graph and weights
+   */
+  void initializeModel() override { this->initialize(); }
+
+  /**
+   * @brief Save model weights
+   */
+  void saveWeight(const std::string &path) override { this->save_weight(path); }
+
+  /**
+   * @brief Save model weights with per-layer data type conversion
+   */
+  void saveWeightWithDtype(
+    const std::string &path,
+    const std::map<std::string, ml::train::TensorDim::DataType>
+      &layer_dtype_map) override {
+    this->save_weight(path, ml::train::TensorDim::DataType::NONE,
+                      layer_dtype_map);
+  }
+
+  /**
+   * @brief Load model weights
+   */
+  void loadWeight(const std::string &path) override { this->load_weight(path); }
+
+  /**
+   * @brief Encode one prompt and copy out_len floats from the output embedding
+   */
+  std::vector<float> embedPrompt(const std::string &prompt,
+                                 size_t out_len) override {
+    auto output = this->encode(prompt);
+    if (output.empty() || output[0] == nullptr)
+      throw std::runtime_error("embedding model produced no output");
+    std::vector<float> embedding(output[0], output[0] + out_len);
+    for (auto &out : output)
+      delete[] out;
+    return embedding;
+  }
+
+  // --- CausalLM-specific interface methods: not applicable to embeddings ---
+
+  void runPrompt(const std::string &) override {
+    throw std::logic_error("runPrompt not supported for embedding models");
+  }
+  std::vector<float> prefillLogits(const std::string &) override {
+    throw std::logic_error("prefillLogits not supported for embedding models");
+  }
+  std::string getOutputText(int = 0) const override {
+    throw std::logic_error("getOutputText not supported for embedding models");
+  }
+  bool hasRun() const override { return false; }
+  unsigned int tokenAt(size_t) const override {
+    throw std::logic_error("tokenAt not supported for embedding models");
+  }
+  std::vector<unsigned int> generateFromLogits(float *, bool, float,
+                                               unsigned int *,
+                                               unsigned int) override {
+    throw std::logic_error("generateFromLogits not supported for embedding models");
+  }
+};
+
+/**
  * @brief One tiny CausalLM model case reusable by common tests
  */
 struct TinyCausalLMCase {
@@ -434,6 +541,12 @@ struct ReferenceFixture {
   float logits_atol_fp32;               /**< FP32 logit absolute tolerance */
   float logits_atol_q40;                /**< Q4_0 logit absolute tolerance */
   size_t prefix_match_min;              /**< Min greedy prefix match length */
+
+  // Embedding/encoder model fields (unused by CausalLM fixtures)
+  std::vector<float> reference_embedding; /**< HF output embedding vector */
+  std::string prompt;                   /**< Prompt text fed to encode() */
+  float embedding_atol;                 /**< Embedding absolute tolerance */
+  float cosine_min;                     /**< Min cosine similarity vs reference */
 };
 
 /**
@@ -475,6 +588,17 @@ void expectTokenPrefixMatch(const std::vector<unsigned int> &got,
                             size_t min_match);
 
 /**
+ * @brief Assert two embedding vectors agree element-wise and by cosine
+ * @param got Embedding produced by nntrainer
+ * @param ref Reference embedding from HF
+ * @param atol Per-element absolute tolerance
+ * @param cosine_min Minimum acceptable cosine similarity
+ */
+void expectEmbeddingNear(const std::vector<float> &got,
+                         const std::vector<float> &ref, float atol,
+                         float cosine_min);
+
+/**
  * @brief One model entry for the generic differential reference tests
  */
 struct DifferentialModel {
@@ -504,6 +628,18 @@ void runFp32DifferentialChecks(const DifferentialModel &model);
  * @param model Differential model descriptor
  */
 void runQ40DifferentialChecks(const DifferentialModel &model);
+
+/**
+ * @brief Run the FP32 differential checks for an embedding model
+ *
+ * Skips (via GTEST_SKIP) when the fixture or FP32 weights are absent.
+ * Loads the model in embedding mode, encodes the fixture prompt, and verifies
+ * the output embedding matches the HF reference (per-element atol + cosine).
+ *
+ * @param model Differential model descriptor (make_model returns an
+ *              EmbeddingTestAdapter-derived runner)
+ */
+void runFp32EmbeddingDifferentialChecks(const DifferentialModel &model);
 
 /**
  * @brief Make FP32 data type variant

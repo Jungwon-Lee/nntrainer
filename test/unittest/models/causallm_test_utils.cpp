@@ -14,6 +14,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <cstdlib>
 #include <fstream>
 #include <sstream>
@@ -312,6 +313,9 @@ ReferenceFixture loadReferenceFixture(const std::filesystem::path &dir) {
   fix.logits_atol_fp32 = 1e-2f;
   fix.logits_atol_q40 = 5.0f;
   fix.prefix_match_min = 2;
+  fix.prompt = "hello tok4";
+  fix.embedding_atol = 1e-2f;
+  fix.cosine_min = 0.999f;
 
   auto meta_path = dir / "meta.json";
   if (std::filesystem::exists(meta_path)) {
@@ -323,6 +327,12 @@ ReferenceFixture loadReferenceFixture(const std::filesystem::path &dir) {
       fix.logits_atol_q40 = meta["logits_atol_q40"].get<float>();
     if (meta.contains("prefix_match_min"))
       fix.prefix_match_min = meta["prefix_match_min"].get<size_t>();
+    if (meta.contains("prompt"))
+      fix.prompt = meta["prompt"].get<std::string>();
+    if (meta.contains("embedding_atol"))
+      fix.embedding_atol = meta["embedding_atol"].get<float>();
+    if (meta.contains("cosine_min"))
+      fix.cosine_min = meta["cosine_min"].get<float>();
   }
 
   auto load_json_array = [&](const std::string &name) -> json {
@@ -344,6 +354,10 @@ ReferenceFixture loadReferenceFixture(const std::filesystem::path &dir) {
   auto tokens_j = load_json_array("reference_tokens.json");
   for (auto &v : tokens_j)
     fix.reference_tokens.push_back(v.get<unsigned int>());
+
+  auto embedding_j = load_json_array("reference_embedding.json");
+  for (auto &v : embedding_j)
+    fix.reference_embedding.push_back(v.get<float>());
 
   return fix;
 }
@@ -389,6 +403,30 @@ void expectTokenPrefixMatch(const std::vector<unsigned int> &got,
     << "greedy prefix match " << match << " < min " << min_match
     << " (got[0]=" << (got.empty() ? -1 : (int)got[0])
     << " ref[0]=" << (ref.empty() ? -1 : (int)ref[0]) << ")";
+}
+
+/**
+ * @brief Assert embedding vectors agree element-wise and by cosine similarity
+ */
+void expectEmbeddingNear(const std::vector<float> &got,
+                         const std::vector<float> &ref, float atol,
+                         float cosine_min) {
+  ASSERT_EQ(got.size(), ref.size()) << "embedding vector size mismatch";
+  ASSERT_FALSE(ref.empty()) << "reference embedding is empty";
+
+  double dot = 0.0, norm_got = 0.0, norm_ref = 0.0;
+  for (size_t i = 0; i < ref.size(); ++i) {
+    dot += static_cast<double>(got[i]) * ref[i];
+    norm_got += static_cast<double>(got[i]) * got[i];
+    norm_ref += static_cast<double>(ref[i]) * ref[i];
+    EXPECT_NEAR(got[i], ref[i], atol) << "embedding mismatch at index " << i;
+  }
+
+  double cosine = (norm_got > 0.0 && norm_ref > 0.0)
+                    ? dot / (std::sqrt(norm_got) * std::sqrt(norm_ref))
+                    : 0.0;
+  EXPECT_GE(cosine, cosine_min)
+    << "cosine similarity " << cosine << " < min " << cosine_min;
 }
 
 namespace {
@@ -462,6 +500,37 @@ bool tryLoadFixture(const DifferentialModel &model,
   if (fixture.input_ids.empty() || fixture.reference_logits.empty() ||
       fixture.reference_tokens.empty()) {
     skip_reason = "Fixture JSON arrays are empty";
+    return false;
+  }
+  return true;
+}
+
+/**
+ * @brief Locate and load an embedding fixture, returning false (and reason)
+ *        if the fixture or its FP32 weights are absent
+ */
+bool tryLoadEmbeddingFixture(const DifferentialModel &model,
+                             std::filesystem::path &fixture_dir,
+                             ReferenceFixture &fixture,
+                             std::string &skip_reason) {
+  fixture_dir = findFixtureDir(model.fixture_name);
+
+  if (!std::filesystem::exists(fixture_dir) ||
+      !std::filesystem::exists(fixture_dir / "nntr_config.json") ||
+      !std::filesystem::exists(fixture_dir / "reference_embedding.json")) {
+    skip_reason = "Fixtures absent — run the generate_*_reference.py script";
+    return false;
+  }
+
+  auto fc = loadFixtureConfigs(fixture_dir);
+  if (!std::filesystem::exists(fc.weight_path)) {
+    skip_reason = "FP32 weight file absent: " + fc.weight_path.string();
+    return false;
+  }
+
+  fixture = loadReferenceFixture(fixture_dir);
+  if (fixture.reference_embedding.empty()) {
+    skip_reason = "Fixture reference_embedding.json is empty";
     return false;
   }
   return true;
@@ -575,6 +644,37 @@ void runQ40DifferentialChecks(const DifferentialModel &model) {
                     fixture.input_ids, fixture.reference_tokens.size()));
   expectTokenPrefixMatch(q4_tokens, fixture.reference_tokens,
                          fixture.prefix_match_min);
+}
+
+/**
+ * @brief Run the FP32 differential checks for an embedding model
+ */
+void runFp32EmbeddingDifferentialChecks(const DifferentialModel &model) {
+  std::filesystem::path fixture_dir;
+  ReferenceFixture fixture;
+  std::string skip_reason;
+  if (!tryLoadEmbeddingFixture(model, fixture_dir, fixture, skip_reason))
+    GTEST_SKIP() << skip_reason;
+
+  auto fc = loadFixtureConfigs(fixture_dir);
+
+  // Drive the model in embedding mode. Point module_config_path at the
+  // fixture's modules.json (when present) so the SentenceTransformer pooling /
+  // normalize pipeline resolves relative to the fixture directory.
+  fc.nntr_cfg["model_type"] = "Embedding";
+  auto modules_path = fixture_dir / "modules.json";
+  if (std::filesystem::exists(modules_path))
+    fc.nntr_cfg["module_config_path"] = modules_path.string();
+
+  auto m = model.make_model(fc.model_cfg, fc.gen_cfg, fc.nntr_cfg);
+  m->initializeModel();
+  m->loadWeight(fc.weight_path.string());
+
+  std::vector<float> got;
+  ASSERT_NO_THROW(got = m->embedPrompt(fixture.prompt,
+                                       fixture.reference_embedding.size()));
+  expectEmbeddingNear(got, fixture.reference_embedding, fixture.embedding_atol,
+                      fixture.cosine_min);
 }
 
 } // namespace causallm_test
