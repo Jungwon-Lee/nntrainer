@@ -402,6 +402,55 @@ std::vector<float> Lfm2CausalLM::lookupEmbedding(unsigned int token_id) {
   return result;
 }
 
+void Lfm2CausalLM::run(const WSTR prompt, bool do_sample,
+                       const WSTR system_prompt, const WSTR tail_prompt,
+                       bool log_output) {
+  if (!USE_EMBEDDING) {
+    CausalLM::run(prompt, do_sample, system_prompt, tail_prompt, log_output);
+    return;
+  }
+
+  if (!is_initialized) {
+    throw std::runtime_error(
+      "Lfm2CausalLM model is not initialized. Please call "
+      "initialize() before run().");
+  }
+
+  if (!embedding_weight_cached_) {
+    throw std::runtime_error(
+      "Lfm2CausalLM::run: embedding weight not cached. "
+      "Ensure load_weight() has been called.");
+  }
+
+  const std::string full_prompt = system_prompt + prompt + tail_prompt;
+  if (log_output)
+    std::cout << full_prompt << std::endl;
+
+  auto token_ids = tokenizer->Encode(full_prompt);
+
+  // Clamp to INIT_SEQ_LEN (the model's prefill capacity)
+  const size_t max_tokens = static_cast<size_t>(INIT_SEQ_LEN);
+  if (token_ids.size() > max_tokens)
+    token_ids.resize(max_tokens);
+
+  const size_t n_tokens = token_ids.size();
+
+  // Build flat embedding buffer: [n_tokens * DIM]
+  std::vector<float> inputs_embeds(n_tokens * static_cast<size_t>(DIM));
+  for (size_t t = 0; t < n_tokens; ++t) {
+    const unsigned int tok = static_cast<unsigned int>(token_ids[t]);
+    std::vector<float> emb = lookupEmbedding(tok);
+    std::copy(emb.begin(), emb.end(),
+              inputs_embeds.begin() + static_cast<ptrdiff_t>(t * DIM));
+  }
+
+  // Collect token IDs as seed_tokens for repetition penalty tracking
+  std::vector<int> seed_tokens(token_ids.begin(), token_ids.end());
+
+  run_with_embeddings(inputs_embeds.data(), n_tokens, seed_tokens, do_sample,
+                      log_output);
+}
+
 void Lfm2CausalLM::run_with_embeddings(const void *inputs_embeds,
                                        size_t n_tokens,
                                        std::vector<int> seed_tokens,

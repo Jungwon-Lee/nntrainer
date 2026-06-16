@@ -90,6 +90,17 @@ public:
   static Lfm2CausalLM createTestModel();
   
   /**
+   * @brief Run the model with a text prompt.
+   *
+   * When USE_EMBEDDING=true, tokenizes the prompt, converts tokens to
+   * embeddings via lookupEmbedding(), and delegates to run_with_embeddings().
+   * When USE_EMBEDDING=false, delegates to CausalLM::run() directly.
+   */
+  void run(const WSTR prompt, bool do_sample = false,
+           const WSTR system_prompt = "", const WSTR tail_prompt = "",
+           bool log_output = true) override;
+
+  /**
    * @brief Run prefill with in-memory input embeddings (skips file I/O).
    *
    * @param inputs_embeds  Pointer to merged embeddings [B * INIT_SEQ_LEN * DIM]
