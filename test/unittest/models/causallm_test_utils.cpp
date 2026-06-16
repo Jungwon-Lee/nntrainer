@@ -316,6 +316,8 @@ ReferenceFixture loadReferenceFixture(const std::filesystem::path &dir) {
   fix.prompt = "hello tok4";
   fix.embedding_atol = 1e-2f;
   fix.cosine_min = 0.999f;
+  fix.embedding_atol_q40 = 0.1f;
+  fix.cosine_min_q40 = 0.99f;
 
   auto meta_path = dir / "meta.json";
   if (std::filesystem::exists(meta_path)) {
@@ -333,6 +335,10 @@ ReferenceFixture loadReferenceFixture(const std::filesystem::path &dir) {
       fix.embedding_atol = meta["embedding_atol"].get<float>();
     if (meta.contains("cosine_min"))
       fix.cosine_min = meta["cosine_min"].get<float>();
+    if (meta.contains("embedding_atol_q40"))
+      fix.embedding_atol_q40 = meta["embedding_atol_q40"].get<float>();
+    if (meta.contains("cosine_min_q40"))
+      fix.cosine_min_q40 = meta["cosine_min_q40"].get<float>();
   }
 
   auto load_json_array = [&](const std::string &name) -> json {
@@ -675,6 +681,92 @@ void runFp32EmbeddingDifferentialChecks(const DifferentialModel &model) {
                                        fixture.reference_embedding.size()));
   expectEmbeddingNear(got, fixture.reference_embedding, fixture.embedding_atol,
                       fixture.cosine_min);
+}
+
+/**
+ * @brief Run Q4_0 differential checks for an embedding model
+ *
+ * Quantizes the FP32 fixture with nntr_quantize, then checks:
+ *  1. Q4_0 embedding vs HF FP32 reference (cosine + atol)
+ *  2. Q4_0 embedding vs nntrainer FP32 embedding (cosine + atol)
+ *
+ * Skips gracefully when NNTR_QUANTIZE_BIN is unset or when the model
+ * architecture is not supported by nntr_quantize (e.g. BERT, DeBERTa).
+ */
+void runQ40EmbeddingDifferentialChecks(const DifferentialModel &model) {
+  std::filesystem::path fixture_dir;
+  ReferenceFixture fixture;
+  std::string skip_reason;
+  if (!tryLoadEmbeddingFixture(model, fixture_dir, fixture, skip_reason))
+    GTEST_SKIP() << skip_reason;
+
+  const char *quantize_bin_env = std::getenv(QUANTIZE_BIN_ENV);
+  if (!quantize_bin_env || std::string(quantize_bin_env).empty())
+    GTEST_SKIP() << "NNTR_QUANTIZE_BIN not set — Q4_0 test skipped";
+  const std::string quantize_bin(quantize_bin_env);
+
+  auto q4_dir = std::filesystem::temp_directory_path() /
+                ("nntrainer_" + model.fixture_name + "_q40_emb");
+  std::filesystem::remove_all(q4_dir);
+  std::filesystem::create_directories(q4_dir);
+
+  if (!runQuantize(quantize_bin, fixture_dir, q4_dir))
+    GTEST_SKIP() << "nntr_quantize does not support this architecture — Q4_0 "
+                    "test skipped";
+
+  auto q4_nntr_cfg_path = q4_dir / "nntr_config.json";
+  ASSERT_TRUE(std::filesystem::exists(q4_nntr_cfg_path))
+    << "nntr_quantize did not produce nntr_config.json";
+
+  std::string q4_bin_name;
+  {
+    std::ifstream f(q4_nntr_cfg_path);
+    auto q4_cfg_j = json::parse(f);
+    q4_bin_name = q4_cfg_j["model_file_name"].get<std::string>();
+  }
+  auto q4_bin_path = q4_dir / q4_bin_name;
+  ASSERT_TRUE(std::filesystem::exists(q4_bin_path))
+    << "Q4_0 weight file not found: " << q4_bin_path;
+
+  // --- Load Q4_0 model in embedding mode ---
+  auto fc = loadFixtureConfigs(fixture_dir);
+  auto q4_nntr_cfg = causallm::LoadJsonFile(q4_nntr_cfg_path.string());
+  q4_nntr_cfg["tokenizer_file"] = (fixture_dir / "tokenizer.json").string();
+  q4_nntr_cfg["model_type"] = "Embedding";
+  auto modules_path = fixture_dir / "modules.json";
+  if (std::filesystem::exists(modules_path))
+    q4_nntr_cfg["module_config_path"] = modules_path.string();
+
+  auto q4_model = model.make_model(fc.model_cfg, fc.gen_cfg, q4_nntr_cfg);
+  q4_model->initializeModel();
+  q4_model->loadWeight(q4_bin_path.string());
+
+  std::vector<float> q4_got;
+  ASSERT_NO_THROW(q4_got = q4_model->embedPrompt(fixture.prompt,
+                                                  fixture.reference_embedding.size()));
+
+  // Q4_0 embedding vs HF FP32 reference
+  expectEmbeddingNear(q4_got, fixture.reference_embedding,
+                      fixture.embedding_atol_q40, fixture.cosine_min_q40);
+
+  // --- Load nntrainer FP32 model for a direct comparison ---
+  auto fp32_fc = loadFixtureConfigs(fixture_dir);
+  fp32_fc.nntr_cfg["model_type"] = "Embedding";
+  if (std::filesystem::exists(modules_path))
+    fp32_fc.nntr_cfg["module_config_path"] = modules_path.string();
+
+  auto fp32_model =
+    model.make_model(fp32_fc.model_cfg, fp32_fc.gen_cfg, fp32_fc.nntr_cfg);
+  fp32_model->initializeModel();
+  fp32_model->loadWeight(fp32_fc.weight_path.string());
+
+  std::vector<float> fp32_got;
+  ASSERT_NO_THROW(fp32_got = fp32_model->embedPrompt(
+                    fixture.prompt, fixture.reference_embedding.size()));
+
+  // Q4_0 embedding vs nntrainer FP32 embedding
+  expectEmbeddingNear(q4_got, fp32_got, fixture.embedding_atol_q40,
+                      fixture.cosine_min_q40);
 }
 
 } // namespace causallm_test

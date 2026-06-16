@@ -222,6 +222,8 @@ def main() -> None:
         "prompt": PROMPT,
         "embedding_atol": 2e-2,
         "cosine_min": 0.999,
+        "embedding_atol_q40": 0.1,
+        "cosine_min_q40": 0.99,
         "pooling": "none",
         "transformers_version": transformers.__version__,
         "torch_version": torch.__version__,

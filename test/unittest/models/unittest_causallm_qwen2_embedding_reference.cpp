@@ -51,10 +51,26 @@ TEST(Qwen2EmbeddingDifferentialTest, FP32MatchesHFReference) {
 }
 
 /**
+ * @brief Q4_0 quantized Qwen2Embedding is close to the HF FP32 reference
+ */
+TEST(Qwen2EmbeddingDifferentialTest, Q40CloseToFP32Reference) {
+  causallm_test::runQ40EmbeddingDifferentialChecks(
+    qwen2EmbeddingModel("qwen2_embedding_tiny"));
+}
+
+/**
  * @brief FP32 KaLM-Embedding (mean pooling) matches the HF reference
  */
 TEST(KalmEmbeddingDifferentialTest, FP32MatchesHFReference) {
   causallm_test::runFp32EmbeddingDifferentialChecks(
+    qwen2EmbeddingModel("kalm_embedding_tiny"));
+}
+
+/**
+ * @brief Q4_0 quantized KaLM-Embedding is close to the HF FP32 reference
+ */
+TEST(KalmEmbeddingDifferentialTest, Q40CloseToFP32Reference) {
+  causallm_test::runQ40EmbeddingDifferentialChecks(
     qwen2EmbeddingModel("kalm_embedding_tiny"));
 }
 

@@ -545,8 +545,10 @@ struct ReferenceFixture {
   // Embedding/encoder model fields (unused by CausalLM fixtures)
   std::vector<float> reference_embedding; /**< HF output embedding vector */
   std::string prompt;                   /**< Prompt text fed to encode() */
-  float embedding_atol;                 /**< Embedding absolute tolerance */
-  float cosine_min;                     /**< Min cosine similarity vs reference */
+  float embedding_atol;                 /**< FP32 embedding absolute tolerance */
+  float cosine_min;                     /**< FP32 min cosine similarity */
+  float embedding_atol_q40;             /**< Q4_0 embedding absolute tolerance */
+  float cosine_min_q40;                 /**< Q4_0 min cosine similarity */
 };
 
 /**
@@ -640,6 +642,18 @@ void runQ40DifferentialChecks(const DifferentialModel &model);
  *              EmbeddingTestAdapter-derived runner)
  */
 void runFp32EmbeddingDifferentialChecks(const DifferentialModel &model);
+
+/**
+ * @brief Run the Q4_0 differential checks for an embedding model
+ *
+ * Skips when the fixture, NNTR_QUANTIZE_BIN, or Q4_0 support for the
+ * architecture are absent. Quantizes the FP32 fixture, encodes the prompt
+ * with the Q4_0 model, and verifies the embedding stays within Q4_0 tolerance
+ * of both the HF FP32 reference and the nntrainer FP32 embedding.
+ *
+ * @param model Differential model descriptor
+ */
+void runQ40EmbeddingDifferentialChecks(const DifferentialModel &model);
 
 /**
  * @brief Make FP32 data type variant

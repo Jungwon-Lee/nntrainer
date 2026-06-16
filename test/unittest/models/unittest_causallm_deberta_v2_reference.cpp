@@ -67,4 +67,12 @@ TEST(DebertaV2DifferentialTest, FP32MatchesHFReference) {
   causallm_test::runFp32EmbeddingDifferentialChecks(debertaV2Model());
 }
 
+/**
+ * @brief Q4_0 embedding is close to the HF FP32 reference
+ *        (skips automatically if nntr_quantize does not support DebertaV2Model)
+ */
+TEST(DebertaV2DifferentialTest, Q40CloseToFP32Reference) {
+  causallm_test::runQ40EmbeddingDifferentialChecks(debertaV2Model());
+}
+
 } // namespace

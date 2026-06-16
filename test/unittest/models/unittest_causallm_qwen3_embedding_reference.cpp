@@ -50,4 +50,11 @@ TEST(Qwen3EmbeddingDifferentialTest, FP32MatchesHFReference) {
   causallm_test::runFp32EmbeddingDifferentialChecks(qwen3EmbeddingModel());
 }
 
+/**
+ * @brief Q4_0 quantized embedding is close to the HF FP32 reference
+ */
+TEST(Qwen3EmbeddingDifferentialTest, Q40CloseToFP32Reference) {
+  causallm_test::runQ40EmbeddingDifferentialChecks(qwen3EmbeddingModel());
+}
+
 } // namespace

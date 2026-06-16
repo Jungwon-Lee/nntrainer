@@ -65,4 +65,11 @@ TEST(EmbeddingGemmaDifferentialTest, FP32MatchesHFReference) {
   causallm_test::runFp32EmbeddingDifferentialChecks(embeddingGemmaModel());
 }
 
+/**
+ * @brief Q4_0 quantized embedding is close to the HF FP32 reference
+ */
+TEST(EmbeddingGemmaDifferentialTest, Q40CloseToFP32Reference) {
+  causallm_test::runQ40EmbeddingDifferentialChecks(embeddingGemmaModel());
+}
+
 } // namespace

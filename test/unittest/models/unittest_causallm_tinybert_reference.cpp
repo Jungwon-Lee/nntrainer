@@ -74,6 +74,14 @@ TEST(TinyBertDifferentialTest, FP32MatchesHFReference) {
   causallm_test::runFp32EmbeddingDifferentialChecks(tinyBertModel());
 }
 
+/**
+ * @brief Q4_0 encoder output is close to the HF FP32 reference
+ *        (skips automatically if nntr_quantize does not support BertForMaskedLM)
+ */
+TEST(TinyBertDifferentialTest, Q40CloseToFP32Reference) {
+  causallm_test::runQ40EmbeddingDifferentialChecks(tinyBertModel());
+}
+
 } // namespace
 
 #endif // !_WIN32 && !__ANDROID__
