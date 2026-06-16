@@ -54,7 +54,7 @@ python converter/weight_converter.py \
 # float16 weights
 python converter/weight_converter.py --model_path Qwen/Qwen2-0.5B --data_type float16
 
-# safetensors output (Qwen3 only)
+# safetensors output (qwen2, qwen3, kalm, deberta_v2, bert)
 python converter/weight_converter.py --model_path Qwen/Qwen3-0.6B --safetensors
 
 # Embedding variants
@@ -78,7 +78,7 @@ python converter/weight_converter.py \
 | `--output_name` | `res/<model>/nntr_<model>_<dtype>.bin` | Output weight file path |
 | `--data_type` | `float32` | `float32` or `float16` |
 | `--model_type` | auto-detect | Override model type detection |
-| `--safetensors` | off | Save weights in safetensors format (Qwen3 only) |
+| `--safetensors` | off | Save weights in safetensors format (qwen2, qwen3, qwen3_moe via qwen3, kalm, deberta_v2, bert) |
 | `--patch_size` | `16` | (ViT only) patch size in pixels |
 | `--img_size` | `224` | (ViT only) input image size in pixels |
 

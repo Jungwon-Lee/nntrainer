@@ -5,9 +5,70 @@ import numpy as np
 import torch
 from pathlib import Path
 
-from utils import save_configs
+from utils import save_configs, tensor_to_numpy, get_safetensors_output_name, save_safetensors
 
 SAMPLE_INPUT = "This is an example sentence"
+
+
+def _uses_relative_bias(config):
+    pos_att_type = getattr(config, "pos_att_type", None) or []
+    return getattr(config, "relative_attention", False) and (
+        "c2p" in pos_att_type or "p2c" in pos_att_type
+    )
+
+
+def _norm_rel(config):
+    norm_rel_ebd = getattr(config, "norm_rel_ebd", "none") or "none"
+    return "layer_norm" in norm_rel_ebd.lower()
+
+
+def _collect_safetensors(params, config, dtype):
+    """Collect (nntrainer_name, ndarray) pairs for safetensors export.
+
+    safetensors is name-based, so ordering does not matter for loading.
+    """
+    uses_rel = _uses_relative_bias(config)
+    norm_rel = _norm_rel(config)
+
+    weights = []
+
+    def add(name, hf_key, transpose=False):
+        weights.append((name, tensor_to_numpy(params[hf_key], dtype, transpose=transpose)))
+
+    add("embedding0:Embedding", "embeddings.word_embeddings.weight")
+    add("embeddings_norm:gamma", "embeddings.LayerNorm.weight")
+    add("embeddings_norm:beta", "embeddings.LayerNorm.bias")
+
+    for i in range(config.num_hidden_layers):
+        hf = f"encoder.layer.{i}."
+        nn = f"layer{i}"
+        sa = f"{hf}attention.self."
+
+        add(f"{nn}_wq:weight", f"{sa}query_proj.weight", transpose=True)
+        add(f"{nn}_wq:bias", f"{sa}query_proj.bias")
+        add(f"{nn}_wk:weight", f"{sa}key_proj.weight", transpose=True)
+        add(f"{nn}_wk:bias", f"{sa}key_proj.bias")
+        add(f"{nn}_wv:weight", f"{sa}value_proj.weight", transpose=True)
+        add(f"{nn}_wv:bias", f"{sa}value_proj.bias")
+
+        if i == 0 and uses_rel:
+            add("rel_embeddings:weight", "encoder.rel_embeddings.weight")
+            if norm_rel:
+                add("rel_embeddings_norm:gamma", "encoder.LayerNorm.weight")
+                add("rel_embeddings_norm:beta", "encoder.LayerNorm.bias")
+
+        add(f"{nn}_attention_out:weight", f"{hf}attention.output.dense.weight", transpose=True)
+        add(f"{nn}_attention_out:bias", f"{hf}attention.output.dense.bias")
+        add(f"{nn}_attention_norm:gamma", f"{hf}attention.output.LayerNorm.weight")
+        add(f"{nn}_attention_norm:beta", f"{hf}attention.output.LayerNorm.bias")
+        add(f"{nn}_intermediate:weight", f"{hf}intermediate.dense.weight", transpose=True)
+        add(f"{nn}_intermediate:bias", f"{hf}intermediate.dense.bias")
+        add(f"{nn}_output_dense:weight", f"{hf}output.dense.weight", transpose=True)
+        add(f"{nn}_output_dense:bias", f"{hf}output.dense.bias")
+        add(f"{nn}_output:gamma", f"{hf}output.LayerNorm.weight")
+        add(f"{nn}_output:beta", f"{hf}output.LayerNorm.bias")
+
+    return weights
 
 
 def _to_numpy(weight, dtype):
@@ -100,20 +161,27 @@ def _load(model_path):
 
 def convert(model_path, output_name, dtype, **kwargs):
     """Convert DeBERTa V2 weights to nntrainer binary format."""
+    use_safetensors = kwargs.get("safetensors", False)
     np_dtype = np.float16 if dtype == "float16" else np.float32
     config, params = _load(model_path)
 
-    output_path = Path(output_name)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-
-    with torch.no_grad(), output_path.open("wb") as f:
-        _save_weights(params, config, np_dtype, f)
-
-    print(f"Saved binary: {output_name}")
+    with torch.no_grad():
+        if use_safetensors:
+            effective_output = get_safetensors_output_name(output_name)
+            Path(effective_output).parent.mkdir(parents=True, exist_ok=True)
+            weights = _collect_safetensors(params, config, dtype)
+            save_safetensors(weights, effective_output, dtype)
+        else:
+            effective_output = output_name
+            output_path = Path(output_name)
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            with output_path.open("wb") as f:
+                _save_weights(params, config, np_dtype, f)
+            print(f"Saved binary: {output_name}")
 
     nntr_extra = {
         "model_type": "embedding",
         "sample_input": SAMPLE_INPUT,
     }
-    save_configs(output_name, dtype, hf_config=config, model_path=model_path,
+    save_configs(effective_output, dtype, hf_config=config, model_path=model_path,
                  nntr_extra=nntr_extra, sentence_transformer=True)

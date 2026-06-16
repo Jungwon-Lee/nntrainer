@@ -34,7 +34,7 @@
 #   # explicit output path
 #   python weight_converter.py --model_path Qwen/Qwen3-0.6B --output_name /tmp/out.bin
 #
-#   # safetensors output (Qwen3 only)
+#   # safetensors output (qwen2/qwen3/kalm/deberta_v2/bert)
 #   python weight_converter.py --model_path Qwen/Qwen3-0.6B --safetensors
 #
 #   # timm ViT (model_path is a checkpoint file, not an HF hub id)
@@ -144,7 +144,7 @@ def main():
     parser.add_argument(
         "--safetensors",
         action="store_true",
-        help="Save in safetensors format (Qwen3 only).",
+        help="Save in safetensors format (qwen2/qwen3/kalm/deberta_v2/bert).",
     )
     # ViT-specific geometry (used for nntr_config.json)
     parser.add_argument(

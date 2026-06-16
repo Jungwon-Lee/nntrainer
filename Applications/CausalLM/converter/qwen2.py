@@ -10,6 +10,9 @@ from utils import (
     save_configs,
     get_tie_word_embeddings,
     make_chat_input,
+    tensor_to_numpy,
+    get_safetensors_output_name,
+    save_safetensors,
 )
 
 # Plain user question; the chat_template is applied at inference time via chat_input.
@@ -71,9 +74,54 @@ def _save_weights(params, n_layers, dtype, file, layer_prefix_fn=None, save_lm_h
         save(params["lm_head.weight"], transpose=True)
 
 
+def _collect_safetensors(params, n_layers, dtype, layer_prefix_fn=None, save_lm_head=False):
+    """Collect (nntrainer_name, ndarray) pairs for safetensors export."""
+    if layer_prefix_fn is None:
+        layer_prefix_fn = lambda i: f"model.layers.{i}."
+    embed_key = "0.auto_model.embed_tokens.weight" if "0.auto_model.embed_tokens.weight" in params else "model.embed_tokens.weight"
+    norm_key = "0.auto_model.norm.weight" if "0.auto_model.norm.weight" in params else "model.norm.weight"
+
+    weights = []
+
+    def add(name, tensor, transpose=False):
+        weights.append((name, tensor_to_numpy(tensor, dtype, transpose=transpose)))
+
+    def add_proj(nntr_name, layer_name, proj_name):
+        prefix = f"{layer_name}{proj_name}"
+        if f"{prefix}.lora_A.default.weight" in params:
+            add(nntr_name, params[f"{prefix}.base_layer.weight"], transpose=True)
+        else:
+            add(nntr_name, params[f"{prefix}.weight"], transpose=True)
+
+    add("embedding0:Embedding", params[embed_key])
+
+    for i in range(n_layers):
+        hf = layer_prefix_fn(i)
+        p = f"layer{i}"
+        add(f"{p}_attention_norm:gamma", params[f"{hf}input_layernorm.weight"])
+        for proj, nntr in [("q_proj", "wq"), ("k_proj", "wk"), ("v_proj", "wv")]:
+            add_proj(f"{p}_{nntr}:weight", hf, f"self_attn.{proj}")
+            bias_key = f"{hf}self_attn.{proj}.bias"
+            if bias_key in params:
+                add(f"{p}_{nntr}:bias", params[bias_key])
+        add_proj(f"{p}_attention_out:weight", hf, "self_attn.o_proj")
+        add(f"{p}_ffn_norm:gamma", params[f"{hf}post_attention_layernorm.weight"])
+        add_proj(f"{p}_ffn_up:weight", hf, "mlp.up_proj")
+        add_proj(f"{p}_ffn_gate:weight", hf, "mlp.gate_proj")
+        add_proj(f"{p}_ffn_down:weight", hf, "mlp.down_proj")
+
+    add("output_norm:gamma", params[norm_key])
+
+    if save_lm_head and "lm_head.weight" in params:
+        add("output_of_causallm:weight", params["lm_head.weight"], transpose=True)
+
+    return weights
+
+
 def convert(model_path, output_name, dtype, **kwargs):
     """Convert Qwen2 (or KaLM-embedding) weights to nntrainer binary format."""
     is_kalm = kwargs.get("is_kalm", False)
+    use_safetensors = kwargs.get("safetensors", False)
 
     config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
 
@@ -94,11 +142,17 @@ def convert(model_path, output_name, dtype, **kwargs):
 
     params = model.state_dict()
 
-    with open(output_name, "wb") as f:
-        _save_weights(params, config.num_hidden_layers, dtype, f,
-                      layer_prefix_fn=layer_prefix_fn, save_lm_head=save_lm_head)
-
-    print(f"Saved binary: {output_name}")
+    if use_safetensors:
+        effective_output = get_safetensors_output_name(output_name)
+        weights = _collect_safetensors(params, config.num_hidden_layers, dtype,
+                                       layer_prefix_fn=layer_prefix_fn, save_lm_head=save_lm_head)
+        save_safetensors(weights, effective_output, dtype)
+    else:
+        effective_output = output_name
+        with open(output_name, "wb") as f:
+            _save_weights(params, config.num_hidden_layers, dtype, f,
+                          layer_prefix_fn=layer_prefix_fn, save_lm_head=save_lm_head)
+        print(f"Saved binary: {output_name}")
 
     nntr_extra = {
         "model_type": "embedding" if is_kalm else "CausalLM",
@@ -108,5 +162,5 @@ def convert(model_path, output_name, dtype, **kwargs):
         nntr_extra["is_causal"] = False
     else:
         nntr_extra["chat_input"] = make_chat_input(CHAT_QUESTION)
-    save_configs(output_name, dtype, hf_config=config, model_path=model_path,
+    save_configs(effective_output, dtype, hf_config=config, model_path=model_path,
                  nntr_extra=nntr_extra, sentence_transformer=is_kalm)
