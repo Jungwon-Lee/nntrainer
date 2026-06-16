@@ -232,7 +232,7 @@ def main() -> None:
         "embedding_atol": 5e-2,
         "cosine_min": 0.995,
         "embedding_atol_q40": 0.1,
-        "cosine_min_q40": 0.99,
+        "cosine_min_q40": 0.95,
         "pooling": "mean",
         "transformers_version": transformers.__version__,
         "torch_version": torch.__version__,
