@@ -42,9 +42,8 @@ public:
     causallm::Transformer(causallm::DebertaV2::sanitizeConfig(cfg),
                           generation_cfg, nntr_cfg,
                           causallm::ModelType::EMBEDDING),
-    causallm_test::EmbeddingTestAdapter<causallm::DebertaV2>(cfg,
-                                                             generation_cfg,
-                                                             nntr_cfg) {}
+    causallm_test::EmbeddingTestAdapter<causallm::DebertaV2>(
+      cfg, generation_cfg, nntr_cfg) {}
 };
 
 /**
@@ -53,8 +52,7 @@ public:
 causallm_test::DifferentialModel debertaV2Model() {
   return {
     "deberta_v2_tiny",
-    [](causallm::json &cfg, causallm::json &gen_cfg,
-       causallm::json &nntr_cfg) {
+    [](causallm::json &cfg, causallm::json &gen_cfg, causallm::json &nntr_cfg) {
       return std::make_unique<DebertaV2RefAdapter>(cfg, gen_cfg, nntr_cfg);
     },
   };

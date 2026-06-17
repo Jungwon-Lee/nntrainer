@@ -357,16 +357,15 @@ void registerAllModels() {
                           return std::make_unique<causallm::EmbeddingGemma>(
                             cfg, generation_cfg, nntr_cfg);
                         });
-  factory.registerModel("DebertaV2",
-                        [](json cfg, json generation_cfg, json nntr_cfg) {
-                          return std::make_unique<causallm::DebertaV2>(
-                            cfg, generation_cfg, nntr_cfg);
-                        });
+  factory.registerModel("DebertaV2", [](json cfg, json generation_cfg,
+                                        json nntr_cfg) {
+    return std::make_unique<causallm::DebertaV2>(cfg, generation_cfg, nntr_cfg);
+  });
 #if !defined(_WIN32) && !defined(__ANDROID__)
   factory.registerModel(
     "MultilingualTinyBert", [](json cfg, json generation_cfg, json nntr_cfg) {
-      return std::make_unique<causallm::MultilingualTinyBert>(cfg, generation_cfg,
-                                                             nntr_cfg);
+      return std::make_unique<causallm::MultilingualTinyBert>(
+        cfg, generation_cfg, nntr_cfg);
     });
 #endif
 }

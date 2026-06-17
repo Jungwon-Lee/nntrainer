@@ -50,31 +50,31 @@ public:
  * @brief Populate deterministic tiny Gemma4 weights for golden token tests
  */
 void setupGemma4DeterministicWeights(TinyGemma4CausalLM &model) {
-  model.forEachLayer([](ml::train::Layer &layer,
-                        nntrainer::RunLayerContext &context, void *) {
-    if (layer.getName() == "output_of_causallm")
-      return;
+  model.forEachLayer(
+    [](ml::train::Layer &layer, nntrainer::RunLayerContext &context, void *) {
+      if (layer.getName() == "output_of_causallm")
+        return;
 
-    for (unsigned int i = 0; i < context.getNumWeights(); ++i) {
-      auto &weight = context.getWeight(i);
-      if (weight.getDataType() != ml::train::TensorDim::DataType::FP32)
-        continue;
+      for (unsigned int i = 0; i < context.getNumWeights(); ++i) {
+        auto &weight = context.getWeight(i);
+        if (weight.getDataType() != ml::train::TensorDim::DataType::FP32)
+          continue;
 
-      weight.setValue(0.0f);
-      if (layer.getType() == "rms_norm" ||
-          layer.getType() == "reshaped_rms_norm") {
-        weight.setValue(1.0f);
-      } else if (layer.getName() == "embedding0") {
-        weight.setValue(0, 0, 1, 0, 1.0f);
-        weight.setValue(0, 0, 4, 0, 2.0f);
-      } else if (layer.getName().find("_layer_scalar") != std::string::npos) {
-        // layer_scalar scales decoder_output (including residual) before the
-        // next layer receives it.  A value of 0 zeros out the entire hidden
-        // state; 1 preserves it so the residual path is exercised.
-        weight.setValue(1.0f);
+        weight.setValue(0.0f);
+        if (layer.getType() == "rms_norm" ||
+            layer.getType() == "reshaped_rms_norm") {
+          weight.setValue(1.0f);
+        } else if (layer.getName() == "embedding0") {
+          weight.setValue(0, 0, 1, 0, 1.0f);
+          weight.setValue(0, 0, 4, 0, 2.0f);
+        } else if (layer.getName().find("_layer_scalar") != std::string::npos) {
+          // layer_scalar scales decoder_output (including residual) before the
+          // next layer receives it.  A value of 0 zeros out the entire hidden
+          // state; 1 preserves it so the residual path is exercised.
+          weight.setValue(1.0f);
+        }
       }
-    }
-  });
+    });
 }
 
 /**

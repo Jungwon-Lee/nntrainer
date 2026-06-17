@@ -41,43 +41,43 @@ using TinyGptOssCausalLM =
  * expert weights are zeroed so MoE output is zero.
  */
 void setupGptOssDeterministicWeights(TinyGptOssCausalLM &model) {
-  model.forEachLayer([](ml::train::Layer &layer,
-                        nntrainer::RunLayerContext &context, void *) {
-    if (layer.getName() == "output_of_causallm")
-      return;
+  model.forEachLayer(
+    [](ml::train::Layer &layer, nntrainer::RunLayerContext &context, void *) {
+      if (layer.getName() == "output_of_causallm")
+        return;
 
-    if (layer.getType() == "gpt_oss_moe") {
-      // Weight 0 is the router gate (always FP32).
-      auto &gate = context.getWeight(0);
-      const auto dim = gate.getDim();
-      const unsigned hidden = dim.height();
-      const unsigned num_exp = dim.width();
-      for (unsigned h = 0; h < hidden; ++h)
-        for (unsigned e = 0; e < num_exp; ++e)
-          gate.setValue(0, 0, h, e, 1.0f / (e + 1));
+      if (layer.getType() == "gpt_oss_moe") {
+        // Weight 0 is the router gate (always FP32).
+        auto &gate = context.getWeight(0);
+        const auto dim = gate.getDim();
+        const unsigned hidden = dim.height();
+        const unsigned num_exp = dim.width();
+        for (unsigned h = 0; h < hidden; ++h)
+          for (unsigned e = 0; e < num_exp; ++e)
+            gate.setValue(0, 0, h, e, 1.0f / (e + 1));
 
-      for (unsigned int i = 1; i < context.getNumWeights(); ++i) {
-        auto &w = context.getWeight(i);
-        if (w.getDataType() == ml::train::TensorDim::DataType::FP32)
-          w.setValue(0.0f);
+        for (unsigned int i = 1; i < context.getNumWeights(); ++i) {
+          auto &w = context.getWeight(i);
+          if (w.getDataType() == ml::train::TensorDim::DataType::FP32)
+            w.setValue(0.0f);
+        }
+        return;
       }
-      return;
-    }
 
-    for (unsigned int i = 0; i < context.getNumWeights(); ++i) {
-      auto &weight = context.getWeight(i);
-      if (weight.getDataType() != ml::train::TensorDim::DataType::FP32)
-        continue;
+      for (unsigned int i = 0; i < context.getNumWeights(); ++i) {
+        auto &weight = context.getWeight(i);
+        if (weight.getDataType() != ml::train::TensorDim::DataType::FP32)
+          continue;
 
-      weight.setValue(0.0f);
-      if (layer.getType() == "rms_norm") {
-        weight.setValue(1.0f);
-      } else if (layer.getName() == "embedding0") {
-        weight.setValue(0, 0, 1, 0, 1.0f);
-        weight.setValue(0, 0, 4, 0, 2.0f);
+        weight.setValue(0.0f);
+        if (layer.getType() == "rms_norm") {
+          weight.setValue(1.0f);
+        } else if (layer.getName() == "embedding0") {
+          weight.setValue(0, 0, 1, 0, 1.0f);
+          weight.setValue(0, 0, 4, 0, 2.0f);
+        }
       }
-    }
-  });
+    });
 }
 
 /**
@@ -118,8 +118,7 @@ causallm::json makeTinyGptOssConfig() {
  * Q4_0-quantizable.
  */
 std::map<std::string, ml::train::TensorDim::DataType>
-makeGptOssLayerDtypeMap(
-  const causallm_test::TinyCausalLMDataType &data_type) {
+makeGptOssLayerDtypeMap(const causallm_test::TinyCausalLMDataType &data_type) {
   std::map<std::string, ml::train::TensorDim::DataType> dtype_map;
 
   if (data_type.embedding_dtype != "FP32")

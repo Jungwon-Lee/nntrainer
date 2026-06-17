@@ -56,7 +56,8 @@ public:
 };
 
 /**
- * @brief Differential model descriptor for the tiny MultilingualTinyBert fixture
+ * @brief Differential model descriptor for the tiny MultilingualTinyBert
+ * fixture
  */
 causallm_test::DifferentialModel tinyBertModel() {
   return {
@@ -76,7 +77,8 @@ TEST(TinyBertDifferentialTest, FP32MatchesHFReference) {
 
 /**
  * @brief Q4_0 encoder output is close to the HF FP32 reference
- *        (skips automatically if nntr_quantize does not support BertForMaskedLM)
+ *        (skips automatically if nntr_quantize does not support
+ * BertForMaskedLM)
  */
 TEST(TinyBertDifferentialTest, Q40CloseToFP32Reference) {
   causallm_test::runQ40EmbeddingDifferentialChecks(tinyBertModel());

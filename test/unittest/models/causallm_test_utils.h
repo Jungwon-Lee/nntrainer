@@ -158,7 +158,8 @@ public:
    */
   virtual std::vector<float>
   prefillLogitsFromIds(const std::vector<unsigned int> &ids) {
-    throw std::logic_error("prefillLogitsFromIds not implemented for this model");
+    throw std::logic_error(
+      "prefillLogitsFromIds not implemented for this model");
   }
 
   /**
@@ -169,7 +170,8 @@ public:
    */
   virtual std::vector<unsigned int>
   greedyGenerateFromIds(const std::vector<unsigned int> &ids, size_t n) {
-    throw std::logic_error("greedyGenerateFromIds not implemented for this model");
+    throw std::logic_error(
+      "greedyGenerateFromIds not implemented for this model");
   }
 
   /**
@@ -257,7 +259,8 @@ public:
     if (encoded.empty())
       throw std::invalid_argument("tiny CausalLM prompt encoded to no tokens");
 
-    const unsigned int num_allow_str = this->MAX_SEQ_LEN - this->NUM_TO_GENERATE;
+    const unsigned int num_allow_str =
+      this->MAX_SEQ_LEN - this->NUM_TO_GENERATE;
     const unsigned int init_len = static_cast<unsigned int>(
       std::min<size_t>(encoded.size(), num_allow_str));
     std::vector<unsigned int> ids(encoded.begin(), encoded.begin() + init_len);
@@ -340,8 +343,8 @@ public:
       unsigned int from = init_len + static_cast<unsigned int>(step);
       unsigned int to = from + 1;
       this->setKVCachePosition(from);
-      output = this->model->incremental_inference(this->BATCH_SIZE, input, label,
-                                                  1, from, to, false);
+      output = this->model->incremental_inference(this->BATCH_SIZE, input,
+                                                  label, 1, from, to, false);
     }
 
     return generated;
@@ -381,9 +384,9 @@ public:
    * @brief Apply a callback to every layer (used to populate weights in tests)
    * @param fn Callback receiving (layer, run-context, user-data)
    */
-  void forEachLayer(
-    std::function<void(ml::train::Layer &, nntrainer::RunLayerContext &, void *)>
-      fn) {
+  void forEachLayer(std::function<void(ml::train::Layer &,
+                                       nntrainer::RunLayerContext &, void *)>
+                      fn) {
     this->model->forEachLayer(fn, nullptr);
   }
 
@@ -394,8 +397,7 @@ private:
    * The returned cache_inputs keeps the string keys alive; input holds raw
    * pointers into input_sample and cache buffers.
    */
-  std::pair<std::vector<float *>,
-            std::vector<std::pair<std::string, float *>>>
+  std::pair<std::vector<float *>, std::vector<std::pair<std::string, float *>>>
   buildCacheInput(std::vector<float> &input_sample) {
     std::vector<std::pair<std::string, float *>> cache_inputs;
     cache_inputs.reserve(static_cast<size_t>(this->NUM_LAYERS) * 2);
@@ -508,7 +510,8 @@ public:
   std::vector<unsigned int> generateFromLogits(float *, bool, float,
                                                unsigned int *,
                                                unsigned int) override {
-    throw std::logic_error("generateFromLogits not supported for embedding models");
+    throw std::logic_error(
+      "generateFromLogits not supported for embedding models");
   }
 };
 
@@ -534,21 +537,21 @@ struct TinyCausalLMCase {
  * @brief Golden reference fixture loaded from a committed directory
  */
 struct ReferenceFixture {
-  std::filesystem::path dir;            /**< Fixture directory */
-  std::vector<unsigned int> input_ids;  /**< Fixed input token IDs */
-  std::vector<float> reference_logits;  /**< HF prefill last-token logits */
+  std::filesystem::path dir;           /**< Fixture directory */
+  std::vector<unsigned int> input_ids; /**< Fixed input token IDs */
+  std::vector<float> reference_logits; /**< HF prefill last-token logits */
   std::vector<unsigned int> reference_tokens; /**< HF greedy token sequence */
-  float logits_atol_fp32;               /**< FP32 logit absolute tolerance */
-  float logits_atol_q40;                /**< Q4_0 logit absolute tolerance */
-  size_t prefix_match_min;              /**< Min greedy prefix match length */
+  float logits_atol_fp32;  /**< FP32 logit absolute tolerance */
+  float logits_atol_q40;   /**< Q4_0 logit absolute tolerance */
+  size_t prefix_match_min; /**< Min greedy prefix match length */
 
   // Embedding/encoder model fields (unused by CausalLM fixtures)
   std::vector<float> reference_embedding; /**< HF output embedding vector */
-  std::string prompt;                   /**< Prompt text fed to encode() */
-  float embedding_atol;                 /**< FP32 embedding absolute tolerance */
-  float cosine_min;                     /**< FP32 min cosine similarity */
-  float embedding_atol_q40;             /**< Q4_0 embedding absolute tolerance */
-  float cosine_min_q40;                 /**< Q4_0 min cosine similarity */
+  std::string prompt;                     /**< Prompt text fed to encode() */
+  float embedding_atol;     /**< FP32 embedding absolute tolerance */
+  float cosine_min;         /**< FP32 min cosine similarity */
+  float embedding_atol_q40; /**< Q4_0 embedding absolute tolerance */
+  float cosine_min_q40;     /**< Q4_0 min cosine similarity */
 };
 
 /**

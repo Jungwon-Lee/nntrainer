@@ -63,17 +63,15 @@ causallm::json makeTinyGptOssCachedSlimConfig() {
  */
 TEST(GptOssCachedSlimTinyModelTest, GreedyGenerationSelectsArgmaxLogit) {
   auto tokenizer_path =
-    causallm_test::makeTinyCausalLMFiles(
-      "GptOssCachedSlimTinyModelTest",
-      "GreedyGenerationSelectsArgmaxLogit",
-      "GptOssCachedSlim_FP32")
+    causallm_test::makeTinyCausalLMFiles("GptOssCachedSlimTinyModelTest",
+                                         "GreedyGenerationSelectsArgmaxLogit",
+                                         "GptOssCachedSlim_FP32")
       .tokenizer_path;
 
   auto model_cfg = makeTinyGptOssCachedSlimConfig();
   auto gen_cfg = causallm_test::makeTinyGenerationConfig();
-  auto nntr_cfg =
-    causallm_test::makeTinyNntrainerConfig(tokenizer_path,
-                                           causallm_test::makeTinyFp32DataType());
+  auto nntr_cfg = causallm_test::makeTinyNntrainerConfig(
+    tokenizer_path, causallm_test::makeTinyFp32DataType());
 
   auto model = std::make_unique<TinyGptOssCachedSlimCausalLM>(
     model_cfg, gen_cfg, nntr_cfg);

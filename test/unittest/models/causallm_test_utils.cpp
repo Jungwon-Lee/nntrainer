@@ -485,8 +485,8 @@ bool runQuantize(const std::string &quantize_bin,
  * @brief Locate and load a fixture, returning false (and reason) if absent
  */
 bool tryLoadFixture(const DifferentialModel &model,
-                    std::filesystem::path &fixture_dir, ReferenceFixture &fixture,
-                    std::string &skip_reason) {
+                    std::filesystem::path &fixture_dir,
+                    ReferenceFixture &fixture, std::string &skip_reason) {
   fixture_dir = findFixtureDir(model.fixture_name);
 
   if (!std::filesystem::exists(fixture_dir) ||
@@ -557,13 +557,15 @@ void runFp32DifferentialChecks(const DifferentialModel &model) {
   auto fc = loadFixtureConfigs(fixture_dir);
 
   // Use separate model instances for prefill-logits and greedy-generate so
-  // that internal KV-cache state from the first pass does not affect the second.
+  // that internal KV-cache state from the first pass does not affect the
+  // second.
   auto m_logits = model.make_model(fc.model_cfg, fc.gen_cfg, fc.nntr_cfg);
   m_logits->initializeModel();
   m_logits->loadWeight(fc.weight_path.string());
 
   std::vector<float> got_logits;
-  ASSERT_NO_THROW(got_logits = m_logits->prefillLogitsFromIds(fixture.input_ids));
+  ASSERT_NO_THROW(got_logits =
+                    m_logits->prefillLogitsFromIds(fixture.input_ids));
   expectLogitsNear(got_logits, fixture.reference_logits,
                    fixture.logits_atol_fp32);
 
@@ -625,10 +627,12 @@ void runQ40DifferentialChecks(const DifferentialModel &model) {
   q4_model->loadWeight(q4_bin_path.string());
 
   std::vector<float> q4_logits;
-  ASSERT_NO_THROW(q4_logits = q4_model->prefillLogitsFromIds(fixture.input_ids));
+  ASSERT_NO_THROW(q4_logits =
+                    q4_model->prefillLogitsFromIds(fixture.input_ids));
 
   // Q4_0 logits vs HF FP32 reference
-  expectLogitsNear(q4_logits, fixture.reference_logits, fixture.logits_atol_q40);
+  expectLogitsNear(q4_logits, fixture.reference_logits,
+                   fixture.logits_atol_q40);
 
   // --- Load nntrainer FP32 model for a direct comparison ---
   auto fp32_fc = loadFixtureConfigs(fixture_dir);
@@ -677,8 +681,8 @@ void runFp32EmbeddingDifferentialChecks(const DifferentialModel &model) {
   m->loadWeight(fc.weight_path.string());
 
   std::vector<float> got;
-  ASSERT_NO_THROW(got = m->embedPrompt(fixture.prompt,
-                                       fixture.reference_embedding.size()));
+  ASSERT_NO_THROW(
+    got = m->embedPrompt(fixture.prompt, fixture.reference_embedding.size()));
   expectEmbeddingNear(got, fixture.reference_embedding, fixture.embedding_atol,
                       fixture.cosine_min);
 }
@@ -742,8 +746,8 @@ void runQ40EmbeddingDifferentialChecks(const DifferentialModel &model) {
   q4_model->loadWeight(q4_bin_path.string());
 
   std::vector<float> q4_got;
-  ASSERT_NO_THROW(q4_got = q4_model->embedPrompt(fixture.prompt,
-                                                  fixture.reference_embedding.size()));
+  ASSERT_NO_THROW(q4_got = q4_model->embedPrompt(
+                    fixture.prompt, fixture.reference_embedding.size()));
 
   // Q4_0 embedding vs HF FP32 reference
   expectEmbeddingNear(q4_got, fixture.reference_embedding,

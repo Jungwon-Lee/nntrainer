@@ -60,17 +60,15 @@ causallm::json makeTinyQwen3CachedSlimMoEConfig() {
  */
 TEST(Qwen3CachedSlimMoETinyModelTest, GreedyGenerationSelectsArgmaxLogit) {
   auto tokenizer_path =
-    causallm_test::makeTinyCausalLMFiles(
-      "Qwen3CachedSlimMoETinyModelTest",
-      "GreedyGenerationSelectsArgmaxLogit",
-      "Qwen3CachedSlimMoE_FP32")
+    causallm_test::makeTinyCausalLMFiles("Qwen3CachedSlimMoETinyModelTest",
+                                         "GreedyGenerationSelectsArgmaxLogit",
+                                         "Qwen3CachedSlimMoE_FP32")
       .tokenizer_path;
 
   auto model_cfg = makeTinyQwen3CachedSlimMoEConfig();
   auto gen_cfg = causallm_test::makeTinyGenerationConfig();
-  auto nntr_cfg =
-    causallm_test::makeTinyNntrainerConfig(tokenizer_path,
-                                           causallm_test::makeTinyFp32DataType());
+  auto nntr_cfg = causallm_test::makeTinyNntrainerConfig(
+    tokenizer_path, causallm_test::makeTinyFp32DataType());
 
   auto model = std::make_unique<TinyQwen3CachedSlimMoECausalLM>(
     model_cfg, gen_cfg, nntr_cfg);

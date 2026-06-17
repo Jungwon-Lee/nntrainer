@@ -38,47 +38,47 @@ using TinyQwen3MoECausalLM =
  * the hidden state unchanged — expected logits are the same as Qwen3.
  */
 void setupQwen3MoEDeterministicWeights(TinyQwen3MoECausalLM &model) {
-  model.forEachLayer([](ml::train::Layer &layer,
-                        nntrainer::RunLayerContext &context, void *) {
-    if (layer.getName() == "output_of_causallm")
-      return;
+  model.forEachLayer(
+    [](ml::train::Layer &layer, nntrainer::RunLayerContext &context, void *) {
+      if (layer.getName() == "output_of_causallm")
+        return;
 
-    if (layer.getType() == "qwen_moe") {
-      // Weight 0 is the router gate: [1, 1, hidden_size, num_experts] (NCHW).
-      // Always FP32 inside MoELayer regardless of layer dtype.
-      // Set expert j column to 1/(j+1) so routing is deterministic.
-      auto &gate = context.getWeight(0);
-      const auto dim = gate.getDim();
-      const unsigned hidden = dim.height(); // NCHW: height = hidden_size
-      const unsigned num_exp = dim.width(); // NCHW: width  = num_experts
-      for (unsigned h = 0; h < hidden; ++h)
-        for (unsigned e = 0; e < num_exp; ++e)
-          gate.setValue(0, 0, h, e, 1.0f / (e + 1));
+      if (layer.getType() == "qwen_moe") {
+        // Weight 0 is the router gate: [1, 1, hidden_size, num_experts] (NCHW).
+        // Always FP32 inside MoELayer regardless of layer dtype.
+        // Set expert j column to 1/(j+1) so routing is deterministic.
+        auto &gate = context.getWeight(0);
+        const auto dim = gate.getDim();
+        const unsigned hidden = dim.height(); // NCHW: height = hidden_size
+        const unsigned num_exp = dim.width(); // NCHW: width  = num_experts
+        for (unsigned h = 0; h < hidden; ++h)
+          for (unsigned e = 0; e < num_exp; ++e)
+            gate.setValue(0, 0, h, e, 1.0f / (e + 1));
 
-      // Expert projection weights (indices 1+): zero all FP32 weights so the
-      // MoE branch contributes zero to the residual stream.
-      for (unsigned int i = 1; i < context.getNumWeights(); ++i) {
-        auto &w = context.getWeight(i);
-        if (w.getDataType() == ml::train::TensorDim::DataType::FP32)
-          w.setValue(0.0f);
+        // Expert projection weights (indices 1+): zero all FP32 weights so the
+        // MoE branch contributes zero to the residual stream.
+        for (unsigned int i = 1; i < context.getNumWeights(); ++i) {
+          auto &w = context.getWeight(i);
+          if (w.getDataType() == ml::train::TensorDim::DataType::FP32)
+            w.setValue(0.0f);
+        }
+        return;
       }
-      return;
-    }
 
-    for (unsigned int i = 0; i < context.getNumWeights(); ++i) {
-      auto &weight = context.getWeight(i);
-      if (weight.getDataType() != ml::train::TensorDim::DataType::FP32)
-        continue;
+      for (unsigned int i = 0; i < context.getNumWeights(); ++i) {
+        auto &weight = context.getWeight(i);
+        if (weight.getDataType() != ml::train::TensorDim::DataType::FP32)
+          continue;
 
-      weight.setValue(0.0f);
-      if (layer.getType() == "rms_norm") {
-        weight.setValue(1.0f);
-      } else if (layer.getName() == "embedding0") {
-        weight.setValue(0, 0, 1, 0, 1.0f);
-        weight.setValue(0, 0, 4, 0, 2.0f);
+        weight.setValue(0.0f);
+        if (layer.getType() == "rms_norm") {
+          weight.setValue(1.0f);
+        } else if (layer.getName() == "embedding0") {
+          weight.setValue(0, 0, 1, 0, 1.0f);
+          weight.setValue(0, 0, 4, 0, 2.0f);
+        }
       }
-    }
-  });
+    });
 }
 
 /**
@@ -114,8 +114,7 @@ causallm::json makeTinyQwen3MoEConfig() {
  * projection weights are quantized.  The gate weight inside MoELayer is
  * always FP32 (hardcoded in the layer) so it is unaffected by the dtype map.
  */
-std::map<std::string, ml::train::TensorDim::DataType>
-makeQwen3MoELayerDtypeMap(
+std::map<std::string, ml::train::TensorDim::DataType> makeQwen3MoELayerDtypeMap(
   const causallm_test::TinyCausalLMDataType &data_type) {
   std::map<std::string, ml::train::TensorDim::DataType> dtype_map;
 

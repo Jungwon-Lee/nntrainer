@@ -37,10 +37,10 @@ class ReferenceGemma4 final
 public:
   ReferenceGemma4(causallm::json &cfg, causallm::json &generation_cfg,
                   causallm::json &nntr_cfg) :
-    causallm::Transformer(
-      causallm::Gemma4Transformer::sanitizeConfig(cfg),
-      causallm::Gemma4Transformer::sanitizeGenerationConfig(generation_cfg, cfg),
-      nntr_cfg, causallm::ModelType::CAUSALLM),
+    causallm::Transformer(causallm::Gemma4Transformer::sanitizeConfig(cfg),
+                          causallm::Gemma4Transformer::sanitizeGenerationConfig(
+                            generation_cfg, cfg),
+                          nntr_cfg, causallm::ModelType::CAUSALLM),
     causallm_test::CausalLMTestAdapter<causallm::Gemma4CausalLM>(
       cfg, generation_cfg, nntr_cfg) {}
 };

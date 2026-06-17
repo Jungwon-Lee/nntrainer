@@ -4,7 +4,8 @@
  *
  * @file   unittest_causallm_qwen2_embedding_reference.cpp
  * @date   16 June 2026
- * @brief  Differential tests for the tiny Qwen2Embedding / KaLM-Embedding models.
+ * @brief  Differential tests for the tiny Qwen2Embedding / KaLM-Embedding
+ * models.
  *
  * The nntrainer Qwen2Embedding class backs both the plain Qwen2 embedding model
  * and KaLM-Embedding; the two fixtures differ only in their pooling mode
@@ -31,7 +32,8 @@ namespace {
 /**
  * @brief Differential model descriptor for a Qwen2Embedding-backed fixture
  */
-causallm_test::DifferentialModel qwen2EmbeddingModel(const std::string &fixture) {
+causallm_test::DifferentialModel
+qwen2EmbeddingModel(const std::string &fixture) {
   return {
     fixture,
     [](causallm::json &cfg, causallm::json &gen_cfg, causallm::json &nntr_cfg) {

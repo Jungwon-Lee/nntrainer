@@ -71,12 +71,11 @@ TEST(Qwen3SlimMoETinyModelTest, GreedyGenerationSelectsArgmaxLogit) {
 
   auto model_cfg = makeTinyQwen3SlimMoEConfig();
   auto gen_cfg = causallm_test::makeTinyGenerationConfig();
-  auto nntr_cfg =
-    causallm_test::makeTinyNntrainerConfig(tokenizer_path,
-                                           causallm_test::makeTinyFp32DataType());
+  auto nntr_cfg = causallm_test::makeTinyNntrainerConfig(
+    tokenizer_path, causallm_test::makeTinyFp32DataType());
 
-  auto model = std::make_unique<TinyQwen3SlimMoECausalLM>(model_cfg, gen_cfg,
-                                                           nntr_cfg);
+  auto model =
+    std::make_unique<TinyQwen3SlimMoECausalLM>(model_cfg, gen_cfg, nntr_cfg);
   causallm_test::expectGreedyGenerationSelectsArgmax(*model);
 }
 
