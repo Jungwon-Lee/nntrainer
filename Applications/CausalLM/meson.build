@@ -231,7 +231,11 @@ if get_option('enable-test')
     meson.source_root() / 'packaging' / 'causallm_reference_generation.tar.gz',
     meson.source_root() / 'packaging' / 'causallm_reference_embedding.tar.gz',
   ]
-  causallm_fixture_dest = meson.source_root() / 'test' / 'unittest' / 'models' / 'causallm_reference'
+  # The tarballs already contain a top-level `causallm_reference/` directory, so
+  # extract into models/ (NOT models/causallm_reference/, which would double the
+  # path to models/causallm_reference/causallm_reference/ and leave the fixtures
+  # where the tests cannot find them — causing every differential test to skip).
+  causallm_fixture_dest = meson.source_root() / 'test' / 'unittest' / 'models'
   foreach fixture_tar : causallm_fixture_tars
     if build_machine.system() == 'windows'
       run_command([prog_win_cmd, '/C', 'tar', 'xzf',

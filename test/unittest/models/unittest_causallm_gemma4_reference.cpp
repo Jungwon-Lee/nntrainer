@@ -60,11 +60,10 @@ causallm_test::DifferentialModel gemma4Model() {
 /**
  * @brief FP32 prefill logits and greedy tokens match the HF reference
  *
- * TODO: This test is currently failing. The maximum absolute logit difference
- * exceeds the 1e-2 tolerance (observed ~0.0114 at a single index). Root cause
- * has not been identified yet — suspected sources are Gemma4-specific ops
- * (per_layer_input mechanism, reshaped_rms_norm, or tanh-GELU approximation).
- * Investigate and fix before enabling.
+ * The fixture weight save order must match nntrainer's weight-load order, and
+ * config.json must carry per-attention-type RoPE (rope_parameters: sliding
+ * theta=10000, full proportional partial_rotary_factor=0.25); both are produced
+ * by generate_gemma4_reference.py. Max abs logit diff ≈ 2e-4.
  */
 TEST(Gemma4DifferentialTest, FP32MatchesHFReference) {
   causallm_test::runFp32DifferentialChecks(gemma4Model());
