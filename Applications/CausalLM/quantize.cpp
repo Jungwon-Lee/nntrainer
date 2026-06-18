@@ -727,14 +727,22 @@ int main(int argc, char *argv[]) {
       architecture = resolve_architecture(model_type, architecture);
     }
 
-    // Resolve relative paths in nntr_cfg against the model directory so
-    // SentenceTransformer finds modules.json regardless of cwd.
+    // Resolve paths in nntr_cfg against the model directory.
+    // Relative paths are anchored to model_path (existing behaviour).
+    // Absolute paths that don't exist in the current environment (e.g. a path
+    // baked in on the build host but running on an Android device) fall back to
+    // the bare filename resolved against model_path, so the file is found as
+    // long as it lives next to nntr_config.json.
     for (const char *key : {"module_config_path", "tokenizer_file"}) {
       if (!nntr_cfg.contains(key))
         continue;
       std::filesystem::path p = nntr_cfg[key].get<std::string>();
-      if (p.is_relative())
+      if (p.is_relative()) {
         nntr_cfg[key] = (std::filesystem::path(model_path) / p).string();
+      } else if (!std::filesystem::exists(p)) {
+        nntr_cfg[key] =
+          (std::filesystem::path(model_path) / p.filename()).string();
+      }
     }
 
     auto model = causallm::Factory::Instance().create(architecture, cfg,
