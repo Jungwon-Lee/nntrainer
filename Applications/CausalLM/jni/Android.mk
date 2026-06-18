@@ -282,3 +282,67 @@ LOCAL_C_INCLUDES += $(NNTRAINER_INCLUDES) \
     $(LOCAL_PATH)/..
 
 include $(BUILD_EXECUTABLE)
+
+# ---- googletest (vendored from $ANDROID_NDK/sources/third_party/googletest) ----
+# Mirrors the pattern used by test/jni/Android.mk so the CausalLM unit tests can
+# be cross-compiled and run on-device via adb.
+include $(CLEAR_VARS)
+GTEST_PATH := googletest
+LOCAL_MODULE := googletest_main
+LOCAL_CPP_FEATURES := rtti exceptions
+LOCAL_C_INCLUDES := $(LOCAL_PATH)/$(GTEST_PATH)/include $(LOCAL_PATH)/$(GTEST_PATH)
+LOCAL_CFLAGS := -std=c++17 -frtti -fexceptions
+LOCAL_SRC_FILES := \
+    $(GTEST_PATH)/src/gtest-all.cc \
+    $(GTEST_PATH)/src/gtest_main.cc
+include $(BUILD_STATIC_LIBRARY)
+
+# ---- unittest_causallm_models (CausalLM reference/differential gtest suite) ----
+# Builds the recently-added differential tests (causallm_test_utils.cpp + every
+# unittest_causallm_*.cpp listed in Applications/CausalLM/meson.build). Built
+# with the same FP16 ABI flags as causallm_core so the prebuilt shared libs link.
+include $(CLEAR_VARS)
+
+LOCAL_ARM_NEON := true
+LOCAL_ARM_MODE := arm
+LOCAL_MODULE_TAGS := optional
+LOCAL_MODULE := unittest_causallm_models
+
+CAUSALLM_TEST_FLAGS := -pthread -fexceptions -frtti -DENABLE_FP16=1 -DUSE__FP16=1 -D__ARM_NEON__=1 -march=armv8.2-a+fp16+dotprod+i8mm -DUSE_NEON=1 -mtune=cortex-a76 -O3 -ffast-math
+LOCAL_CFLAGS += -std=c++17 $(CAUSALLM_TEST_FLAGS) -Igoogletest/include -Igoogletest/
+LOCAL_CXXFLAGS += -std=c++17 -frtti
+LOCAL_LDFLAGS += -fexceptions
+LOCAL_LDLIBS := -llog -landroid
+
+UNITTEST_MODELS_DIR := ../../../test/unittest/models
+LOCAL_SRC_FILES := \
+    $(UNITTEST_MODELS_DIR)/causallm_test_utils.cpp \
+    $(UNITTEST_MODELS_DIR)/unittest_causallm_gemma3.cpp \
+    $(UNITTEST_MODELS_DIR)/unittest_causallm_gemma3_reference.cpp \
+    $(UNITTEST_MODELS_DIR)/unittest_causallm_gemma4.cpp \
+    $(UNITTEST_MODELS_DIR)/unittest_causallm_gemma4_reference.cpp \
+    $(UNITTEST_MODELS_DIR)/unittest_causallm_qwen3_moe.cpp \
+    $(UNITTEST_MODELS_DIR)/unittest_causallm_qwen3_moe_reference.cpp \
+    $(UNITTEST_MODELS_DIR)/unittest_causallm_qwen3_slim_moe.cpp \
+    $(UNITTEST_MODELS_DIR)/unittest_causallm_qwen3_cached_slim_moe.cpp \
+    $(UNITTEST_MODELS_DIR)/unittest_causallm_gpt_oss.cpp \
+    $(UNITTEST_MODELS_DIR)/unittest_causallm_gpt_oss_cached_slim.cpp \
+    $(UNITTEST_MODELS_DIR)/unittest_causallm_qwen2.cpp \
+    $(UNITTEST_MODELS_DIR)/unittest_causallm_qwen2_reference.cpp \
+    $(UNITTEST_MODELS_DIR)/unittest_causallm_qwen3.cpp \
+    $(UNITTEST_MODELS_DIR)/unittest_causallm_qwen3_reference.cpp \
+    $(UNITTEST_MODELS_DIR)/unittest_causallm_qwen3_embedding_reference.cpp \
+    $(UNITTEST_MODELS_DIR)/unittest_causallm_qwen2_embedding_reference.cpp \
+    $(UNITTEST_MODELS_DIR)/unittest_causallm_embedding_gemma_reference.cpp \
+    $(UNITTEST_MODELS_DIR)/unittest_causallm_tinybert_reference.cpp \
+    $(UNITTEST_MODELS_DIR)/unittest_causallm_deberta_v2_reference.cpp
+
+LOCAL_SHARED_LIBRARIES := causallm_core nntrainer ccapi-nntrainer
+LOCAL_STATIC_LIBRARIES := googletest_main
+
+LOCAL_C_INCLUDES += $(NNTRAINER_INCLUDES) $(CAUSALLM_COMMON_INCLUDES) \
+    $(LOCAL_PATH)/$(GTEST_PATH)/include \
+    $(LOCAL_PATH)/../api \
+    $(LOCAL_PATH)/$(UNITTEST_MODELS_DIR)
+
+include $(BUILD_EXECUTABLE)

@@ -81,7 +81,7 @@ __pycache__/
 nntrainer_for_android.tar.gz
 
 # gtest
-test/jni/googletest/
+**/jni/googletest/
 
 # encoder related files (download from resource repo)
 ctre-unicode.hpp
