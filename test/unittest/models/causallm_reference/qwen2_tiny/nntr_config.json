@@ -10,5 +10,5 @@
   "model_tensor_type": "FP32-FP32",
   "model_type": "CausalLM",
   "num_to_generate": 1,
-  "tokenizer_file": "/home/jwon/Desktop/workspace/testcode/nntrainer/test/unittest/models/causallm_reference/qwen2_tiny/tokenizer.json"
+  "tokenizer_file": "tokenizer.json"
 }

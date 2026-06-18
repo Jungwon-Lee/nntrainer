@@ -10,6 +10,6 @@
   "model_tensor_type": "FP32-FP32",
   "model_type": "Embedding",
   "num_to_generate": 1,
-  "tokenizer_file": "/home/jwon/Desktop/workspace/testcode/nntrainer/test/unittest/models/causallm_reference/tinybert_tiny/tokenizer.json",
+  "tokenizer_file": "tokenizer.json",
   "is_causal": false
 }

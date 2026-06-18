@@ -11,6 +11,6 @@
   "model_type": "Embedding",
   "module_config_path": "modules.json",
   "num_to_generate": 1,
-  "tokenizer_file": "/home/jwon/Desktop/workspace/testcode/nntrainer/test/unittest/models/causallm_reference/qwen3_embedding_tiny/tokenizer.json",
+  "tokenizer_file": "tokenizer.json",
   "is_causal": true
 }
