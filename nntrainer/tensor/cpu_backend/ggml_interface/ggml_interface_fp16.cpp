@@ -484,7 +484,7 @@ void __ggml_q4_0_4x8_q8_0_GEMM(const unsigned int M, const unsigned int N,
       unsigned int M_step_start = chunk_size * idx;
       unsigned int M_step_end = std::min(chunk_size * (idx + 1), (size_t)N);
 
-      nntr_gemv_q4_0_4x8_q8_0_fp16(K, (__fp16 *)(C + M_step_start), N,
+      nntr_gemv_q4_0_4x8_q8_0_fp16(K, (_FP16 *)(C + M_step_start), N,
                                    (void *)((char *)B + M_step_start * B_step),
                                    QA.data(), M, M_step_end - M_step_start);
     });
