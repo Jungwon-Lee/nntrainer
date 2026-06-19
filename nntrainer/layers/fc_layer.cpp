@@ -102,10 +102,10 @@ void FullyConnectedLayer::finalize(InitLayerContext &context) {
   /// instead reinterpret the FP32 on-disk bytes as FP16 and corrupt every
   /// biased FC (e.g. V-JEPA's patch-embed / qkv / ffn projections — Qwen3 has
   /// no FC bias so this path was never exercised before).
-  TensorDim bias_dim(1, is_nchw ? 1 : unit, 1, is_nchw ? unit : 1,
-                     TensorDim::TensorType(context.getFormat(),
-                                           TensorDim::DataType::FP32),
-                     is_nchw ? 0b0001 : 0b0100);
+  TensorDim bias_dim(
+    1, is_nchw ? 1 : unit, 1, is_nchw ? unit : 1,
+    TensorDim::TensorType(context.getFormat(), TensorDim::DataType::FP32),
+    is_nchw ? 0b0001 : 0b0100);
 
   /** Weight Dimension : (1, 1, in_dim.width(), unit)*/
   TensorDim weight_dim(

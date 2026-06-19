@@ -258,8 +258,7 @@ void TieWordEmbedding::incremental_forwarding_embedding(
           (void *)((char *)weight.getData<uint8_t>() +
                    (bytes_per_blk * num_blocks_per_row) * embed_idx);
 
-        if (out_tensor.getDataType() ==
-            nntrainer::TensorDim::DataType::FP32) {
+        if (out_tensor.getDataType() == nntrainer::TensorDim::DataType::FP32) {
           if (is_q6k)
             nntrainer::dequantize_row_q6_K(src, out_tensor.getData(), out_dim);
           else
@@ -271,10 +270,9 @@ void TieWordEmbedding::incremental_forwarding_embedding(
           // (multilingual-garbage symptom). Dequantize into an FP32 temp then
           // cast into the activation dtype.
           nntrainer::TensorDim fp32_dim(
-            {1, 1, 1, out_dim},
-            nntrainer::TensorDim::TensorType(
-              out_tensor_dim.getFormat(),
-              nntrainer::TensorDim::DataType::FP32));
+            {1, 1, 1, out_dim}, nntrainer::TensorDim::TensorType(
+                                  out_tensor_dim.getFormat(),
+                                  nntrainer::TensorDim::DataType::FP32));
           nntrainer::Tensor tmp(fp32_dim, true);
           if (is_q6k)
             nntrainer::dequantize_row_q6_K(src, tmp.getData(), out_dim);
@@ -342,9 +340,9 @@ void TieWordEmbedding::incremental_forwarding_lmhead(
       ///@note The tied (embedding-shaped) weight is [vocab, hidden]. The fused
       /// Q6_K GEMV computes logits[v] = input . weight[v] row-wise, which needs
       /// no data transpose, and is ~2x faster per decode token than a per-row
-      /// dequantize+sdot loop. The lmhead output is forced FP32 (finalize); cast
-      /// a FP16 activation up to FP32 first so FloatTensor::dotQnK writes FP32
-      /// logits directly (generate() reads them as float*).
+      /// dequantize+sdot loop. The lmhead output is forced FP32 (finalize);
+      /// cast a FP16 activation up to FP32 first so FloatTensor::dotQnK writes
+      /// FP32 logits directly (generate() reads them as float*).
       nntrainer::Tensor input_fp32 =
         (input_step.getDataType() == nntrainer::TensorDim::DataType::FP32)
           ? input_step

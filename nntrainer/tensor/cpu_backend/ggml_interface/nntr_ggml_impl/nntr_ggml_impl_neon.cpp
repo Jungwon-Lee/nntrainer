@@ -153,8 +153,8 @@ void nntr_gemv_q4_0_4x8_q8_0(int n, float *__restrict s, size_t bs,
 // final store fuses an fcvtn (FP32 4-lane -> FP16 4-lane) and writes a 64-bit
 // d-register; the per-column-tile res_ptr advance halves to 8 bytes.
 void nntr_gemv_q4_0_4x8_q8_0_fp16(int n, __fp16 *__restrict s, size_t bs,
-                             const void *__restrict vx,
-                             const void *__restrict vy, int nr, int nc) {
+                                  const void *__restrict vx,
+                                  const void *__restrict vy, int nr, int nc) {
   const int qk = Q8_0;
   const int nb = n / qk;
   const int ncols_interleaved = 4;
@@ -695,8 +695,8 @@ void nntr_gemm_q4_0_4x8_q8_0(int n, float *__restrict s, size_t bs,
 // res_ptr advance halves to 8 bytes. Caller passes `bs` as the FP16 element
 // stride; res_stride is computed as bs * sizeof(_FP16) inside.
 void nntr_gemm_q4_0_4x8_q8_0_fp16(int n, _FP16 *__restrict s, size_t bs,
-                             const void *__restrict vx,
-                             const void *__restrict vy, int nr, int nc) {
+                                  const void *__restrict vx,
+                                  const void *__restrict vy, int nr, int nc) {
   const int qk = Q8_0;
   const int nb = n / qk;
   const int ncols_interleaved = 4;

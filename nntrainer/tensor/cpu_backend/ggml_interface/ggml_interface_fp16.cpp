@@ -448,15 +448,13 @@ static inline void __ggml_q4_0_4x8_q8_0_GEMM_BSTP(
         unsigned int M_step_end = std::min(chunk_size * (idx + 1), (size_t)N);
 
         nntr_gemv_q4_0_4x8_q8_0(
-          K,
-          (float *)(tail32.data() + (pb - M4 * 4) * N) + M_step_start, N,
+          K, (float *)(tail32.data() + (pb - M4 * 4) * N) + M_step_start, N,
           (void *)((char *)B + M_step_start * B_step),
           QA.data() + (M4 * qa_4_rows_size) + (pb - M4 * 4) * qa_row_size, 1,
           M_step_end - M_step_start);
       });
     }
-    __copy_f16_from_f32(tail32.data(),
-                        C16 + (size_t)M4 * 4 * N,
+    __copy_f16_from_f32(tail32.data(), C16 + (size_t)M4 * 4 * N,
                         (size_t)leftover_rows * N);
   }
 }

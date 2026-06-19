@@ -970,8 +970,7 @@ Tensor &FloatTensor::dotQnK(Tensor const &input, Tensor &output, bool trans,
   // GEMMs below write FP32, so dot into an FP32 scratch and cast down. With an
   // FP16 input the HalfTensor path (gemm_q4_0_fp16) is used instead and never
   // reaches here.
-  const bool out_fp16 =
-    output.getDataType() == Tdatatype::FP16;
+  const bool out_fp16 = output.getDataType() == Tdatatype::FP16;
   std::vector<float> r_scratch;
   float *rdata;
   if (out_fp16) {
