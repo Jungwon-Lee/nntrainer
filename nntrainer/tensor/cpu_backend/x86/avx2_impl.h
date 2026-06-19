@@ -314,6 +314,30 @@ void copy_f16_f32(unsigned int N, const uint16_t *input, float *output);
 void copy_f32_f16(unsigned int N, const float *input, uint16_t *output);
 
 /**
+ * @brief Fused FP32 x FP16-bits(uint16_t) -> FP32 GEMM (AVX2 + F16C). Reads the
+ * FP16-bits operand B directly without materializing an FP32 copy. beta is
+ * hard-coded to 0; row-major only.
+ *   TransB=true  (QK): C[m,n] = alpha * sum_k A[m,k] * fp16(B[n,k])
+ *   TransB=false (AV): C[m,n] = alpha * sum_k A[m,k] * fp16(B[k,n])
+ *
+ * @param M number of rows of A and C
+ * @param N number of columns of C
+ * @param K dot length
+ * @param alpha scaling factor applied to the result
+ * @param A FP32 lhs, row-major, lda columns
+ * @param lda row stride of A
+ * @param B FP16-bits (uint16_t) rhs, row-major, ldb columns
+ * @param ldb row stride of B
+ * @param TransB selects the QK (true) or AV (false) operand layout
+ * @param C FP32 output, row-major, ldc columns
+ * @param ldc row stride of C
+ */
+void hsgemm_fp16bits_avx2(unsigned int M, unsigned int N, unsigned int K,
+                          float alpha, const float *A, unsigned int lda,
+                          const uint16_t *B, unsigned int ldb, bool TransB,
+                          float *C, unsigned int ldc);
+
+/**
  * @brief     Create a Q4_0 weights (without XOR 0x88) from int4 weights
  *
  * @param[in] int4_weight Pointer to the input 4-bit quantized weights array.

@@ -22,6 +22,7 @@
 
 static std::mutex rope_init_mtx;
 
+#include <cpu_backend_gemm_decl.h>
 #include <fp16.h>
 #include <layer_context.h>
 #include <mha_core.h>
@@ -802,295 +803,6 @@ void MHACoreLayer::one_batch_incremental_forwarding(
                                 cache_to);
 }
 
-#if defined(__ARM_NEON)
-#include <arm_neon.h>
-// Cephes exp() for 4 floats at once (matches neon_mathfun.hxx exp_ps).
-static inline float32x4_t vjepa_expq_f32(float32x4_t x) {
-  const float32x4_t one = vdupq_n_f32(1.0f);
-  x = vminq_f32(x, vdupq_n_f32(88.3762626647949f));
-  x = vmaxq_f32(x, vdupq_n_f32(-88.3762626647949f));
-  float32x4_t fx =
-    vmlaq_f32(vdupq_n_f32(0.5f), x, vdupq_n_f32(1.44269504088896341f));
-  float32x4_t tmp = vcvtq_f32_s32(vcvtq_s32_f32(fx));
-  uint32x4_t mask = vandq_u32(vcgtq_f32(tmp, fx), vreinterpretq_u32_f32(one));
-  fx = vsubq_f32(tmp, vreinterpretq_f32_u32(mask));
-  x = vsubq_f32(x, vmulq_f32(fx, vdupq_n_f32(0.693359375f)));
-  x = vsubq_f32(x, vmulq_f32(fx, vdupq_n_f32(-2.12194440e-4f)));
-  float32x4_t z = vmulq_f32(x, x);
-  float32x4_t y = vdupq_n_f32(1.9875691500E-4f);
-  y = vmulq_f32(y, x);
-  y = vaddq_f32(y, vdupq_n_f32(1.3981999507E-3f));
-  y = vmulq_f32(y, x);
-  y = vaddq_f32(y, vdupq_n_f32(8.3334519073E-3f));
-  y = vmulq_f32(y, x);
-  y = vaddq_f32(y, vdupq_n_f32(4.1665795894E-2f));
-  y = vmulq_f32(y, x);
-  y = vaddq_f32(y, vdupq_n_f32(1.6666665459E-1f));
-  y = vmulq_f32(y, x);
-  y = vaddq_f32(y, vdupq_n_f32(5.0000001201E-1f));
-  y = vmulq_f32(y, z);
-  y = vaddq_f32(y, x);
-  y = vaddq_f32(y, one);
-  int32x4_t mm =
-    vshlq_n_s32(vaddq_s32(vcvtq_s32_f32(fx), vdupq_n_s32(0x7f)), 23);
-  return vmulq_f32(y, vreinterpretq_f32_s32(mm));
-}
-#endif
-
-#if defined(__x86_64__) || defined(__i386__)
-#include <immintrin.h>
-#endif
-
-// Bulk convert N FP16-bits (uint16_t) values to FP32. Uses AVX2+F16C on x86
-// (_mm256_cvtph_ps, available on Ivy Bridge+) and NEON fp16<->fp32 instructions
-// on ARMv8.2+. Falls back to scalar nntrainer::compute_fp16_to_fp32. Treats the
-// uint16 input as raw IEEE 754 half-precision bits — this is how the KV cache
-// is stored regardless of ENABLE_FP16 build flag.
-static inline void
-mha_convert_fp16bits_to_fp32(unsigned int N, const uint16_t *src, float *dst) {
-#if defined(__x86_64__) || defined(__i386__)
-  unsigned int i = 0;
-  for (; i + 16 <= N; i += 16) {
-    __m256 a = _mm256_cvtph_ps(_mm_loadu_si128((const __m128i *)(src + i)));
-    __m256 b = _mm256_cvtph_ps(_mm_loadu_si128((const __m128i *)(src + i + 8)));
-    _mm256_storeu_ps(dst + i, a);
-    _mm256_storeu_ps(dst + i + 8, b);
-  }
-  for (; i + 8 <= N; i += 8) {
-    _mm256_storeu_ps(
-      dst + i, _mm256_cvtph_ps(_mm_loadu_si128((const __m128i *)(src + i))));
-  }
-  for (; i < N; ++i)
-    dst[i] = nntrainer::compute_fp16_to_fp32(src[i]);
-#elif defined(__ARM_NEON) && defined(__ARM_FP16_FORMAT_IEEE)
-  unsigned int i = 0;
-  for (; i + 8 <= N; i += 8) {
-    float16x8_t h = vreinterpretq_f16_u16(vld1q_u16(src + i));
-    vst1q_f32(dst + i, vcvt_f32_f16(vget_low_f16(h)));
-    vst1q_f32(dst + i + 4, vcvt_f32_f16(vget_high_f16(h)));
-  }
-  for (; i < N; ++i)
-    dst[i] = nntrainer::compute_fp16_to_fp32(src[i]);
-#else
-  for (unsigned int i = 0; i < N; ++i)
-    dst[i] = nntrainer::compute_fp16_to_fp32(src[i]);
-#endif
-}
-
-#if defined(__x86_64__) || defined(__i386__)
-
-// Fused FP32 x FP16-bits -> FP32 GEMM for x86 (AVX2 + F16C). Equivalent of ARM
-// shgemm but reads FP16-bits (uint16_t) directly without materializing an FP32
-// copy of B — saves the temporary buffer and halves memory traffic compared to
-// {convert+sgemm}. Row-major only, alpha applied, beta hard-coded to 0 to keep
-// the kernel small (this is all the flash path needs).
-//
-// Two operand layouts:
-//   TransB=true  (QK): C[m, n] = alpha * sum_k A[m,k] * fp16(B[n,k])
-//                       B is N rows x K cols, row-major, ldb columns
-//   TransB=false (AV): C[m, n] = alpha * sum_k A[m,k] * fp16(B[k,n])
-//                       B is K rows x N cols, row-major, ldb columns
-static inline void mha_hsgemm_avx2(unsigned int M, unsigned int N,
-                                   unsigned int K, float alpha, const float *A,
-                                   unsigned int lda, const uint16_t *B,
-                                   unsigned int ldb, bool TransB, float *C,
-                                   unsigned int ldc) {
-  const __m256 valpha = _mm256_set1_ps(alpha);
-  if (TransB) {
-    // QK path. Block 4 m-rows so we amortize the B (K-row) conversion across 4
-    // accumulators per inner k-step.
-    unsigned int m = 0;
-    for (; m + 4 <= M; m += 4) {
-      const float *a0 = A + (size_t)(m + 0) * lda;
-      const float *a1 = A + (size_t)(m + 1) * lda;
-      const float *a2 = A + (size_t)(m + 2) * lda;
-      const float *a3 = A + (size_t)(m + 3) * lda;
-      for (unsigned int n = 0; n < N; ++n) {
-        const uint16_t *b_row = B + (size_t)n * ldb;
-        __m256 acc0 = _mm256_setzero_ps();
-        __m256 acc1 = _mm256_setzero_ps();
-        __m256 acc2 = _mm256_setzero_ps();
-        __m256 acc3 = _mm256_setzero_ps();
-        unsigned int k = 0;
-        for (; k + 8 <= K; k += 8) {
-          __m256 b =
-            _mm256_cvtph_ps(_mm_loadu_si128((const __m128i *)(b_row + k)));
-          acc0 = _mm256_fmadd_ps(_mm256_loadu_ps(a0 + k), b, acc0);
-          acc1 = _mm256_fmadd_ps(_mm256_loadu_ps(a1 + k), b, acc1);
-          acc2 = _mm256_fmadd_ps(_mm256_loadu_ps(a2 + k), b, acc2);
-          acc3 = _mm256_fmadd_ps(_mm256_loadu_ps(a3 + k), b, acc3);
-        }
-        // Horizontal-reduce 4 accumulators in parallel via two hadd-pairs.
-        // acc0 = [s00 s01 s02 s03 | s04 s05 s06 s07] -> partial sums
-        __m256 h01 = _mm256_hadd_ps(acc0, acc1);
-        __m256 h23 = _mm256_hadd_ps(acc2, acc3);
-        __m256 h = _mm256_hadd_ps(h01, h23);
-        // h lanes: [s0_lo s1_lo s2_lo s3_lo | s0_hi s1_hi s2_hi s3_hi]
-        __m128 lo = _mm256_castps256_ps128(h);
-        __m128 hi = _mm256_extractf128_ps(h, 1);
-        __m128 sums = _mm_add_ps(lo, hi); // [s0 s1 s2 s3]
-        float s[4];
-        _mm_storeu_ps(s, sums);
-        // tail k
-        for (; k < K; ++k) {
-          const float bv = nntrainer::compute_fp16_to_fp32(b_row[k]);
-          s[0] += a0[k] * bv;
-          s[1] += a1[k] * bv;
-          s[2] += a2[k] * bv;
-          s[3] += a3[k] * bv;
-        }
-        C[(size_t)(m + 0) * ldc + n] = alpha * s[0];
-        C[(size_t)(m + 1) * ldc + n] = alpha * s[1];
-        C[(size_t)(m + 2) * ldc + n] = alpha * s[2];
-        C[(size_t)(m + 3) * ldc + n] = alpha * s[3];
-      }
-    }
-    // m tail (unblocked)
-    for (; m < M; ++m) {
-      const float *a_row = A + (size_t)m * lda;
-      for (unsigned int n = 0; n < N; ++n) {
-        const uint16_t *b_row = B + (size_t)n * ldb;
-        __m256 acc = _mm256_setzero_ps();
-        unsigned int k = 0;
-        for (; k + 8 <= K; k += 8) {
-          __m256 a = _mm256_loadu_ps(a_row + k);
-          __m256 b =
-            _mm256_cvtph_ps(_mm_loadu_si128((const __m128i *)(b_row + k)));
-          acc = _mm256_fmadd_ps(a, b, acc);
-        }
-        __m128 lo = _mm256_castps256_ps128(acc);
-        __m128 hi = _mm256_extractf128_ps(acc, 1);
-        __m128 s = _mm_add_ps(lo, hi);
-        s = _mm_hadd_ps(s, s);
-        s = _mm_hadd_ps(s, s);
-        float sum = _mm_cvtss_f32(s);
-        for (; k < K; ++k)
-          sum += a_row[k] * nntrainer::compute_fp16_to_fp32(b_row[k]);
-        C[(size_t)m * ldc + n] = alpha * sum;
-      }
-    }
-  } else {
-    // AV path. Block n in 8-wide vector lanes; broadcast A[m,k] inside loop.
-    for (unsigned int m = 0; m < M; ++m) {
-      const float *a_row = A + (size_t)m * lda;
-      float *c_row = C + (size_t)m * ldc;
-      unsigned int n = 0;
-      for (; n + 8 <= N; n += 8) {
-        __m256 acc = _mm256_setzero_ps();
-        for (unsigned int k = 0; k < K; ++k) {
-          __m256 a_b = _mm256_set1_ps(a_row[k]);
-          __m256 b = _mm256_cvtph_ps(
-            _mm_loadu_si128((const __m128i *)(B + (size_t)k * ldb + n)));
-          acc = _mm256_fmadd_ps(a_b, b, acc);
-        }
-        _mm256_storeu_ps(c_row + n, _mm256_mul_ps(valpha, acc));
-      }
-      // n tail
-      for (; n < N; ++n) {
-        float sum = 0.0f;
-        for (unsigned int k = 0; k < K; ++k)
-          sum +=
-            a_row[k] * nntrainer::compute_fp16_to_fp32(B[(size_t)k * ldb + n]);
-        c_row[n] = alpha * sum;
-      }
-    }
-  }
-}
-
-#endif // __x86_64__ || __i386__
-
-#if !defined(__x86_64__) && !defined(__i386__) && defined(__ARM_NEON)
-} // namespace causallm
-
-// libnntrainer.so is built with ENABLE_FP16=1 and exports these symbols. The
-// CausalLM app may be built with ENABLE_FP16=0, in which case cpu_backend.h
-// hides them behind #ifdef. Re-declare here at global / ::nntrainer scope.
-// - shgemm:         FP32 A × FP16 B -> FP32 C   (FP32 partial accumulation)
-// - hgemm_classify: FP16 A × FP16 B -> FP32 C   (FP32 partial accumulation)
-// - custom_hgemm:   FP16 A × FP16 B -> FP16 C   (FP32 partial accumulation,
-//                                                FP16-stored result).
-namespace nntrainer {
-void shgemm(const unsigned int TStorageOrder, bool TransA, bool TransB,
-            const unsigned int M, const unsigned int N, const unsigned int K,
-            const float alpha, const float *A, const unsigned int lda,
-            const __fp16 *B, const unsigned int ldb, const float beta, float *C,
-            const unsigned int ldc);
-namespace neon {
-void custom_hgemm(const __fp16 *A, const __fp16 *B, __fp16 *C, uint32_t M,
-                  uint32_t N, uint32_t K, float alpha, float beta, bool TransA,
-                  bool TransB);
-} // namespace neon
-} // namespace nntrainer
-void hgemm_classify(const __fp16 *A, const __fp16 *B, float *C32,
-                    unsigned int M, unsigned int N, unsigned int K, float alpha,
-                    float beta, bool TransA, bool TransB);
-
-namespace causallm {
-#endif
-
-#if !defined(__x86_64__) && !defined(__i386__) && defined(__ARM_NEON)
-// QK micro-kernel for the FP16-query + FP32-score attention path.
-// Computes S[m, n] = alpha * sum_k A[m, k] * B[n, k]   (TransB-style dot)
-// using ARMv8.2-A FMLAL (vfmlalq_low/high_f16): each pair of intrinsics
-// widens 8 FP16 products into two FP32 accumulators, so the per-element
-// product is computed in FP32 from the start. This avoids the FP16-product
-// overflow that custom_hgemm hits when packing wide encoder logits
-// (V-JEPA-2 block 0 Q,K magnitudes ~400 -> products ~160k > FP16 max
-// 65504), and unlike a cast-up-Q+shgemm path it never materialises an
-// FP32 copy of Q.
-//
-// Layout: A row-major (M rows, lda cols), B row-major (N rows, ldb cols),
-// C row-major (M rows, ldc cols). Inner length K is the dot length and
-// must match both A's and B's stride argument (i.e. lda == ldb == K when
-// the rows are contiguous, which is how Phase 1 of gemm_attention packs).
-//
-// Requires FEAT_FHM (asimdfhm in /proc/cpuinfo). Confirmed on Cortex-A78/X4
-// derivatives used by S25/S26 Ultra; the target attribute pulls the
-// fp16fml ISA extension in only for this function so the rest of the TU
-// can stay on the build-wide -march flags.
-__attribute__((
-  target("arch=armv8.2-a+fp16+fp16fml+dotprod+i8mm"))) static inline void
-mha_qk_fmlal_f16xf16_to_f32(const __fp16 *A, const __fp16 *B, float *C,
-                            unsigned int M, unsigned int N, unsigned int K,
-                            float alpha, unsigned int lda, unsigned int ldb,
-                            unsigned int ldc) {
-  for (unsigned int m = 0; m < M; ++m) {
-    const __fp16 *a_row = A + (size_t)m * lda;
-    float *c_row = C + (size_t)m * ldc;
-    for (unsigned int n = 0; n < N; ++n) {
-      const __fp16 *b_row = B + (size_t)n * ldb;
-      float32x4_t acc0 = vdupq_n_f32(0.0f);
-      float32x4_t acc1 = vdupq_n_f32(0.0f);
-      unsigned int k = 0;
-      // Process 16 lanes per iter (two 8-lane fmlal pairs) to keep the
-      // FP32 pipelines busy on Cortex-A76 (FMLAL latency ~4, two FP units).
-      for (; k + 16 <= K; k += 16) {
-        float16x8_t a0 = vld1q_f16(a_row + k);
-        float16x8_t b0 = vld1q_f16(b_row + k);
-        float16x8_t a1 = vld1q_f16(a_row + k + 8);
-        float16x8_t b1 = vld1q_f16(b_row + k + 8);
-        acc0 = vfmlalq_low_f16(acc0, a0, b0);
-        acc1 = vfmlalq_high_f16(acc1, a0, b0);
-        acc0 = vfmlalq_low_f16(acc0, a1, b1);
-        acc1 = vfmlalq_high_f16(acc1, a1, b1);
-      }
-      // 8-lane tail.
-      if (k + 8 <= K) {
-        float16x8_t a0 = vld1q_f16(a_row + k);
-        float16x8_t b0 = vld1q_f16(b_row + k);
-        acc0 = vfmlalq_low_f16(acc0, a0, b0);
-        acc1 = vfmlalq_high_f16(acc1, a0, b0);
-        k += 8;
-      }
-      float sum = vaddvq_f32(vaddq_f32(acc0, acc1));
-      // <8 tail (head_dim is usually a multiple of 8, but be safe).
-      for (; k < K; ++k)
-        sum += (float)a_row[k] * (float)b_row[k];
-      c_row[n] = alpha * sum;
-    }
-  }
-}
-#endif
 
 void MHACoreLayer::gemm_attention(nntrainer::Tensor &query_step,
                                   nntrainer::Tensor &b_cached_key,
@@ -1140,12 +852,8 @@ void MHACoreLayer::gemm_attention(nntrainer::Tensor &query_step,
     O = attention_output_step.getData<float>();
   }
 
-  // tile sizes (cache-resident S); overridable via env for tuning
-  unsigned int Bq = 256, Bk = 512;
-  if (const char *e = std::getenv("VJEPA_BQ"))
-    Bq = static_cast<unsigned int>(std::stoul(e));
-  if (const char *e = std::getenv("VJEPA_BK"))
-    Bk = static_cast<unsigned int>(std::stoul(e));
+  // tile sizes (cache-resident S); tuned constants (Bk=512 decisive)
+  constexpr unsigned int Bq = 256, Bk = 512;
 
   const unsigned int num_qb = (N_q + Bq - 1) / Bq;
   auto &tm = nntrainer::ThreadManager::Global();
@@ -1278,11 +986,12 @@ void MHACoreLayer::gemm_attention(nntrainer::Tensor &query_step,
         // The softmax below reads S (FP32) and stores normalized FP16 probs to
         // Sp16 for the AV custom_hgemm.
 #if defined(__x86_64__) || defined(__i386__)
-        mha_hsgemm_avx2(bq, bk, d, inv_sqrt, Qp_fp32 + (size_t)qb * d, d,
-                        Kp + (size_t)kb * d, d, /*TransB=*/true, S.data(), bk);
+        nntrainer::avx2::hsgemm_fp16bits_avx2(
+          bq, bk, d, inv_sqrt, Qp_fp32 + (size_t)qb * d, d, Kp + (size_t)kb * d,
+          d, /*TransB=*/true, S.data(), bk);
 #elif defined(__ARM_NEON)
         if (q_fp16) {
-          mha_qk_fmlal_f16xf16_to_f32(
+          hgemm_f16xf16_f32_fmlal(
             reinterpret_cast<const __fp16 *>(Qp_fp16 + (size_t)qb * d),
             reinterpret_cast<const __fp16 *>(Kp + (size_t)kb * d), S.data(), bq,
             bk, d, inv_sqrt, d, d, bk);
@@ -1346,7 +1055,7 @@ void MHACoreLayer::gemm_attention(nntrainer::Tensor &query_step,
             float32x4_t vsum = vdupq_n_f32(0.0f), vnm = vdupq_n_f32(nm);
             unsigned int k = 0;
             for (; k + 4 <= bk; k += 4) {
-              float32x4_t e = vjepa_expq_f32(vsubq_f32(vld1q_f32(s + k), vnm));
+              float32x4_t e = exp_ps(vsubq_f32(vld1q_f32(s + k), vnm));
               float16x4_t e_h = vcvt_f16_f32(e);
               vst1_u16(sp16 + k, vreinterpret_u16_f16(e_h));
               vsum = vaddq_f32(vsum, e);
@@ -1363,8 +1072,7 @@ void MHACoreLayer::gemm_attention(nntrainer::Tensor &query_step,
               float32x4_t vsum = vdupq_n_f32(0.0f), vnm = vdupq_n_f32(nm);
               unsigned int k = 0;
               for (; k + 4 <= bk; k += 4) {
-                float32x4_t e =
-                  vjepa_expq_f32(vsubq_f32(vld1q_f32(s + k), vnm));
+                float32x4_t e = exp_ps(vsubq_f32(vld1q_f32(s + k), vnm));
                 vst1q_f32(s + k, e);
                 vsum = vaddq_f32(vsum, e);
               }
@@ -1390,8 +1098,9 @@ void MHACoreLayer::gemm_attention(nntrainer::Tensor &query_step,
         }
 
 #if defined(__x86_64__) || defined(__i386__)
-        mha_hsgemm_avx2(bq, d, bk, 1.0f, S.data(), bk, Vp + (size_t)kb * d, d,
-                        /*TransB=*/false, Pacc.data(), d);
+        nntrainer::avx2::hsgemm_fp16bits_avx2(bq, d, bk, 1.0f, S.data(), bk,
+                                              Vp + (size_t)kb * d, d,
+                                              /*TransB=*/false, Pacc.data(), d);
         for (unsigned int i = 0; i < bq; ++i) {
           float *ol = Ol.data() + (size_t)i * d;
           const float *pa = Pacc.data() + (size_t)i * d;

@@ -86,7 +86,7 @@ For each work unit, iterate key blocks `kb` in steps of `Bk` (default 512):
    `nm = max(mrow[i], bm)`; rescale `Ol *= exp(mrow[i] - nm)`; exp into S
    in place (`s[k] := exp(s[k] - nm)`); accumulate `lrow[i]`.
    x86 uses scalar `std::exp` in this row loop; ARM uses a 4-wide NEON
-   Cephes exp `vjepa_expq_f32`.
+   Cephes exp (`exp_ps` from `neon_mathfun.h`).
 
 7. **AV GEMM**: `Pacc = S × V[kb..kb+bk]`. x86 → `mha_hsgemm_avx2`. Other
    platforms → `nntrainer::sgemm`. Accumulate `Ol += Pacc`.
@@ -159,15 +159,9 @@ Notes:
 
 ## Tile-size tuning
 
-`Bq` and `Bk` can be overridden via env vars:
-
-```bash
-VJEPA_BQ=256 VJEPA_BK=512 ./nntr_causallm ...
-```
-
-Defaults (256 / 512) were tuned on V-JEPA on S26 Ultra. `Bk = 512` is the
-decisive parameter — smaller wastes K reuse, larger spills L2. `Bq` is
-insensitive across `[256, 512]`.
+`Bq` and `Bk` are compile-time constants in `gemm_attention()` (256 / 512),
+tuned on V-JEPA on S26 Ultra. `Bk = 512` is the decisive parameter — smaller
+wastes K reuse, larger spills L2. `Bq` is insensitive across `[256, 512]`.
 
 ---
 
