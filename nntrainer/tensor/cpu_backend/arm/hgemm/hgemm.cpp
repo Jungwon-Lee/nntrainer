@@ -195,3 +195,62 @@ void hgemm_K1(const __fp16 *A, const __fp16 *B, __fp16 *C, unsigned int M,
     }
   }
 }
+
+// QK micro-kernel for the FP16-query + FP32-score attention path.
+// Computes S[m, n] = alpha * sum_k A[m, k] * B[n, k]   (TransB-style dot)
+// using ARMv8.2-A FMLAL (vfmlalq_low/high_f16): each pair of intrinsics
+// widens 8 FP16 products into two FP32 accumulators, so the per-element
+// product is computed in FP32 from the start. This avoids the FP16-product
+// overflow that an FP16-accumulating kernel hits when packing wide encoder
+// logits (Q,K magnitudes ~400 -> products ~160k > FP16 max 65504), and unlike
+// a cast-up-Q+shgemm path it never materialises an FP32 copy of Q.
+//
+// Layout: A row-major (M rows, lda cols), B row-major (N rows, ldb cols),
+// C row-major (M rows, ldc cols). Inner length K is the dot length and
+// must match both A's and B's stride argument (i.e. lda == ldb == K when
+// the rows are contiguous).
+//
+// Requires FEAT_FHM (asimdfhm in /proc/cpuinfo). The target attribute pulls
+// the fp16fml ISA extension in only for this function so the rest of the TU
+// can stay on the build-wide -march flags.
+__attribute__((target("arch=armv8.2-a+fp16+fp16fml+dotprod+i8mm"))) void
+hgemm_f16xf16_f32_fmlal(const __fp16 *A, const __fp16 *B, float *C,
+                        unsigned int M, unsigned int N, unsigned int K,
+                        float alpha, unsigned int lda, unsigned int ldb,
+                        unsigned int ldc) {
+  for (unsigned int m = 0; m < M; ++m) {
+    const __fp16 *a_row = A + (size_t)m * lda;
+    float *c_row = C + (size_t)m * ldc;
+    for (unsigned int n = 0; n < N; ++n) {
+      const __fp16 *b_row = B + (size_t)n * ldb;
+      float32x4_t acc0 = vdupq_n_f32(0.0f);
+      float32x4_t acc1 = vdupq_n_f32(0.0f);
+      unsigned int k = 0;
+      // Process 16 lanes per iter (two 8-lane fmlal pairs) to keep the
+      // FP32 pipelines busy on Cortex-A76 (FMLAL latency ~4, two FP units).
+      for (; k + 16 <= K; k += 16) {
+        float16x8_t a0 = vld1q_f16(a_row + k);
+        float16x8_t b0 = vld1q_f16(b_row + k);
+        float16x8_t a1 = vld1q_f16(a_row + k + 8);
+        float16x8_t b1 = vld1q_f16(b_row + k + 8);
+        acc0 = vfmlalq_low_f16(acc0, a0, b0);
+        acc1 = vfmlalq_high_f16(acc1, a0, b0);
+        acc0 = vfmlalq_low_f16(acc0, a1, b1);
+        acc1 = vfmlalq_high_f16(acc1, a1, b1);
+      }
+      // 8-lane tail.
+      if (k + 8 <= K) {
+        float16x8_t a0 = vld1q_f16(a_row + k);
+        float16x8_t b0 = vld1q_f16(b_row + k);
+        acc0 = vfmlalq_low_f16(acc0, a0, b0);
+        acc1 = vfmlalq_high_f16(acc1, a0, b0);
+        k += 8;
+      }
+      float sum = vaddvq_f32(vaddq_f32(acc0, acc1));
+      // <8 tail (head_dim is usually a multiple of 8, but be safe).
+      for (; k < K; ++k)
+        sum += (float)a_row[k] * (float)b_row[k];
+      c_row[n] = alpha * sum;
+    }
+  }
+}
