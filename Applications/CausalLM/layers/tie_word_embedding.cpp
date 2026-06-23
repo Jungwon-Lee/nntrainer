@@ -139,8 +139,13 @@ void TieWordEmbedding::finalize_lmhead(nntrainer::InitLayerContext &context) {
   is_nchw ? output_dims[0].width(unit) : output_dims[0].channel(unit);
   output_dims[0].height(1);
 
+  // The lm_head output is the logits; generate() reads them as float* for
+  // argmax/sampling. Force FP32 regardless of the activation dtype — under FP16
+  // activation an FP16 logits tensor is reinterpreted as FP32 and produces
+  // garbage tokens. (The Q6_K/Q4_0 lmhead matmul writes FP32 directly; the FP16
+  // activation is cast up to FP32 before the dot in incremental_forwarding.)
   output_dims[0].setTensorType(
-    {context.getFormat(), context.getActivationDataType()});
+    {context.getFormat(), nntrainer::TensorDim::DataType::FP32});
 
   context.setOutputDimensions(output_dims);
 
@@ -333,21 +338,40 @@ void TieWordEmbedding::incremental_forwarding_lmhead(
                   std::invalid_argument)
       << "weight type is not supported for custom tie word embedding layer";
 
-    if (weight.getDataType() == nntrainer::TensorDim::DataType::Q4_0) {
-      ///@note Q4_0 tensor dot does not support trans_in=true for the
-      /// embedding-shaped tied weight, so compute each vocab row explicitly.
+    if (weight.getDataType() == nntrainer::TensorDim::DataType::Q6_K) {
+      ///@note The tied (embedding-shaped) weight is [vocab, hidden]. The fused
+      /// Q6_K GEMV computes logits[v] = input . weight[v] row-wise, which needs
+      /// no data transpose, and is ~2x faster per decode token than a per-row
+      /// dequantize+sdot loop. The lmhead output is forced FP32 (finalize); cast
+      /// a FP16 activation up to FP32 first so FloatTensor::dotQnK writes FP32
+      /// logits directly (generate() reads them as float*).
+      nntrainer::Tensor input_fp32 =
+        (input_step.getDataType() == nntrainer::TensorDim::DataType::FP32)
+          ? input_step
+          : input_step.clone(nntrainer::TensorDim::DataType::FP32);
+      input_fp32.dot(weight, hidden_step, false, true);
+    } else if (weight.getDataType() == nntrainer::TensorDim::DataType::Q4_0) {
+      ///@note Unlike Q6_K, the Q4_0 Qn_K dot does NOT transpose the block data
+      /// for the [vocab, hidden] tied layout, so compute each vocab row
+      /// explicitly: logits[v] = dot(input, dequant(weight_row_v)).
       const unsigned int hidden_size = input_step.width();
       const unsigned int vocab_size = weight.height();
       NNTR_THROW_IF(weight.width() != hidden_size ||
                       hidden_step.width() != vocab_size,
                     std::invalid_argument)
-        << "Q4_0 tie word embedding lmhead has mismatched dimensions";
+        << "tie word embedding lmhead has mismatched dimensions";
 
       const unsigned int num_blocks_per_row = (hidden_size + 32 - 1) / 32;
-      const size_t row_size = sizeof(uint16_t) + 16;
-      const size_t row_stride = row_size * num_blocks_per_row;
+      const size_t row_stride = (sizeof(uint16_t) + 16) * num_blocks_per_row;
       const uint8_t *weight_data = weight.getData<uint8_t>();
-      const float *input_data = input_step.getData<float>();
+
+      // The activation may be FP16; sdot/dequant work in FP32, so cast the
+      // single input row up to FP32 once (no-op when already FP32).
+      nntrainer::Tensor input_fp32 =
+        (input_step.getDataType() == nntrainer::TensorDim::DataType::FP32)
+          ? input_step
+          : input_step.clone(nntrainer::TensorDim::DataType::FP32);
+      const float *input_data = input_fp32.getData<float>();
       float *logits = hidden_step.getData<float>();
 
       auto &tm = nntrainer::ThreadManager::Global();
@@ -360,23 +384,13 @@ void TieWordEmbedding::incremental_forwarding_lmhead(
         std::vector<float> dequant_row(hidden_size);
 
         for (unsigned int row = start; row < end; ++row) {
-          nntrainer::dequantize_row_q4_0(
-            static_cast<const void *>(weight_data + row_stride * row),
-            dequant_row.data(), hidden_size);
+          const void *wrow =
+            static_cast<const void *>(weight_data + row_stride * row);
+          nntrainer::dequantize_row_q4_0(wrow, dequant_row.data(), hidden_size);
           logits[row] =
             nntrainer::sdot(hidden_size, input_data, 1, dequant_row.data(), 1);
         }
       });
-    } else if (input_step.getDataType() !=
-               nntrainer::TensorDim::DataType::FP32) {
-      // The logits (hidden_step) are FP32 — generate() reads them as float* for
-      // argmax/sampling. Under a non-FP32 (e.g. FP16) activation the HalfTensor
-      // dot path would write FP16 logits into the FP32 buffer and corrupt them
-      // (constant-garbage tokens). Cast the input up and use the FP32 dot so
-      // the matmul writes FP32 logits directly.
-      nntrainer::Tensor input_fp32 =
-        input_step.clone(nntrainer::TensorDim::DataType::FP32);
-      input_fp32.dot(weight, hidden_step, false, true);
     } else {
       input_step.dot(weight, hidden_step, false, true);
     }
