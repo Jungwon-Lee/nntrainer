@@ -96,16 +96,22 @@ void FullyConnectedLayer::finalize(InitLayerContext &context) {
   // global configuration
 
   /** Bias Dimension : (1, 1, 1, unit) */
-  /// @note Bias is stored FP32 on disk (it is not quantized), so request it as
-  /// FP32 regardless of the activation dtype. Under an FP16 activation the bias
-  /// is cast down to FP16 at the add site below; declaring it FP16 here would
-  /// instead reinterpret the FP32 on-disk bytes as FP16 and corrupt every
-  /// biased FC (e.g. V-JEPA's patch-embed / qkv / ffn projections — Qwen3 has
-  /// no FC bias so this path was never exercised before).
-  TensorDim bias_dim(
-    1, is_nchw ? 1 : unit, 1, is_nchw ? unit : 1,
-    TensorDim::TensorType(context.getFormat(), TensorDim::DataType::FP32),
-    is_nchw ? 0b0001 : 0b0100);
+  /// @note Bias is un-quantized and added directly to the activation. Its
+  /// storage dtype must match how it is laid out on disk:
+  ///  - float weight (FP16/FP32): bias is stored in the activation dtype, so
+  ///    request it as such (no cast needed at the add site).
+  ///  - quantized weight (Q4_0/Q6_K/QINT*/...): bias is stored FP32 on disk;
+  ///    requesting it as the (possibly FP16) activation dtype would reinterpret
+  ///    the FP32 bytes and corrupt it. Request FP32 and cast to the activation
+  ///    dtype at the add site below.
+  const auto weight_dtype = context.getWeightDataType();
+  const bool weight_is_float = (weight_dtype == TensorDim::DataType::FP32 ||
+                                weight_dtype == TensorDim::DataType::FP16);
+  const auto bias_dtype = weight_is_float ? context.getActivationDataType()
+                                          : TensorDim::DataType::FP32;
+  TensorDim bias_dim(1, is_nchw ? 1 : unit, 1, is_nchw ? unit : 1,
+                     TensorDim::TensorType(context.getFormat(), bias_dtype),
+                     is_nchw ? 0b0001 : 0b0100);
 
   /** Weight Dimension : (1, 1, in_dim.width(), unit)*/
   TensorDim weight_dim(
