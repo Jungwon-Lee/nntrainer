@@ -429,10 +429,23 @@ static inline void __ggml_q4_0_4x8_q8_0_GEMM_BSTP(
     unsigned int c_start = c * col_chunk_size;
     unsigned int c_end = std::min(col_chunk_size * (c + 1), N);
 
+#if defined(__ARM_NEON)
     nntr_gemm_q4_0_4x8_q8_0_fp16(K, (_FP16 *)(C16 + r_start * N + c_start), ldc,
                                  (void *)((char *)B + c_start * B_step),
                                  (void *)(QA.data() + r_start * A_step),
                                  r_end - r_start, c_end - c_start);
+#else
+    unsigned int t_rows = r_end - r_start;
+    unsigned int t_cols = c_end - c_start;
+    std::vector<float> tile(t_rows * t_cols);
+    nntr_gemm_q4_0_4x8_q8_0(K, tile.data(), t_cols,
+                             (void *)((char *)B + c_start * B_step),
+                             (void *)(QA.data() + r_start * A_step), t_rows,
+                             t_cols);
+    for (unsigned int ii = 0; ii < t_rows; ++ii)
+      __copy_f16_from_f32(&tile[ii * t_cols],
+                          C16 + (r_start + ii) * N + c_start, t_cols);
+#endif
   });
 
   // Leftover 1..3 rows still go through the FP32-output GEMV kernel into a
@@ -484,9 +497,18 @@ void __ggml_q4_0_4x8_q8_0_GEMM(const unsigned int M, const unsigned int N,
       unsigned int M_step_start = chunk_size * idx;
       unsigned int M_step_end = std::min(chunk_size * (idx + 1), (size_t)N);
 
+#if defined(__ARM_NEON)
       nntr_gemv_q4_0_4x8_q8_0_fp16(K, (_FP16 *)(C + M_step_start), N,
                                    (void *)((char *)B + M_step_start * B_step),
                                    QA.data(), M, M_step_end - M_step_start);
+#else
+      unsigned int n_cols = M_step_end - M_step_start;
+      std::vector<float> out(n_cols);
+      nntr_gemv_q4_0_4x8_q8_0(K, out.data(), N,
+                               (void *)((char *)B + M_step_start * B_step),
+                               QA.data(), M, n_cols);
+      __copy_f16_from_f32(out.data(), C + M_step_start, n_cols);
+#endif
     });
     return;
   }
