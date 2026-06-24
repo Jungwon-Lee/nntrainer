@@ -63,4 +63,41 @@ TEST(Qwen3DifferentialTest, Q40CloseToFP32Reference) {
   causallm_test::runQ40DifferentialChecks(qwen3Model());
 }
 
+/**
+ * @brief Differential model descriptor for the 32-token Qwen3 flash fixture
+ *
+ * Uses the qwen3_flash_tiny fixture (init_seq_len=32,
+ * max_position_embeddings=64) which exercises the gemm_attention() flash
+ * attention path (step_size >= FLASH_MIN_PREFILL = 32).
+ */
+causallm_test::DifferentialModel qwen3FlashModel() {
+  return {
+    "qwen3_flash_tiny",
+    [](causallm::json &cfg, causallm::json &gen_cfg, causallm::json &nntr_cfg) {
+      return std::make_unique<
+        causallm_test::CausalLMTestAdapter<causallm::Qwen3CausalLM>>(
+        cfg, gen_cfg, nntr_cfg);
+    },
+  };
+}
+
+/**
+ * @brief FP32 prefill with 32-token input matches HF reference
+ *
+ * On Android+ENABLE_FP16 builds this triggers the gemm_attention() flash path.
+ */
+TEST(Qwen3FlashDifferentialTest, FP32MatchesHFReference) {
+  causallm_test::runFp32DifferentialChecks(qwen3FlashModel());
+}
+
+/**
+ * @brief Q4_0 quantized 32-token prefill stays within tolerance of FP32
+ *
+ * On Android+ENABLE_FP16 builds this triggers the gemm_attention() flash path
+ * with Q4_0 weights and FP32 activations.
+ */
+TEST(Qwen3FlashDifferentialTest, Q40CloseToFP32Reference) {
+  causallm_test::runQ40DifferentialChecks(qwen3FlashModel());
+}
+
 } // namespace

@@ -531,6 +531,16 @@ struct TinyCausalLMCase {
     create_model;
   std::function<void(TinyCausalLMRunner &)>
     setup_weights; /**< Populate deterministic weights before saving */
+  /**
+   * @brief Optional nntrainer config factory override.
+   *
+   * When non-null, called instead of makeTinyNntrainerConfig() to build the
+   * nntrainer config (e.g. flash-attention cases need init_seq_len=32).
+   * When null, makeTinyNntrainerConfig() is used.
+   */
+  std::function<causallm::json(const std::filesystem::path &,
+                               const TinyCausalLMDataType &)>
+    make_nntrainer_config = nullptr;
 };
 
 /**
@@ -709,6 +719,21 @@ causallm::json makeTinyGenerationConfig();
 causallm::json
 makeTinyNntrainerConfig(const std::filesystem::path &tokenizer_path,
                         const TinyCausalLMDataType &data_type);
+
+/**
+ * @brief Make nntrainer config for 32-token flash-attention tests
+ *
+ * Same as makeTinyNntrainerConfig() except init_seq_len=32, max_seq_len=64,
+ * use_flash_attention=true. Needed for cases whose make_model_config uses
+ * max_position_embeddings=64 (flash fixture model).
+ *
+ * @param tokenizer_path Tiny tokenizer path
+ * @param data_type Tiny CausalLM data type variant
+ * @return nntrainer_config.json equivalent with flash settings
+ */
+causallm::json
+makeTinyNntrainerFlashConfig(const std::filesystem::path &tokenizer_path,
+                             const TinyCausalLMDataType &data_type);
 
 /**
  * @brief Make complete tiny configs for one model case
