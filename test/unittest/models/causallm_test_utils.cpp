@@ -111,10 +111,17 @@ std::unique_ptr<TinyCausalLMRunner>
 makeLoadedDeterministicModel(const TinyCausalLMCase &test_case,
                              const TinyCausalLMFiles &files) {
   TinyCausalLMDataType fp32_data_type = makeTinyFp32DataType();
+  // Use the case's nntrainer config factory (if any) for the source model too,
+  // so that the model graph is compiled with the correct
+  // init_seq_len/max_seq_len.
+  auto source_nntr_cfg =
+    test_case.make_nntrainer_config
+      ? test_case.make_nntrainer_config(files.tokenizer_path, fp32_data_type)
+      : makeTinyNntrainerConfig(files.tokenizer_path, fp32_data_type);
   TinyCausalLMConfig source_config = {
     test_case.make_model_config(),
     makeTinyGenerationConfig(),
-    makeTinyNntrainerConfig(files.tokenizer_path, fp32_data_type),
+    source_nntr_cfg,
   };
 
   auto source = test_case.create_model(
@@ -241,10 +248,14 @@ makeTinyNntrainerConfig(const std::filesystem::path &tokenizer_path,
 TinyCausalLMConfig
 makeTinyCausalLMConfig(const TinyCausalLMCase &test_case,
                        const std::filesystem::path &tokenizer_path) {
+  auto nntr_cfg =
+    test_case.make_nntrainer_config
+      ? test_case.make_nntrainer_config(tokenizer_path, test_case.data_type)
+      : makeTinyNntrainerConfig(tokenizer_path, test_case.data_type);
   return {
     test_case.make_model_config(),
     makeTinyGenerationConfig(),
-    makeTinyNntrainerConfig(tokenizer_path, test_case.data_type),
+    nntr_cfg,
   };
 }
 

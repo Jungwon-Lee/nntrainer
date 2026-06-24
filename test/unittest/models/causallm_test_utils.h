@@ -531,6 +531,16 @@ struct TinyCausalLMCase {
     create_model;
   std::function<void(TinyCausalLMRunner &)>
     setup_weights; /**< Populate deterministic weights before saving */
+  /**
+   * @brief Optional nntrainer config factory override.
+   *
+   * When non-null, called instead of makeTinyNntrainerConfig() to build the
+   * nntrainer config (e.g. flash-attention cases need init_seq_len=32).
+   * When null, makeTinyNntrainerConfig() is used.
+   */
+  std::function<causallm::json(const std::filesystem::path &,
+                               const TinyCausalLMDataType &)>
+    make_nntrainer_config = nullptr;
 };
 
 /**
