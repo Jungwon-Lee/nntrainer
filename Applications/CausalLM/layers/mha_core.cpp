@@ -803,7 +803,6 @@ void MHACoreLayer::one_batch_incremental_forwarding(
                                 cache_to);
 }
 
-
 void MHACoreLayer::gemm_attention(nntrainer::Tensor &query_step,
                                   nntrainer::Tensor &b_cached_key,
                                   nntrainer::Tensor &b_cached_value,
@@ -852,8 +851,10 @@ void MHACoreLayer::gemm_attention(nntrainer::Tensor &query_step,
     O = attention_output_step.getData<float>();
   }
 
-  // tile sizes (cache-resident S); tuned constants (Bk=512 decisive)
-  constexpr unsigned int Bq = 256, Bk = 512;
+  // Tile sizes tuned for ARM Cortex-A76 L1 (64KB):
+  //   S(FP32)=16KB + Sp16=8KB + Ol=8KB + Pacc16=4KB = 36KB < 64KB L1.
+  //   Bq=256/Bk=512 blew out L1+L2, defeating the cache-residency goal.
+  constexpr unsigned int Bq = 32, Bk = 128;
 
   const unsigned int num_qb = (N_q + Bq - 1) / Bq;
   auto &tm = nntrainer::ThreadManager::Global();
@@ -876,14 +877,24 @@ void MHACoreLayer::gemm_attention(nntrainer::Tensor &query_step,
   // Android). The FP16 Q path keeps the entire attention in FP16
   // (custom_hgemm for QK and AV, FP16 softmax) without ever materializing
   // an FP32 score buffer.
-  std::vector<float> Qa_fp32;
-  std::vector<uint16_t> Qa_fp16;
+  // Phase 1 de-interleave buffers: thread_local to avoid per-call heap
+  // allocation. Grow on demand (resize is no-op when capacity is sufficient).
+  // Safe: gemm_attention is called serially (batch loop is not parallelized),
+  // and Phase 1 parallel_for writes non-overlapping [h*N_q*d, ...) regions.
+  thread_local std::vector<float> tl_Qa_fp32;
+  thread_local std::vector<uint16_t> tl_Qa_fp16;
+  thread_local std::vector<uint16_t> tl_Ka;
+  thread_local std::vector<uint16_t> tl_Va;
   if (q_fp16)
-    Qa_fp16.resize((size_t)num_heads_Q * N_q * d);
+    tl_Qa_fp16.resize((size_t)num_heads_Q * N_q * d);
   else
-    Qa_fp32.resize((size_t)num_heads_Q * N_q * d);
-  std::vector<uint16_t> Ka((size_t)num_heads_KV * N_kv * d);
-  std::vector<uint16_t> Va((size_t)num_heads_KV * N_kv * d);
+    tl_Qa_fp32.resize((size_t)num_heads_Q * N_q * d);
+  tl_Ka.resize((size_t)num_heads_KV * N_kv * d);
+  tl_Va.resize((size_t)num_heads_KV * N_kv * d);
+  auto &Qa_fp32 = tl_Qa_fp32;
+  auto &Qa_fp16 = tl_Qa_fp16;
+  auto &Ka = tl_Ka;
+  auto &Va = tl_Va;
   {
     if (q_fp16) {
       tm.parallel_for(0, static_cast<size_t>(num_heads_Q), [&](size_t h) {
