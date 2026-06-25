@@ -913,8 +913,10 @@ void MHACoreLayer::gemm_attention(nntrainer::Tensor &query_step,
 #endif
 
     // De-interleave Q rows for this work unit: head h_q, rows [qb, qb+bq).
+    // Qp_fp16 feeds only the ARM fmlal QK kernel; on x86 the QK path uses
+    // Qp_fp32, leaving Qp_fp16 set-but-unused -> mark it maybe_unused.
     const float *Qp_fp32;
-    const uint16_t *Qp_fp16;
+    [[maybe_unused]] const uint16_t *Qp_fp16;
     if (q_fp16) {
       uint16_t *qt = Qtile_fp16.data();
       const uint16_t *qsrc = Q_fp16_src + h_q * d;
