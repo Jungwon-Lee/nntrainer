@@ -402,10 +402,10 @@ static inline void __ggml_q4_0_4x8_q8_0_GEMM_BSTP(
   unsigned int qa_size = qa_4_rows_size * (((M >> 2) << 2) / 4 + 1);
   std::vector<char> QA = std::vector<char>(qa_size);
 
-  for (unsigned int i = 0; i < M4; i++) {
+  tm.parallel_for(0, static_cast<size_t>(M4), [=, &QA](size_t i) {
     __ggml_quantize_mat_q8_0_4x8(A + 4 * i * K, QA.data() + i * qa_4_rows_size,
                                  K);
-  }
+  });
   for (unsigned int i = M4 * 4; i < M; i++) {
     __ggml_quantize_row_q8_0(
       (_FP16 *)A + i * K,
@@ -487,26 +487,28 @@ void __ggml_q4_0_4x8_q8_0_GEMM(const unsigned int M, const unsigned int N,
     unsigned int B_step = sizeof(block_q4_0) * (K / QK4_0);
     unsigned int blocks_per_row = (K + QK8_0 - 1) / QK8_0;
     unsigned int qa_size = sizeof(block_q8_0) * blocks_per_row;
-    std::vector<char> QA = std::vector<char>(qa_size);
+    thread_local std::vector<char> QA;
+    QA.resize(qa_size);
     __ggml_quantize_row_q8_0(A, (void *)QA.data(), K);
+    auto qa_data = QA.data();
 
     unsigned int chunk_size = 16;
     unsigned int loop = (N + chunk_size - 1) / chunk_size;
 
-    tm.parallel_for(0, loop, [=, &QA](size_t idx) {
+    tm.parallel_for(0, loop, [=](size_t idx) {
       unsigned int M_step_start = chunk_size * idx;
       unsigned int M_step_end = std::min(chunk_size * (idx + 1), (size_t)N);
 
 #if defined(__ARM_NEON)
       nntr_gemv_q4_0_4x8_q8_0_fp16(K, (_FP16 *)(C + M_step_start), N,
                                    (void *)((char *)B + M_step_start * B_step),
-                                   QA.data(), M, M_step_end - M_step_start);
+                                   qa_data, M, M_step_end - M_step_start);
 #else
       unsigned int n_cols = M_step_end - M_step_start;
       std::vector<float> out(n_cols);
       nntr_gemv_q4_0_4x8_q8_0(K, out.data(), N,
                                (void *)((char *)B + M_step_start * B_step),
-                               QA.data(), M, n_cols);
+                               qa_data, M, n_cols);
       __copy_f16_from_f32(out.data(), C + M_step_start, n_cols);
 #endif
     });
