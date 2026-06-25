@@ -125,9 +125,15 @@ Both paths use `_mm256_cvtph_ps` (F16C) — available on every x86_64 CPU
 since Ivy Bridge (2011). `-march=native -mavx2 -mfma` are already passed
 project-wide.
 
-ARM uses the existing `nntrainer::sgemm` on Phase-1 FP32 buffers (its
-`shgemm` is internally just scopy+sgemm, so there is no benefit to
-calling shgemm over our own Phase 1 + sgemm path).
+On **ARM** the QK GEMM uses `hgemm_f16xf16_f32_fmlal`
+(`arm/hgemm/hgemm.cpp`) when the query is FP16 — the default `q_fp16` path
+(native `Q4_0-FP16`, or a `Q4_0-FP32` model wrap-converted to FP16 under
+`ENABLE_FP16=1`). It widens FP16×FP16 products into FP32 via FMLAL
+(`vfmlalq_low/high_f16`) and is 4×2 register-blocked (see Tile-size tuning).
+When the query is FP32 (`ENABLE_FP16=0`), QK falls back to `nntrainer::shgemm`
+(internally scopy(FP16→FP32)+sgemm). The AV GEMM always uses
+`nntrainer::neon::custom_hgemm` (the packed 8×16 FP16 micro-kernel inside
+`hgemm()`).
 
 ---
 
@@ -159,9 +165,21 @@ Notes:
 
 ## Tile-size tuning
 
-`Bq` and `Bk` are compile-time constants in `gemm_attention()` (256 / 512),
-tuned on V-JEPA on S26 Ultra. `Bk = 512` is the decisive parameter — smaller
-wastes K reuse, larger spills L2. `Bq` is insensitive across `[256, 512]`.
+`Bq` and `Bk` are compile-time constants in `gemm_attention()`, currently
+**32 / 128**, tuned for the Cortex-A76 L1 (64 KB): the FP32 score buffer
+(`Bq·Bk·4` = 16 KB) plus the FP16 `Sp16`/`Ol`/`Pacc` tiles stay L1-resident
+(~36 KB total). The earlier 256 / 512 (tuned for V-JEPA on S26 Ultra) blew
+out L1+L2 for the shorter causal-LLM head_dim shapes.
+
+The QK micro-kernel `hgemm_f16xf16_f32_fmlal` is **4×2 register-blocked**:
+each k-step loads 4 A-rows and 2 B-rows once and reuses them across the
+tile's 8 outputs (cutting B reloads 4× and A reloads 2× vs the prior naive
+per-(m,n) triple-loop). Per-output K-accumulation order is kept identical to
+the single-output path, so the result is **bit-identical** to the unblocked
+kernel (verified by byte-identical generated tokens). Measured on S25-class
+Qwen3-0.6B `Q4_0-FP16` (8 threads, ~686-tok prefill): per-call QK
+**55.2 µs → 30.8 µs (~1.8×)**, attention wall (summed/`ATTN_TOTAL`)
+**470 ms → 356 ms (−24 %)**.
 
 ---
 
@@ -273,36 +291,59 @@ Three precision configurations are supported, controlled by the
 `ENABLE_FP16` build flag (Android.mk) and (implicitly) the model's
 `model_tensor_type`:
 
-| Build / model                       | Q at gemm_attention | QK kernel        | Score buffer | Softmax            | AV kernel       | Notes |
-|---|---|---|---|---|---|---|
-| `ENABLE_FP16=0`, `Q4_0-FP32`        | FP32                | `shgemm`         | FP32         | NEON exp, FP16 store | `custom_hgemm` | V-JEPA precision. FP16 K/V storage, FP32 partial accum. |
-| `ENABLE_FP16=1`, `Q4_0-FP32`        | FP16 (forwarding cvt) | Phase-1 FP16→FP32 cvt + `shgemm` (current behavior) | FP32 | NEON exp, FP16 store | `custom_hgemm` | mha_core's `forwarding()` wrap-converts Q/K/V/O to FP16; we cvt Q back to FP32 in Phase 1 for the shgemm path. Adds ~100 ms forwarding overhead on 1 K prefill. |
-| `ENABLE_FP16=1`, `Q4_0-FP32`, all-FP16 q_fp16 branch | FP16 | `custom_hgemm` (FP16 × FP16 → FP16) | FP16 | NEON exp in FP32 register, FP16 read+store | `custom_hgemm` | **Reference precision** (matches `compute_kcaches` FP16 path). No FP32 score buffer. |
+All paths now share one structure: **QK → FP32 score buffer `S` → online
+softmax (writes FP16 `Sp16`) → AV**. Only the QK kernel differs by build:
 
-The default ARM build is now `ENABLE_FP16=1` so the in-CausalLM attention
-runs at the same FP16 storage + FP32 partial accumulation precision the
-NPU target uses.
+| Build / model | Q at gemm_attention | QK kernel | Score buffer | Softmax | AV kernel |
+|---|---|---|---|---|---|
+| `ENABLE_FP16=0`, `Q4_0-FP32` | FP32 | `shgemm` (FP32 Q × FP16 K) | FP32 | NEON exp → `Sp16` (FP16) | `custom_hgemm` |
+| `ENABLE_FP16=1` (`Q4_0-FP16` native, or `Q4_0-FP32` wrap-converted) | FP16 | `hgemm_f16xf16_f32_fmlal` (FP16×FP16→FP32, 4×2 blocked) | FP32 | NEON exp → `Sp16` (FP16) | `custom_hgemm` |
 
-## Kernel profile (S25 Ultra, Qwen3-0.6B Q4_0, 1003-token prefill)
+K/V are FP16 storage in both cases; QK accumulates in FP32 (no FP16-product
+overflow), and AV (`custom_hgemm`) accumulates FP16-chunked → FP32. The
+default ARM build is `ENABLE_FP16=1`, matching the FP16 storage + FP32
+partial-accumulation precision the NPU target uses. (Earlier docs described
+an all-FP16 `custom_hgemm` QK with an FP16 score buffer and a Phase-1 Q
+FP16→FP32 + `shgemm` variant — both superseded by the unified fmlal QK path
+above.)
 
-Wall-clock time aggregated across all 2 688 QK GEMM calls per inference
-(`std::chrono::steady_clock`, summed across 8 worker threads):
+## Attention region profile (S25-class, Qwen3-0.6B `Q4_0-FP16`, ~686-tok prefill)
 
-| QK kernel                  | Aggregate QK time | Per call | Prefill total |
-|---|---|---|---|
-| `nntrainer::shgemm`        | 1 649 ms          | 613 µs   | 1 535 ms      |
-| `nntrainer::neon::custom_hgemm` | 2 295 ms          | 854 µs   | 1 656 ms      |
+Per-region wall-clock summed across 8 worker threads (`PROFILE` build,
+`std::chrono::steady_clock`; `ATTN_TOTAL` is the single-thread wall of the
+whole `gemm_attention` call). At `Bq=32, Bk=128` the QK shape is
+M=32, K=128, N=128; AV is M=32, K=128, N=128.
 
-`shgemm` (which internally does `scopy(FP16→FP32) + __cblas_sgemm`) is
-**~28 % faster per call** than `custom_hgemm` on these shapes
-(M=256, K=128, N=512 for QK; M=256, K=512, N=128 for AV). The OpenBLAS
-sgemm micro-kernel out-tunes the in-tree custom NEON FP16 GEMM despite
-having to widen K to FP32 before the multiply. Per memory bandwidth this
-should not be the case (FP16 is half the bytes), so there is headroom in
-`custom_hgemm` if someone tunes its register/cache blocking — that would
-flip the ranking and make the all-FP16 path strictly faster.
+| Region | naive QK | **4×2 blocked QK** |
+|---|---|---|
+| ATTN_QK (`hgemm_f16xf16_f32_fmlal`) | 1781 ms (55.2 µs/call) | **995 ms (30.8 µs/call)** |
+| ATTN_AV (`custom_hgemm`) | 846 ms | 846 ms (unchanged) |
+| ATTN_SOFTMAX | 619 ms | 577 ms |
+| **ATTN_TOTAL (attention wall)** | 470 ms | **356 ms** |
 
-## Qwen3-0.6B benchmarks — S25 Ultra
+Register-blocking the QK kernel cut it **~1.8×** and the attention wall
+**−24 %** (≈8 % off prefill, since attention is ~30 % of prefill wall while
+the FC Q4_0 GEMM — already SMMLA/i8mm — dominates the rest). Output stays
+bit-identical (per-output K-accumulation order preserved).
+
+> Historical note: an earlier profile here compared `shgemm` (613 µs/call)
+> vs `custom_hgemm` (854 µs/call) for QK at the old `Bq=256/Bk=512` tiles
+> and concluded the in-tree FP16 GEMM had register-blocking headroom. That
+> headroom is what the 4×2 blocking above realized; the old `shgemm`-vs-
+> `custom_hgemm` QK comparison no longer reflects the code (QK is now the
+> blocked fmlal kernel). Attempts to also speed up AV — a thread_local C32
+> scratch (no measured gain) and a dedicated FP32-accumulating AV kernel
+> (~2.3× *slower*: the packed 8×16 FP16 `custom_hgemm` already uses
+> `vfmaq_laneq_f16` at full FP16 throughput) — were both reverted.
+
+## Qwen3-0.6B benchmarks — S25 Ultra (historical, pre-register-blocking)
+
+> These e2e numbers predate the 4×2 QK register-blocking and the unified
+> fmlal QK path. The "Phase-1 Q FP16→FP32 + `shgemm`" and "all-FP16
+> `custom_hgemm`" QK variant rows no longer exist in the code (QK is now
+> `hgemm_f16xf16_f32_fmlal`, blocked). Kept for historical context; the
+> current per-region QK/attention numbers are in "Attention region profile"
+> above.
 
 (1003-token prefill + 32-token greedy decode, `NNTR_NUM_THREADS=8`,
 `Q4_0-FP32` activation; outputs match the reference path token-for-token.)
