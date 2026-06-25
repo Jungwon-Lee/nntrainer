@@ -213,44 +213,118 @@ void hgemm_K1(const __fp16 *A, const __fp16 *B, __fp16 *C, unsigned int M,
 // Requires FEAT_FHM (asimdfhm in /proc/cpuinfo). The target attribute pulls
 // the fp16fml ISA extension in only for this function so the rest of the TU
 // can stay on the build-wide -march flags.
+// Single-output FP16xFP16->FP32 dot, used for the M/N tails of the blocked
+// kernel below. The 4x2 block reproduces this exact accumulation order per
+// output, so blocked and tail results are bit-identical (no token drift).
+__attribute__((
+  target("arch=armv8.2-a+fp16+fp16fml+dotprod+i8mm"))) static inline float
+fmlal_dot_one(const __fp16 *a_row, const __fp16 *b_row, unsigned int K) {
+  float32x4_t acc0 = vdupq_n_f32(0.0f);
+  float32x4_t acc1 = vdupq_n_f32(0.0f);
+  unsigned int k = 0;
+  for (; k + 16 <= K; k += 16) {
+    float16x8_t a0 = vld1q_f16(a_row + k);
+    float16x8_t b0 = vld1q_f16(b_row + k);
+    float16x8_t a1 = vld1q_f16(a_row + k + 8);
+    float16x8_t b1 = vld1q_f16(b_row + k + 8);
+    acc0 = vfmlalq_low_f16(acc0, a0, b0);
+    acc1 = vfmlalq_high_f16(acc1, a0, b0);
+    acc0 = vfmlalq_low_f16(acc0, a1, b1);
+    acc1 = vfmlalq_high_f16(acc1, a1, b1);
+  }
+  if (k + 8 <= K) {
+    float16x8_t a0 = vld1q_f16(a_row + k);
+    float16x8_t b0 = vld1q_f16(b_row + k);
+    acc0 = vfmlalq_low_f16(acc0, a0, b0);
+    acc1 = vfmlalq_high_f16(acc1, a0, b0);
+    k += 8;
+  }
+  float sum = vaddvq_f32(vaddq_f32(acc0, acc1));
+  for (; k < K; ++k)
+    sum += (float)a_row[k] * (float)b_row[k];
+  return sum;
+}
+
+// QK GEMM: C[m,n] = alpha * sum_k A[m,k]*B[n,k] (FP16 in, FP32 out).
+// 4x2 (M x N) register-blocked: each k-step loads 4 A-rows and 2 B-rows once
+// and reuses them across the 8 outputs of the tile, cutting the naive kernel's
+// per-(m,n) reloads of B by 4x and of A by 2x. Per-output accumulation order
+// is identical to fmlal_dot_one(), so output is bit-identical to the previous
+// naive triple-loop. M/N remainders fall back to fmlal_dot_one().
 __attribute__((target("arch=armv8.2-a+fp16+fp16fml+dotprod+i8mm"))) void
 hgemm_f16xf16_f32_fmlal(const __fp16 *A, const __fp16 *B, float *C,
                         unsigned int M, unsigned int N, unsigned int K,
                         float alpha, unsigned int lda, unsigned int ldb,
                         unsigned int ldc) {
-  for (unsigned int m = 0; m < M; ++m) {
-    const __fp16 *a_row = A + (size_t)m * lda;
-    float *c_row = C + (size_t)m * ldc;
-    for (unsigned int n = 0; n < N; ++n) {
-      const __fp16 *b_row = B + (size_t)n * ldb;
-      float32x4_t acc0 = vdupq_n_f32(0.0f);
-      float32x4_t acc1 = vdupq_n_f32(0.0f);
+  unsigned int m = 0;
+  for (; m + 4 <= M; m += 4) {
+    const __fp16 *ar[4] = {A + (size_t)(m + 0) * lda, A + (size_t)(m + 1) * lda,
+                           A + (size_t)(m + 2) * lda,
+                           A + (size_t)(m + 3) * lda};
+    float *cr[4] = {C + (size_t)(m + 0) * ldc, C + (size_t)(m + 1) * ldc,
+                    C + (size_t)(m + 2) * ldc, C + (size_t)(m + 3) * ldc};
+    unsigned int n = 0;
+    for (; n + 2 <= N; n += 2) {
+      const __fp16 *br[2] = {B + (size_t)(n + 0) * ldb,
+                             B + (size_t)(n + 1) * ldb};
+      float32x4_t lo[4][2], hi[4][2];
+      for (int i = 0; i < 4; ++i)
+        for (int j = 0; j < 2; ++j) {
+          lo[i][j] = vdupq_n_f32(0.0f);
+          hi[i][j] = vdupq_n_f32(0.0f);
+        }
       unsigned int k = 0;
-      // Process 16 lanes per iter (two 8-lane fmlal pairs) to keep the
-      // FP32 pipelines busy on Cortex-A76 (FMLAL latency ~4, two FP units).
       for (; k + 16 <= K; k += 16) {
-        float16x8_t a0 = vld1q_f16(a_row + k);
-        float16x8_t b0 = vld1q_f16(b_row + k);
-        float16x8_t a1 = vld1q_f16(a_row + k + 8);
-        float16x8_t b1 = vld1q_f16(b_row + k + 8);
-        acc0 = vfmlalq_low_f16(acc0, a0, b0);
-        acc1 = vfmlalq_high_f16(acc1, a0, b0);
-        acc0 = vfmlalq_low_f16(acc0, a1, b1);
-        acc1 = vfmlalq_high_f16(acc1, a1, b1);
+        float16x8_t Alo[4], Ahi[4], Blo[2], Bhi[2];
+        for (int i = 0; i < 4; ++i) {
+          Alo[i] = vld1q_f16(ar[i] + k);
+          Ahi[i] = vld1q_f16(ar[i] + k + 8);
+        }
+        for (int j = 0; j < 2; ++j) {
+          Blo[j] = vld1q_f16(br[j] + k);
+          Bhi[j] = vld1q_f16(br[j] + k + 8);
+        }
+        for (int i = 0; i < 4; ++i)
+          for (int j = 0; j < 2; ++j) {
+            lo[i][j] = vfmlalq_low_f16(lo[i][j], Alo[i], Blo[j]);
+            hi[i][j] = vfmlalq_high_f16(hi[i][j], Alo[i], Blo[j]);
+            lo[i][j] = vfmlalq_low_f16(lo[i][j], Ahi[i], Bhi[j]);
+            hi[i][j] = vfmlalq_high_f16(hi[i][j], Ahi[i], Bhi[j]);
+          }
       }
-      // 8-lane tail.
       if (k + 8 <= K) {
-        float16x8_t a0 = vld1q_f16(a_row + k);
-        float16x8_t b0 = vld1q_f16(b_row + k);
-        acc0 = vfmlalq_low_f16(acc0, a0, b0);
-        acc1 = vfmlalq_high_f16(acc1, a0, b0);
+        float16x8_t Alo[4], Blo[2];
+        for (int i = 0; i < 4; ++i)
+          Alo[i] = vld1q_f16(ar[i] + k);
+        for (int j = 0; j < 2; ++j)
+          Blo[j] = vld1q_f16(br[j] + k);
+        for (int i = 0; i < 4; ++i)
+          for (int j = 0; j < 2; ++j) {
+            lo[i][j] = vfmlalq_low_f16(lo[i][j], Alo[i], Blo[j]);
+            hi[i][j] = vfmlalq_high_f16(hi[i][j], Alo[i], Blo[j]);
+          }
         k += 8;
       }
-      float sum = vaddvq_f32(vaddq_f32(acc0, acc1));
-      // <8 tail (head_dim is usually a multiple of 8, but be safe).
-      for (; k < K; ++k)
-        sum += (float)a_row[k] * (float)b_row[k];
-      c_row[n] = alpha * sum;
+      for (int i = 0; i < 4; ++i)
+        for (int j = 0; j < 2; ++j) {
+          float sum = vaddvq_f32(vaddq_f32(lo[i][j], hi[i][j]));
+          for (unsigned int kk = k; kk < K; ++kk)
+            sum += (float)ar[i][kk] * (float)br[j][kk];
+          cr[i][n + j] = alpha * sum;
+        }
     }
+    // N remainder (n < N): 4 outputs per column via the scalar-order helper.
+    for (; n < N; ++n) {
+      const __fp16 *b_row = B + (size_t)n * ldb;
+      for (int i = 0; i < 4; ++i)
+        cr[i][n] = alpha * fmlal_dot_one(ar[i], b_row, K);
+    }
+  }
+  // M remainder (m < M): naive per (m, n).
+  for (; m < M; ++m) {
+    const __fp16 *a_row = A + (size_t)m * lda;
+    float *c_row = C + (size_t)m * ldc;
+    for (unsigned int n = 0; n < N; ++n)
+      c_row[n] = alpha * fmlal_dot_one(a_row, B + (size_t)n * ldb, K);
   }
 }
