@@ -27,6 +27,7 @@
 #include <iostream>
 #include <smallthinker_causallm.h>
 #include <smallthinker_moe_layer.h>
+#include <smallthinker_moe_layer_slim.h>
 #include <stdexcept>
 
 namespace causallm {
@@ -214,6 +215,22 @@ void SmallThinkerCausalLM::registerCustomLayers() {
   try {
     app_context->registerFactory(
       nntrainer::createLayer<causallm::SmallThinkerMoELayer>);
+  } catch (std::invalid_argument &e) {
+    std::cerr << "failed to register factory, reason: " << e.what()
+              << std::endl;
+  }
+}
+
+void SmallThinkerSlimCausalLM::registerCustomLayers() {
+  CausalLM::registerCustomLayers();
+
+  auto &ct_engine = nntrainer::Engine::Global();
+  auto app_context =
+    static_cast<nntrainer::AppContext *>(ct_engine.getRegisteredContext("cpu"));
+
+  try {
+    app_context->registerFactory(
+      nntrainer::createLayer<causallm::SmallThinkerSlimMoELayer>);
   } catch (std::invalid_argument &e) {
     std::cerr << "failed to register factory, reason: " << e.what()
               << std::endl;

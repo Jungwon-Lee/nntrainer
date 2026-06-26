@@ -351,6 +351,12 @@ void registerAllModels() {
                                                               generation_cfg,
                                                               nntr_cfg);
     });
+  factory.registerModel(
+    "SmallThinkerSlimForCausalLM",
+    [](json cfg, json generation_cfg, json nntr_cfg) {
+      return std::make_unique<causallm::SmallThinkerSlimCausalLM>(
+        cfg, generation_cfg, nntr_cfg);
+    });
 }
 
 /**
