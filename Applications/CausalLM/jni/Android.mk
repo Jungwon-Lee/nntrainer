@@ -31,6 +31,7 @@ CAUSALLM_COMMON_INCLUDES := \
     $(LOCAL_PATH)/../models/gemma4 \
     $(LOCAL_PATH)/../models/xlm_roberta \
     $(LOCAL_PATH)/../models/lfm2 \
+    $(LOCAL_PATH)/../models/smallthinker \
     $(LOCAL_PATH)/../third_party/minja/include \
     $(LOCAL_PATH)/../third_party \
 
@@ -111,6 +112,8 @@ LOCAL_SRC_FILES := \
     ../layers/deberta_attention_layer.cpp \
     ../layers/shared_fully_connected_layer.cpp \
     ../api/streamer.cpp \
+    ../models/smallthinker/smallthinker_causallm.cpp \
+    ../models/smallthinker/smallthinker_moe_layer.cpp \
 
 LOCAL_SHARED_LIBRARIES := nntrainer ccapi-nntrainer
 LOCAL_STATIC_LIBRARIES := tokenizers_c
@@ -226,7 +229,9 @@ LOCAL_SRC_FILES := ../quantize.cpp \
     ../models/xlm_roberta/xlm_roberta.cpp \
     ../layers/deberta_attention_layer.cpp \
     ../layers/shared_fully_connected_layer.cpp \
-    ../api/streamer.cpp
+    ../api/streamer.cpp \
+    ../models/smallthinker/smallthinker_causallm.cpp \
+    ../models/smallthinker/smallthinker_moe_layer.cpp
 
 LOCAL_SHARED_LIBRARIES := nntrainer ccapi-nntrainer
 LOCAL_STATIC_LIBRARIES := tokenizers_c
@@ -248,6 +253,7 @@ LOCAL_C_INCLUDES += \
     $(LOCAL_PATH)/../models/gemma4 \
     $(LOCAL_PATH)/../models/xlm_roberta \
     $(LOCAL_PATH)/../models/lfm2 \
+    $(LOCAL_PATH)/../models/smallthinker \
 
 include $(BUILD_EXECUTABLE)
 
