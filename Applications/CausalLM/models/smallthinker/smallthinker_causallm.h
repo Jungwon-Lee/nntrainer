@@ -57,6 +57,30 @@ private:
   std::vector<bool> sliding_window_layout_;
 };
 
+/**
+ * @brief SmallThinkerSlimCausalLM class
+ * @note  Uses virtual expert weights; each expert is loaded, computed, and
+ *        immediately unloaded (no persistent cache).
+ */
+class SmallThinkerSlimCausalLM : public SmallThinkerCausalLM {
+public:
+  static constexpr const char *architectures = "SmallThinkerSlimForCausalLM";
+
+  SmallThinkerSlimCausalLM(json &cfg, json &generation_cfg, json &nntr_cfg) :
+    Transformer(normalizeConfig(cfg), generation_cfg, nntr_cfg,
+                ModelType::CAUSALLM),
+    SmallThinkerCausalLM(cfg, generation_cfg, nntr_cfg) {}
+
+  virtual ~SmallThinkerSlimCausalLM() = default;
+
+protected:
+  const char *getMoELayerType() const override {
+    return "smallthinker_moe_slim";
+  }
+
+  void registerCustomLayers() override;
+};
+
 } // namespace causallm
 
 #endif /* __SMALLTHINKER_CAUSAL_LM_H__ */

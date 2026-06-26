@@ -6,6 +6,8 @@ smallthinker_inc = include_directories('.')
 
 causallm_smallthinker_moe_layer_src = [
     meson.current_source_dir() / 'smallthinker_moe_layer.cpp',
+    meson.current_source_dir() / 'smallthinker_moe_layer_slim.cpp',
+
 ]
 
 causallm_smallthinker_moe_layer = shared_library(
