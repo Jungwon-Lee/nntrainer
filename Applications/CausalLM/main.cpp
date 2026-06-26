@@ -247,6 +247,12 @@ int main(int argc, char *argv[]) {
     });
 #if !defined(_WIN32)
   causallm::Factory::Instance().registerModel(
+    "SmallThinkerCachedSlimForCausalLM",
+    [](json cfg, json generation_cfg, json nntr_cfg) {
+      return std::make_unique<causallm::SmallThinkerCachedSlimCausalLM>(
+        cfg, generation_cfg, nntr_cfg);
+    });
+  causallm::Factory::Instance().registerModel(
     "Qwen3CachedSlimMoeForCausalLM",
     [](json cfg, json generation_cfg, json nntr_cfg) {
       return std::make_unique<causallm::Qwen3CachedSlimMoECausalLM>(

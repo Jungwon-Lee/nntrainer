@@ -81,6 +81,32 @@ protected:
   void registerCustomLayers() override;
 };
 
+/**
+ * @brief SmallThinkerCachedSlimCausalLM class
+ * @note  Uses virtual expert weights with an LRU cache to keep recently-used
+ *        experts mapped across tokens, reducing repeated mmap overhead.
+ */
+class SmallThinkerCachedSlimCausalLM : public SmallThinkerCausalLM {
+public:
+  static constexpr const char *architectures =
+    "SmallThinkerCachedSlimForCausalLM";
+
+  SmallThinkerCachedSlimCausalLM(json &cfg, json &generation_cfg,
+                                 json &nntr_cfg) :
+    Transformer(normalizeConfig(cfg), generation_cfg, nntr_cfg,
+                ModelType::CAUSALLM),
+    SmallThinkerCausalLM(cfg, generation_cfg, nntr_cfg) {}
+
+  virtual ~SmallThinkerCachedSlimCausalLM() = default;
+
+protected:
+  const char *getMoELayerType() const override {
+    return "smallthinker_moe_cached_slim";
+  }
+
+  void registerCustomLayers() override;
+};
+
 } // namespace causallm
 
 #endif /* __SMALLTHINKER_CAUSAL_LM_H__ */

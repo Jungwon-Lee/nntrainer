@@ -109,6 +109,7 @@ LOCAL_SRC_FILES := \
     ../models/smallthinker/smallthinker_causallm.cpp \
     ../models/smallthinker/smallthinker_moe_layer.cpp \
     ../models/smallthinker/smallthinker_moe_layer_slim.cpp \
+    ../models/smallthinker/smallthinker_moe_layer_cached_slim.cpp \
 
 LOCAL_SHARED_LIBRARIES := nntrainer ccapi-nntrainer
 LOCAL_STATIC_LIBRARIES := tokenizers_c
@@ -244,7 +245,8 @@ LOCAL_SRC_FILES := ../quantize.cpp \
     ../layers/shared_fully_connected_layer.cpp \
     ../models/smallthinker/smallthinker_causallm.cpp \
     ../models/smallthinker/smallthinker_moe_layer.cpp \
-    ../models/smallthinker/smallthinker_moe_layer_slim.cpp
+    ../models/smallthinker/smallthinker_moe_layer_slim.cpp \
+    ../models/smallthinker/smallthinker_moe_layer_cached_slim.cpp
 
 LOCAL_SHARED_LIBRARIES := nntrainer ccapi-nntrainer
 LOCAL_STATIC_LIBRARIES := tokenizers_c
