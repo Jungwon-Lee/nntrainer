@@ -49,7 +49,7 @@ protected:
 
   static json &normalizeConfig(json &cfg);
 
-private:
+protected:
   unsigned int NUM_EXPERTS;
   unsigned int NUM_EXPERTS_PER_TOK;
   bool ROUTER_APPLY_SOFTMAX;
@@ -102,6 +102,92 @@ public:
 protected:
   const char *getMoELayerType() const override {
     return "smallthinker_moe_cached_slim";
+  }
+
+  Tensor createTransformerDecoderBlock(const int layer_id,
+                                       Tensor input) override;
+
+  void registerCustomLayers() override;
+};
+
+/**
+ * @brief SmallThinkerSparseCausalLM class
+ * @note  BASE SmallThinker model (all experts resident, no LRU/mmap) with a
+ *        ReLU-sparsity expert FFN. Clean testbed to isolate the sparsity
+ *        speedup from the cached-slim caching machinery. Requires a sparse
+ *        .bin (up/down plain per-neuron rows) — same layout as the sparse
+ *        cached-slim variant.
+ */
+class SmallThinkerSparseCausalLM : public SmallThinkerCausalLM {
+public:
+  static constexpr const char *architectures = "SmallThinkerSparseForCausalLM";
+
+  SmallThinkerSparseCausalLM(json &cfg, json &generation_cfg, json &nntr_cfg) :
+    Transformer(normalizeConfig(cfg), generation_cfg, nntr_cfg,
+                ModelType::CAUSALLM),
+    SmallThinkerCausalLM(cfg, generation_cfg, nntr_cfg) {}
+
+  virtual ~SmallThinkerSparseCausalLM() = default;
+
+protected:
+  const char *getMoELayerType() const override {
+    return "smallthinker_moe_sparse";
+  }
+
+  void registerCustomLayers() override;
+};
+
+/**
+ * @brief SmallThinkerSparseCachedSlimCausalLM class
+ * @note  Cached-slim LRU + prefetch decoder graph, but the MoE expert FFN uses
+ *        the sparse ReGLU compute (B3 hybrid). Combines on-device expert
+ *        offloading with activation sparsity (paper §6.1 + §6.2). Uses the same
+ *        "smallthinker_sparse" .bin as the resident base-sparse model.
+ */
+class SmallThinkerSparseCachedSlimCausalLM
+  : public SmallThinkerCachedSlimCausalLM {
+public:
+  static constexpr const char *architectures =
+    "SmallThinkerSparseCachedSlimForCausalLM";
+
+  SmallThinkerSparseCachedSlimCausalLM(json &cfg, json &generation_cfg,
+                                       json &nntr_cfg) :
+    Transformer(normalizeConfig(cfg), generation_cfg, nntr_cfg,
+                ModelType::CAUSALLM),
+    SmallThinkerCachedSlimCausalLM(cfg, generation_cfg, nntr_cfg) {}
+
+  virtual ~SmallThinkerSparseCachedSlimCausalLM() = default;
+
+protected:
+  const char *getMoELayerType() const override {
+    return "smallthinker_moe_sparse_cached_slim";
+  }
+
+  void registerCustomLayers() override;
+};
+
+/**
+ * @brief SmallThinkerSparseSlimCausalLM class
+ * @note  Slim (on-demand, no-cache) decoder, with the sparse ReGLU expert FFN.
+ *        Uses the same "smallthinker_sparse" .bin as the resident base-sparse
+ *        model (gate repacked, up/down plain).
+ */
+class SmallThinkerSparseSlimCausalLM : public SmallThinkerSlimCausalLM {
+public:
+  static constexpr const char *architectures =
+    "SmallThinkerSparseSlimForCausalLM";
+
+  SmallThinkerSparseSlimCausalLM(json &cfg, json &generation_cfg,
+                                 json &nntr_cfg) :
+    Transformer(normalizeConfig(cfg), generation_cfg, nntr_cfg,
+                ModelType::CAUSALLM),
+    SmallThinkerSlimCausalLM(cfg, generation_cfg, nntr_cfg) {}
+
+  virtual ~SmallThinkerSparseSlimCausalLM() = default;
+
+protected:
+  const char *getMoELayerType() const override {
+    return "smallthinker_moe_sparse_slim";
   }
 
   void registerCustomLayers() override;

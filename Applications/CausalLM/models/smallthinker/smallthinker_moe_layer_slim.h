@@ -101,7 +101,10 @@ public:
   static constexpr const char *type =
     "smallthinker_moe_slim"; /**< type of the layer */
 
-private:
+  // protected (not private) so the sparse subclass
+  // (SmallThinkerSparseSlimMoELayer) can override the expert FFN and reuse the
+  // on-demand activate/compute/deactivate machinery.
+protected:
   unsigned int num_experts;      /**< number of experts */
   unsigned int topk;             /**< number of experts per token */
   bool router_apply_softmax;     /**< whether router uses softmax or sigmoid */
@@ -121,7 +124,7 @@ private:
   unsigned int router_logits_idx;
   unsigned int expert_mask_idx;
 
-  inline void compute_expert_forward(
+  virtual void compute_expert_forward(
     const nntrainer::Tensor &input, nntrainer::Tensor &output,
     const std::vector<std::pair<unsigned, float>> &token_assignments,
     const nntrainer::Tensor &gate_proj, const nntrainer::Tensor &up_proj,

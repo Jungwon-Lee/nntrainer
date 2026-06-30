@@ -7,7 +7,11 @@ smallthinker_inc = include_directories('.')
 causallm_smallthinker_moe_layer_src = [
     meson.current_source_dir() / 'smallthinker_moe_layer.cpp',
     meson.current_source_dir() / 'smallthinker_moe_layer_slim.cpp',
+    meson.current_source_dir() / 'smallthinker_moe_layer_base_sparse.cpp',
     meson.current_source_dir() / 'smallthinker_moe_layer_cached_slim.cpp',
+    meson.current_source_dir() / 'smallthinker_moe_layer_sparse_cached_slim.cpp',
+    meson.current_source_dir() / 'smallthinker_moe_layer_sparse_slim.cpp',
+    meson.current_source_dir() / 'smallthinker_moe_prefetch_layer.cpp',
 ]
 
 causallm_smallthinker_moe_layer = shared_library(

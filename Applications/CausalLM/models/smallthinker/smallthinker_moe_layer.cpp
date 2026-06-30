@@ -295,7 +295,7 @@ inline void SmallThinkerMoELayer::compute_expert_forward(
   output.add_i(expert_output);
 }
 
-inline void SmallThinkerMoELayer::compute_expert_forward_no_critical(
+void SmallThinkerMoELayer::compute_expert_forward_no_critical(
   const nntrainer::Tensor &input, nntrainer::Tensor &expert_output,
   const std::vector<std::pair<unsigned, float>> &token_assignments,
   const nntrainer::Tensor &gate_proj, const nntrainer::Tensor &up_proj,
@@ -342,7 +342,7 @@ inline void SmallThinkerMoELayer::compute_expert_forward_no_critical(
   }
 }
 
-inline void SmallThinkerMoELayer::compute_expert_forward_batched(
+void SmallThinkerMoELayer::compute_expert_forward_batched(
   const nntrainer::Tensor &input, nntrainer::Tensor &output,
   const std::vector<std::pair<unsigned, float>> &token_assignments,
   const nntrainer::Tensor &gate_proj, const nntrainer::Tensor &up_proj,

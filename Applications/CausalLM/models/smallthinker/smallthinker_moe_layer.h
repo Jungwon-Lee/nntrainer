@@ -148,7 +148,9 @@ public:
   static constexpr const char *type =
     "smallthinker_moe"; /**< type of the layer */
 
-private:
+  // protected (not private) so the sparse subclass (SmallThinkerSparseMoELayer)
+  // can override the expert FFN kernels and reuse the rest.
+protected:
   unsigned int num_experts;      /**< number of experts */
   unsigned int topk;             /**< number of experts per token, i.e., topk */
   bool router_apply_softmax;     /**< whether router uses softmax or sigmoid */
@@ -174,7 +176,7 @@ private:
     const nntrainer::Tensor &gate_proj, const nntrainer::Tensor &up_proj,
     const nntrainer::Tensor &down_proj, unsigned int hidden_size);
 
-  inline void compute_expert_forward_no_critical(
+  virtual void compute_expert_forward_no_critical(
     const nntrainer::Tensor &input, nntrainer::Tensor &expert_output,
     const std::vector<std::pair<unsigned, float>> &token_assignments,
     const nntrainer::Tensor &gate_proj, const nntrainer::Tensor &up_proj,
@@ -183,7 +185,7 @@ private:
   // Batched GEMM variant: gathers all assigned tokens into a contiguous matrix
   // and performs 3 GEMMs (gate, up, down) instead of N separate GEMVs.
   // Significantly faster during prefill (M = num_tokens > 1).
-  inline void compute_expert_forward_batched(
+  virtual void compute_expert_forward_batched(
     const nntrainer::Tensor &input, nntrainer::Tensor &output,
     const std::vector<std::pair<unsigned, float>> &token_assignments,
     const nntrainer::Tensor &gate_proj, const nntrainer::Tensor &up_proj,

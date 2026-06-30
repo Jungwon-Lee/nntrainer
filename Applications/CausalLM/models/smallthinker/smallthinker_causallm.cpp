@@ -24,11 +24,16 @@
 
 #include <algorithm>
 #include <climits>
+#include <cstdlib>
 #include <iostream>
 #include <smallthinker_causallm.h>
 #include <smallthinker_moe_layer.h>
+#include <smallthinker_moe_layer_base_sparse.h>
 #include <smallthinker_moe_layer_cached_slim.h>
 #include <smallthinker_moe_layer_slim.h>
+#include <smallthinker_moe_layer_sparse_cached_slim.h>
+#include <smallthinker_moe_layer_sparse_slim.h>
+#include <smallthinker_moe_prefetch_layer.h>
 #include <stdexcept>
 
 namespace causallm {
@@ -238,6 +243,81 @@ void SmallThinkerSlimCausalLM::registerCustomLayers() {
   }
 }
 
+// Check at startup whether prefetch is enabled (env var read once).
+static const bool g_prefetch_enabled = []() {
+  const char *env = std::getenv("NNTR_MOE_PREFETCH_THREADS");
+  return !env || std::stoi(env) != 0;
+}();
+
+Tensor SmallThinkerCachedSlimCausalLM::createTransformerDecoderBlock(
+  const int layer_id, Tensor input) {
+
+  if (!g_prefetch_enabled) {
+    // Prefetch disabled: fall back to base-class graph (no prefetch node).
+    return SmallThinkerCausalLM::createTransformerDecoderBlock(layer_id, input);
+  }
+
+  // Insert a pass-through prefetch node at block entry. It consumes the
+  // pre-attention `input`, fires background activate() tasks for the predicted
+  // expert set, then passes the data through unchanged. Topology guarantees
+  // this runs before attention.
+  LayerHandle moe_pf(createLayer(
+    SmallThinkerMoEPrefetchLayer::type,
+    {withKey("name",
+             "layer" + std::to_string(layer_id) + "_ffn_prefetch"),
+     withKey("num_experts", NUM_EXPERTS),
+     withKey("num_experts_per_token", NUM_EXPERTS_PER_TOK),
+     withKey("moe_router_apply_softmax",
+             ROUTER_APPLY_SOFTMAX ? "true" : "false"),
+     withKey("moe_layer_id", layer_id)}));
+  Tensor pf = moe_pf(input); // pass-through; fires prefetch in forwarding()
+
+  // Run attention on the original input (not through pf to avoid an extra
+  // copy in the attention path; pf is used only as the MoE router input).
+  LayerHandle attn_norm(createLayer(
+    "rms_norm",
+    {withKey("name",
+             "layer" + std::to_string(layer_id) + "_attention_norm"),
+     withKey("epsilon", std::to_string(NORM_EPS)),
+     withKey("packed", "false")}));
+  Tensor normed = attn_norm(input);
+
+  Tensor att_out = createAttention(layer_id, INIT_SEQ_LEN, NUM_HEADS, HEAD_DIM,
+                                   normed, normed, normed);
+
+  LayerHandle decoder_add(createLayer(
+    "addition",
+    {withKey("name",
+             "layer" + std::to_string(layer_id) + "_decoder_add")}));
+  Tensor residual = decoder_add({input, att_out});
+
+  LayerHandle ffn_norm(createLayer(
+    "rms_norm",
+    {withKey("name", "layer" + std::to_string(layer_id) + "_ffn_norm"),
+     withKey("epsilon", std::to_string(NORM_EPS)),
+     withKey("packed", "false")}));
+  Tensor ffn_normed = ffn_norm(residual);
+
+  // MoE compute node: input[0] = ffn_normed (expert input),
+  //                   input[1] = pf (router input, == original `input`).
+  LayerHandle moe(createLayer(
+    getMoELayerType(),
+    {withKey("name", "layer" + std::to_string(layer_id) + "_ffn_down"),
+     withKey("unit", INTERMEDIATE_SIZE),
+     withKey("num_experts", NUM_EXPERTS),
+     withKey("num_experts_per_token", NUM_EXPERTS_PER_TOK),
+     withKey("moe_activation", "relu"),
+     withKey("moe_router_apply_softmax",
+             ROUTER_APPLY_SOFTMAX ? "true" : "false")}));
+  Tensor ffn_out = moe({ffn_normed, pf});
+
+  LayerHandle decoder_output(createLayer(
+    "addition",
+    {withKey("name",
+             "layer" + std::to_string(layer_id) + "_decoder_output")}));
+  return decoder_output({residual, ffn_out});
+}
+
 void SmallThinkerCachedSlimCausalLM::registerCustomLayers() {
   CausalLM::registerCustomLayers();
 
@@ -248,6 +328,72 @@ void SmallThinkerCachedSlimCausalLM::registerCustomLayers() {
   try {
     app_context->registerFactory(
       nntrainer::createLayer<causallm::SmallThinkerCachedSlimMoELayer>);
+  } catch (std::invalid_argument &e) {
+    std::cerr << "failed to register factory, reason: " << e.what()
+              << std::endl;
+  }
+
+  try {
+    app_context->registerFactory(
+      nntrainer::createLayer<causallm::SmallThinkerMoEPrefetchLayer>);
+  } catch (std::invalid_argument &e) {
+    std::cerr << "failed to register factory, reason: " << e.what()
+              << std::endl;
+  }
+}
+
+void SmallThinkerSparseCausalLM::registerCustomLayers() {
+  CausalLM::registerCustomLayers();
+
+  auto &ct_engine = nntrainer::Engine::Global();
+  auto app_context =
+    static_cast<nntrainer::AppContext *>(ct_engine.getRegisteredContext("cpu"));
+
+  try {
+    app_context->registerFactory(
+      nntrainer::createLayer<causallm::SmallThinkerSparseMoELayer>);
+  } catch (std::invalid_argument &e) {
+    std::cerr << "failed to register factory, reason: " << e.what()
+              << std::endl;
+  }
+}
+
+void SmallThinkerSparseCachedSlimCausalLM::registerCustomLayers() {
+  CausalLM::registerCustomLayers();
+
+  auto &ct_engine = nntrainer::Engine::Global();
+  auto app_context =
+    static_cast<nntrainer::AppContext *>(ct_engine.getRegisteredContext("cpu"));
+
+  try {
+    app_context->registerFactory(
+      nntrainer::createLayer<causallm::SmallThinkerSparseCachedSlimMoELayer>);
+  } catch (std::invalid_argument &e) {
+    std::cerr << "failed to register factory, reason: " << e.what()
+              << std::endl;
+  }
+
+  // The sparse cached-slim variant reuses the cached-slim prefetch decoder
+  // graph, so the pass-through prefetch node must also be registered.
+  try {
+    app_context->registerFactory(
+      nntrainer::createLayer<causallm::SmallThinkerMoEPrefetchLayer>);
+  } catch (std::invalid_argument &e) {
+    std::cerr << "failed to register factory, reason: " << e.what()
+              << std::endl;
+  }
+}
+
+void SmallThinkerSparseSlimCausalLM::registerCustomLayers() {
+  CausalLM::registerCustomLayers();
+
+  auto &ct_engine = nntrainer::Engine::Global();
+  auto app_context =
+    static_cast<nntrainer::AppContext *>(ct_engine.getRegisteredContext("cpu"));
+
+  try {
+    app_context->registerFactory(
+      nntrainer::createLayer<causallm::SmallThinkerSparseSlimMoELayer>);
   } catch (std::invalid_argument &e) {
     std::cerr << "failed to register factory, reason: " << e.what()
               << std::endl;

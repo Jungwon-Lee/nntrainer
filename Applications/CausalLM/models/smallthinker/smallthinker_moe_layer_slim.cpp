@@ -242,7 +242,7 @@ void SmallThinkerSlimMoELayer::forwarding(nntrainer::RunLayerContext &context,
   router_input.reshape({batch_size, 1, seq_len, hidden_size});
 }
 
-inline void SmallThinkerSlimMoELayer::compute_expert_forward(
+void SmallThinkerSlimMoELayer::compute_expert_forward(
   const nntrainer::Tensor &input, nntrainer::Tensor &output,
   const std::vector<std::pair<unsigned, float>> &token_assignments,
   const nntrainer::Tensor &gate_proj, const nntrainer::Tensor &up_proj,
