@@ -132,7 +132,7 @@ On **ARM** the QK GEMM uses `hgemm_f16xf16_f32_fmlal`
 (`vfmlalq_low/high_f16`) and is 4×2 register-blocked (see Tile-size tuning).
 When the query is FP32 (`ENABLE_FP16=0`), QK falls back to `nntrainer::shgemm`
 (internally scopy(FP16→FP32)+sgemm). The AV GEMM always uses
-`nntrainer::neon::custom_hgemm` (the packed 8×16 FP16 micro-kernel inside
+`nntrainer::neon::hgemm_f16xf16_f16` (the packed 8×16 FP16 micro-kernel inside
 `hgemm()`).
 
 ---
@@ -296,14 +296,14 @@ softmax (writes FP16 `Sp16`) → AV**. Only the QK kernel differs by build:
 
 | Build / model | Q at gemm_attention | QK kernel | Score buffer | Softmax | AV kernel |
 |---|---|---|---|---|---|
-| `ENABLE_FP16=0`, `Q4_0-FP32` | FP32 | `shgemm` (FP32 Q × FP16 K) | FP32 | NEON exp → `Sp16` (FP16) | `custom_hgemm` |
-| `ENABLE_FP16=1` (`Q4_0-FP16` native, or `Q4_0-FP32` wrap-converted) | FP16 | `hgemm_f16xf16_f32_fmlal` (FP16×FP16→FP32, 4×2 blocked) | FP32 | NEON exp → `Sp16` (FP16) | `custom_hgemm` |
+| `ENABLE_FP16=0`, `Q4_0-FP32` | FP32 | `shgemm` (FP32 Q × FP16 K) | FP32 | NEON exp → `Sp16` (FP16) | `hgemm_f16xf16_f16` |
+| `ENABLE_FP16=1` (`Q4_0-FP16` native, or `Q4_0-FP32` wrap-converted) | FP16 | `hgemm_f16xf16_f32_fmlal` (FP16×FP16→FP32, 4×2 blocked) | FP32 | NEON exp → `Sp16` (FP16) | `hgemm_f16xf16_f16` |
 
 K/V are FP16 storage in both cases; QK accumulates in FP32 (no FP16-product
-overflow), and AV (`custom_hgemm`) accumulates FP16-chunked → FP32. The
+overflow), and AV (`hgemm_f16xf16_f16`) accumulates FP16-chunked → FP32. The
 default ARM build is `ENABLE_FP16=1`, matching the FP16 storage + FP32
 partial-accumulation precision the NPU target uses. (Earlier docs described
-an all-FP16 `custom_hgemm` QK with an FP16 score buffer and a Phase-1 Q
+an all-FP16 `hgemm_f16xf16_f16` QK with an FP16 score buffer and a Phase-1 Q
 FP16→FP32 + `shgemm` variant — both superseded by the unified fmlal QK path
 above.)
 
@@ -317,7 +317,7 @@ M=32, K=128, N=128; AV is M=32, K=128, N=128.
 | Region | naive QK | **4×2 blocked QK** |
 |---|---|---|
 | ATTN_QK (`hgemm_f16xf16_f32_fmlal`) | 1781 ms (55.2 µs/call) | **995 ms (30.8 µs/call)** |
-| ATTN_AV (`custom_hgemm`) | 846 ms | 846 ms (unchanged) |
+| ATTN_AV (`hgemm_f16xf16_f16`) | 846 ms | 846 ms (unchanged) |
 | ATTN_SOFTMAX | 619 ms | 577 ms |
 | **ATTN_TOTAL (attention wall)** | 470 ms | **356 ms** |
 
@@ -327,20 +327,20 @@ the FC Q4_0 GEMM — already SMMLA/i8mm — dominates the rest). Output stays
 bit-identical (per-output K-accumulation order preserved).
 
 > Historical note: an earlier profile here compared `shgemm` (613 µs/call)
-> vs `custom_hgemm` (854 µs/call) for QK at the old `Bq=256/Bk=512` tiles
+> vs `hgemm_f16xf16_f16` (854 µs/call) for QK at the old `Bq=256/Bk=512` tiles
 > and concluded the in-tree FP16 GEMM had register-blocking headroom. That
 > headroom is what the 4×2 blocking above realized; the old `shgemm`-vs-
-> `custom_hgemm` QK comparison no longer reflects the code (QK is now the
+> `hgemm_f16xf16_f16` QK comparison no longer reflects the code (QK is now the
 > blocked fmlal kernel). Attempts to also speed up AV — a thread_local C32
 > scratch (no measured gain) and a dedicated FP32-accumulating AV kernel
-> (~2.3× *slower*: the packed 8×16 FP16 `custom_hgemm` already uses
+> (~2.3× *slower*: the packed 8×16 FP16 `hgemm_f16xf16_f16` already uses
 > `vfmaq_laneq_f16` at full FP16 throughput) — were both reverted.
 
 ## Qwen3-0.6B benchmarks — S25 Ultra (historical, pre-register-blocking)
 
 > These e2e numbers predate the 4×2 QK register-blocking and the unified
 > fmlal QK path. The "Phase-1 Q FP16→FP32 + `shgemm`" and "all-FP16
-> `custom_hgemm`" QK variant rows no longer exist in the code (QK is now
+> `hgemm_f16xf16_f16`" QK variant rows no longer exist in the code (QK is now
 > `hgemm_f16xf16_f32_fmlal`, blocked). Kept for historical context; the
 > current per-region QK/attention numbers are in "Attention region profile"
 > above.
@@ -354,7 +354,7 @@ bit-identical (per-output K-accumulation order preserved).
 | `ENABLE_FP16=0` | flash, V-JEPA `shgemm` path       | **1 458 ms (688)** | 583 ms (54.9) | **2 070 ms** |
 | `ENABLE_FP16=1` | reference (no flash)              | 1 752 ms (572)  | 484 ms (66.1)   | 2 259 ms |
 | `ENABLE_FP16=1` | flash, Phase-1 Q FP16→FP32 + `shgemm` | 1 535 ms (653) | 586 ms (54.6)\* | 2 149 ms |
-| `ENABLE_FP16=1` | flash, all-FP16 (`custom_hgemm`)  | 1 656 ms (606)  | 486 ms (65.8)   | 2 166 ms |
+| `ENABLE_FP16=1` | flash, all-FP16 (`hgemm_f16xf16_f16`)  | 1 656 ms (606)  | 486 ms (65.8)   | 2 166 ms |
 
 The fastest configuration overall is **`ENABLE_FP16=0` + flash**
 (2 070 ms e2e, 688 TPS prefill): `shgemm` keeps QK in FP32 scores,
@@ -369,7 +369,7 @@ that runs slower than the all-FP16 decode; per-call decode kernel choice
 matters more than prefill kernel choice for total e2e.
 
 The all-FP16 path is currently slower than the FP16→FP32+shgemm variant
-purely because of the `custom_hgemm` vs `shgemm` kernel gap measured
+purely because of the `hgemm_f16xf16_f16` vs `shgemm` kernel gap measured
 above; matching the reference precision (FP16 storage throughout) costs
 ~120 ms / 1 K prefill but is what NPU deployment wants.
 
