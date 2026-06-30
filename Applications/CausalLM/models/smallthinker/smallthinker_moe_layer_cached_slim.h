@@ -12,10 +12,12 @@
 #define __SMALLTHINKER_MOE_LAYER_CACHED_SLIM_H__
 #ifdef __cplusplus
 
+#include <condition_variable>
 #include <list>
 #include <mutex>
 #include <smallthinker_moe_layer.h>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace causallm {
@@ -105,7 +107,29 @@ public:
   static constexpr const char *type =
     "smallthinker_moe_cached_slim"; /**< type of the layer */
 
-private:
+  // Members below are protected (not private) so the sparse subclass
+  // (SmallThinkerSparseCachedSlimMoELayer) can reuse the LRU / prefetch
+  // machinery and override compute_expert_forward().
+
+  /**
+   * @brief Return the gate (router) weight pointer; used by the prefetch node
+   *        to compute router logits at block entry without owning the weight.
+   *        Returns nullptr until the first forward pass populates it.
+   */
+  nntrainer::Tensor *getGateTensor() const {
+    return tensors_populated_
+             ? const_cast<nntrainer::Tensor *>(gate_tensor_ptr_)
+             : nullptr;
+  }
+
+  /**
+   * @brief Fire background activate() tasks for predicted experts. Called by
+   *        the prefetch node before attention runs. No-op until the first
+   *        forward pass populates the Tensor pointers (cold start: token 0).
+   */
+  void prefetchExperts(const std::vector<unsigned int> &predicted);
+
+protected:
   unsigned int num_experts;      /**< number of experts */
   unsigned int topk;             /**< number of experts per token */
   bool router_apply_softmax;     /**< whether router uses softmax or sigmoid */
@@ -133,12 +157,24 @@ private:
   std::unordered_map<int, std::list<int>::iterator> iteration_map;
   std::vector<bool> need_load; /**< per-expert: must activate before use */
   std::mutex cache_mutex;
+  std::condition_variable cache_cv_; /**< notified when in_flight_ clears */
 
-  inline void compute_expert_forward(
+  // Expert-preload state (Phase 2). Populated lazily on the first forward pass.
+  std::vector<bool> in_flight_;                          /**< background activate in progress */
+  std::vector<nntrainer::Tensor *> expert_gate_tensors_; /**< ptrs into compute context */
+  std::vector<nntrainer::Tensor *> expert_up_tensors_;
+  std::vector<nntrainer::Tensor *> expert_down_tensors_;
+  std::unordered_set<int> prefetch_staged_; /**< activated by prefetch, not yet in LRU */
+  bool tensors_populated_; /**< true after first forward fills tensor ptrs */
+  int layer_id_;           /**< parsed from layer name; registry key */
+  const nntrainer::Tensor *gate_tensor_ptr_; /**< ptr to gate weight (always FP32 resident) */
+
+  virtual void compute_expert_forward(
     const nntrainer::Tensor &input, nntrainer::Tensor &output,
     const std::vector<std::pair<unsigned, float>> &token_assignments,
     const nntrainer::Tensor &gate_proj, const nntrainer::Tensor &up_proj,
-    const nntrainer::Tensor &down_proj, unsigned int hidden_size);
+    const nntrainer::Tensor &down_proj, unsigned int hidden_size,
+    long long &sparsity_nz, long long &sparsity_total);
 
   /**
    * @brief Activate the expert on a cache miss (and record it in the LRU),
@@ -151,7 +187,8 @@ private:
                     const nntrainer::Tensor &input, nntrainer::Tensor &output,
                     const std::vector<std::pair<unsigned, float>> &assignments,
                     unsigned int expert_idx, unsigned int hidden_size,
-                    long long &activate_ns, long long &compute_ns);
+                    long long &activate_ns, long long &compute_ns,
+                    long long &sparsity_nz, long long &sparsity_total);
 
   /** @brief Bump predicted experts to the MRU end so they survive eviction. */
   void touch_predicted(const std::vector<unsigned int> &predicted);

@@ -21,13 +21,14 @@
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
-#ifdef DEBUG
 #include <iostream>
-#endif
+#include <mutex>
 #include <node_exporter.h>
 #include <smallthinker_moe_layer_cached_slim.h>
 #include <stdexcept>
+#include <task_executor.h>
 #include <thread_manager.h>
+#include <unordered_map>
 
 using std::chrono::duration_cast;
 using std::chrono::high_resolution_clock;
@@ -35,9 +36,60 @@ using std::chrono::nanoseconds;
 
 namespace causallm {
 
+// ── Global registry: maps layer_id → compute node so the prefetch layer can
+//    call prefetchExperts() on the correct SmallThinkerCachedSlimMoELayer. ──
+static std::mutex g_registry_mutex;
+static std::unordered_map<int, SmallThinkerCachedSlimMoELayer *> g_prefetch_registry;
+
+// ── Number of background prefetch threads. 0 = disabled (synchronous path). ──
+// Default 0: on x86 warm cache, background mmap() during attention causes
+// mmap_lock contention with BLAS page-fault handlers → 3x regression.
+// Set NNTR_MOE_PREFETCH_THREADS=2 explicitly on Android (cold cache) where
+// madvise(WILLNEED) triggers real I/O that is worth hiding behind attention.
+static const int g_prefetch_threads = []() -> int {
+  const char *env = std::getenv("NNTR_MOE_PREFETCH_THREADS");
+#ifdef __ANDROID__
+  return env ? std::stoi(env) : 2;
+#else
+  return env ? std::stoi(env) : 0;
+#endif
+}();
+
+static nntrainer::TaskExecutor &get_prefetch_executor() {
+  static nntrainer::TaskExecutor executor(
+    "moe_prefetch",
+    static_cast<size_t>(std::max(1, g_prefetch_threads)));
+  return executor;
+}
+
+// Used by SmallThinkerMoEPrefetchLayer to look up the paired compute node.
+SmallThinkerCachedSlimMoELayer *get_cached_slim_layer_for_prefetch(int id) {
+  if (id < 0)
+    return nullptr;
+  std::lock_guard<std::mutex> lock(g_registry_mutex);
+  auto it = g_prefetch_registry.find(id);
+  return it != g_prefetch_registry.end() ? it->second : nullptr;
+}
+
 namespace {
 
 static constexpr size_t SINGLE_INOUT_IDX = 0;
+
+// Set NNTR_RELU_SPARSITY_LOG=1 at runtime to enable per-layer sparsity stats.
+// Evaluated once at first use (static init inside a function would also work).
+static const bool kLogSparsity =
+  (std::getenv("NNTR_RELU_SPARSITY_LOG") != nullptr);
+
+// [SCRATCH Phase-3.0] Bit-exact sparse-FFN ceiling probe. Counts, over the
+// post-ReLU intermediate vector, how many fixed-size groups are FULLY zero:
+//  - grp4: 4 consecutive neurons (ARM q4_0x4 up output-col group skip ceiling)
+//  - grp8: 8 consecutive neurons (x86 q4_0x8 up group skip ceiling)
+//  - blk32: 32 consecutive neurons (down contraction QK4_0 all-zero block skip)
+// Accumulated per layer (serial expert loop), printed + reset per layer.
+// Remove before merge.
+static long long g_grp4_zero = 0, g_grp4_tot = 0;
+static long long g_grp8_zero = 0, g_grp8_tot = 0;
+static long long g_blk32_zero = 0, g_blk32_tot = 0;
 
 void normalize_router_weights(nntrainer::Tensor &topk_values,
                               unsigned int total_tokens, unsigned int topk,
@@ -97,7 +149,10 @@ SmallThinkerCachedSlimMoELayer::SmallThinkerCachedSlimMoELayer() :
   expert_down_proj_indices({}),
   gate_idx(std::numeric_limits<unsigned>::max()),
   router_logits_idx(std::numeric_limits<unsigned>::max()),
-  expert_mask_idx(std::numeric_limits<unsigned>::max()) {}
+  expert_mask_idx(std::numeric_limits<unsigned>::max()),
+  tensors_populated_(false),
+  layer_id_(-1),
+  gate_tensor_ptr_(nullptr) {}
 
 void SmallThinkerCachedSlimMoELayer::finalize(
   nntrainer::InitLayerContext &context) {
@@ -195,6 +250,35 @@ void SmallThinkerCachedSlimMoELayer::finalize(
   // All experts start unloaded; the LRU cache populates them on first use.
   need_load.assign(num_experts, true);
 
+  // Prefetch state — resize to num_experts; tensor ptrs filled on first forward.
+  in_flight_.assign(num_experts, false);
+  expert_gate_tensors_.assign(num_experts, nullptr);
+  expert_up_tensors_.assign(num_experts, nullptr);
+  expert_down_tensors_.assign(num_experts, nullptr);
+  tensors_populated_ = false;
+  gate_tensor_ptr_ = nullptr;
+
+  // Parse layer_id from name "layerN_ffn_down" for the prefetch registry.
+  {
+    const std::string &nm = context.getName();
+    const std::string prefix = "layer";
+    size_t p = nm.find(prefix);
+    if (p != std::string::npos) {
+      size_t q = nm.find('_', p + prefix.size());
+      if (q != std::string::npos) {
+        try {
+          layer_id_ = std::stoi(nm.substr(p + prefix.size(), q - p - prefix.size()));
+        } catch (...) {
+          layer_id_ = -1;
+        }
+      }
+    }
+    if (layer_id_ >= 0 && g_prefetch_threads > 0) {
+      std::lock_guard<std::mutex> lock(g_registry_mutex);
+      g_prefetch_registry[layer_id_] = this;
+    }
+  }
+
   const unsigned batch_size = in_dim.batch();
   const unsigned seq_len = in_dim.height();
   const unsigned total_tokens = batch_size * seq_len;
@@ -212,6 +296,18 @@ void SmallThinkerCachedSlimMoELayer::finalize(
 
 void SmallThinkerCachedSlimMoELayer::forwarding(
   nntrainer::RunLayerContext &context, bool training) {
+  // Populate expert Tensor pointers on the first call so the prefetch node
+  // can activate() the same Tensor objects that compute will read.
+  if (!tensors_populated_) {
+    gate_tensor_ptr_ = &context.getWeight(gate_idx);
+    for (unsigned int i = 0; i < num_experts; ++i) {
+      expert_gate_tensors_[i] = &context.getWeight(expert_gate_proj_indices[i]);
+      expert_up_tensors_[i]   = &context.getWeight(expert_up_proj_indices[i]);
+      expert_down_tensors_[i] = &context.getWeight(expert_down_proj_indices[i]);
+    }
+    tensors_populated_ = true;
+  }
+
   nntrainer::Tensor &input = context.getInput(SINGLE_INOUT_IDX);
   nntrainer::Tensor &router_input = context.getInput(1);
   nntrainer::Tensor &output = context.getOutput(SINGLE_INOUT_IDX);
@@ -260,17 +356,21 @@ void SmallThinkerCachedSlimMoELayer::forwarding(
   std::vector<unsigned int> predicted =
     collect_predicted(router_logits, total_tokens, topk, num_experts);
 
-  long long activate_ns = 0, compute_ns = 0;
+  long long activate_ns = 0, compute_ns = 0, sparsity_nz = 0,
+            sparsity_total = 0;
   for (unsigned int expert_idx = 0; expert_idx < num_experts; ++expert_idx) {
     const auto &assignments = expert_assignments[expert_idx];
     if (assignments.empty())
       continue;
 
     run_active_expert(context, input, output, assignments, expert_idx,
-                      hidden_size, activate_ns, compute_ns);
+                      hidden_size, activate_ns, compute_ns, sparsity_nz,
+                      sparsity_total);
   }
   (void)activate_ns;
   (void)compute_ns;
+  (void)sparsity_nz;
+  (void)sparsity_total;
 
   touch_predicted(predicted);
   evict_experts(context);
@@ -280,11 +380,12 @@ void SmallThinkerCachedSlimMoELayer::forwarding(
   router_input.reshape({batch_size, 1, seq_len, hidden_size});
 }
 
-inline void SmallThinkerCachedSlimMoELayer::compute_expert_forward(
+void SmallThinkerCachedSlimMoELayer::compute_expert_forward(
   const nntrainer::Tensor &input, nntrainer::Tensor &output,
   const std::vector<std::pair<unsigned, float>> &token_assignments,
   const nntrainer::Tensor &gate_proj, const nntrainer::Tensor &up_proj,
-  const nntrainer::Tensor &down_proj, unsigned int hidden_size) {
+  const nntrainer::Tensor &down_proj, unsigned int hidden_size,
+  long long &sparsity_nz, long long &sparsity_total) {
 
   const unsigned intermediate_size = gate_proj.width();
   const unsigned num_tokens = token_assignments.size();
@@ -318,6 +419,28 @@ inline void SmallThinkerCachedSlimMoELayer::compute_expert_forward(
 
     token_input.dot(gate_proj, gate_out);
     acti_func.run_fn(gate_out, acti_out);
+    if (kLogSparsity) {
+      sparsity_total += intermediate_size;
+      const float *d = acti_out.getData<float>();
+      for (unsigned j = 0; j < intermediate_size; ++j)
+        if (d[j] != 0.0f)
+          ++sparsity_nz;
+      // [SCRATCH Phase-3.0] fully-zero group/block census on this token's
+      // post-ReLU vector (the up-skip and down-skip masks).
+      auto count_zero_groups = [&](unsigned g, long long &zero, long long &tot) {
+        for (unsigned base = 0; base + g <= intermediate_size; base += g) {
+          bool all_zero = true;
+          for (unsigned k = 0; k < g; ++k)
+            if (d[base + k] != 0.0f) { all_zero = false; break; }
+          if (all_zero)
+            ++zero;
+          ++tot;
+        }
+      };
+      count_zero_groups(4, g_grp4_zero, g_grp4_tot);
+      count_zero_groups(8, g_grp8_zero, g_grp8_tot);
+      count_zero_groups(32, g_blk32_zero, g_blk32_tot);
+    }
     token_input.dot(up_proj, up_out);
     acti_out.multiply_i(up_out);
 
@@ -340,7 +463,17 @@ bool SmallThinkerCachedSlimMoELayer::run_active_expert(
   nntrainer::Tensor &output,
   const std::vector<std::pair<unsigned, float>> &assignments,
   unsigned int expert_idx, unsigned int hidden_size, long long &activate_ns,
-  long long &compute_ns) {
+  long long &compute_ns, long long &sparsity_nz, long long &sparsity_total) {
+
+  // If a prefetch task is in flight for this expert, wait for it to complete.
+  // This is the fast-path when the prefetch already finished — wait() returns
+  // immediately and the expert is resident. If the task failed (exception), it
+  // clears in_flight_ and leaves need_load=true so we fall through to the
+  // synchronous activate below.
+  {
+    std::unique_lock<std::mutex> lock(cache_mutex);
+    cache_cv_.wait(lock, [&] { return !in_flight_[expert_idx]; });
+  }
 
   bool is_miss;
   {
@@ -348,7 +481,7 @@ bool SmallThinkerCachedSlimMoELayer::run_active_expert(
     is_miss = need_load[expert_idx];
   }
 
-  // On a miss, page the expert in and record it as the most-recently-used.
+  // On a miss (prediction miss or prefetch exception), activate synchronously.
   // activate()/deactivate() must operate on the persistent context weight so
   // that eviction can later munmap the same mapping. We never deactivate here;
   // eviction is deferred to evict_experts().
@@ -364,6 +497,16 @@ bool SmallThinkerCachedSlimMoELayer::run_active_expert(
     loaded_expert_deque.push_back(expert_idx);
     iteration_map[expert_idx] = --loaded_expert_deque.end();
     need_load[expert_idx] = false;
+  } else {
+    // Prefetch hit: expert was activated by the background prefetch worker but
+    // not yet in the LRU (it's in prefetch_staged_). Promote it to LRU now
+    // so eviction and touch_predicted track it correctly.
+    std::lock_guard<std::mutex> lock(cache_mutex);
+    if (prefetch_staged_.erase(static_cast<int>(expert_idx))) {
+      loaded_expert_deque.push_back(expert_idx);
+      iteration_map[expert_idx] = --loaded_expert_deque.end();
+    }
+    // If not in prefetch_staged_ either, it's a normal LRU hit — no action.
   }
 
   auto tc0 = high_resolution_clock::now();
@@ -371,7 +514,8 @@ bool SmallThinkerCachedSlimMoELayer::run_active_expert(
     input, output, assignments,
     context.getWeight(expert_gate_proj_indices[expert_idx]),
     context.getWeight(expert_up_proj_indices[expert_idx]),
-    context.getWeight(expert_down_proj_indices[expert_idx]), hidden_size);
+    context.getWeight(expert_down_proj_indices[expert_idx]), hidden_size,
+    sparsity_nz, sparsity_total);
   auto tc1 = high_resolution_clock::now();
   compute_ns += duration_cast<nanoseconds>(tc1 - tc0).count();
 
@@ -395,6 +539,7 @@ void SmallThinkerCachedSlimMoELayer::touch_predicted(
 
 void SmallThinkerCachedSlimMoELayer::evict_experts(
   nntrainer::RunLayerContext &context) {
+  // Evict from the main LRU until within budget.
   while (true) {
     int target_idx;
     {
@@ -410,11 +555,86 @@ void SmallThinkerCachedSlimMoELayer::evict_experts(
     context.getWeight(expert_up_proj_indices[target_idx]).deactivate();
     context.getWeight(expert_down_proj_indices[target_idx]).deactivate();
   }
+
+  // Evict stale prefetch-staged experts (activated speculatively but not yet
+  // used by compute). Keep up to cache_size staged entries to avoid wasting the
+  // I/O work; evict beyond that budget using the stored Tensor pointers.
+  while (true) {
+    int target_idx;
+    {
+      std::lock_guard<std::mutex> lock(cache_mutex);
+      if (prefetch_staged_.size() <= cache_size)
+        break;
+      target_idx = *prefetch_staged_.begin();
+      prefetch_staged_.erase(prefetch_staged_.begin());
+      need_load[target_idx] = true;
+    }
+    // Use stored Tensor ptrs — these are the same objects as context.getWeight().
+    expert_gate_tensors_[target_idx]->deactivate();
+    expert_up_tensors_[target_idx]->deactivate();
+    expert_down_tensors_[target_idx]->deactivate();
+  }
+}
+
+void SmallThinkerCachedSlimMoELayer::prefetchExperts(
+  const std::vector<unsigned int> &predicted) {
+  if (!tensors_populated_ || g_prefetch_threads == 0)
+    return;
+
+  auto &executor = get_prefetch_executor();
+
+  for (unsigned int e : predicted) {
+    {
+      std::lock_guard<std::mutex> lock(cache_mutex);
+      // Skip if already resident or already being loaded
+      if (!need_load[e] || in_flight_[e])
+        continue;
+      in_flight_[e] = true;
+    }
+
+    nntrainer::Tensor *gate_t = expert_gate_tensors_[e];
+    nntrainer::Tensor *up_t   = expert_up_tensors_[e];
+    nntrainer::Tensor *down_t = expert_down_tensors_[e];
+
+    // Submit background activate() task. On success, transitions to RESIDENT
+    // and pushes into the LRU. On exception, reverts to UNLOADED so compute
+    // falls back to synchronous activate.
+    executor.submit([this, e, gate_t, up_t, down_t](void *) {
+      try {
+        gate_t->activate();
+        up_t->activate();
+        down_t->activate();
+        {
+          std::lock_guard<std::mutex> lock(cache_mutex);
+          need_load[e] = false;
+          in_flight_[e] = false;
+          // Do NOT add to loaded_expert_deque — that would pollute the LRU with
+          // speculative experts and cause evictions of actually-needed entries.
+          // Instead, track in prefetch_staged_; compute promotes to LRU on use.
+          prefetch_staged_.insert(static_cast<int>(e));
+        }
+      } catch (...) {
+        std::lock_guard<std::mutex> lock(cache_mutex);
+        in_flight_[e] = false;
+      }
+      cache_cv_.notify_all();
+    });
+  }
 }
 
 void SmallThinkerCachedSlimMoELayer::incremental_forwarding(
   nntrainer::RunLayerContext &context, unsigned int from, unsigned int to,
   bool training) {
+  // Populate expert Tensor pointers on the first call (decode entry point).
+  if (!tensors_populated_) {
+    gate_tensor_ptr_ = &context.getWeight(gate_idx);
+    for (unsigned int i = 0; i < num_experts; ++i) {
+      expert_gate_tensors_[i] = &context.getWeight(expert_gate_proj_indices[i]);
+      expert_up_tensors_[i]   = &context.getWeight(expert_up_proj_indices[i]);
+      expert_down_tensors_[i] = &context.getWeight(expert_down_proj_indices[i]);
+    }
+    tensors_populated_ = true;
+  }
 
   nntrainer::Tensor &input_ = context.getInput(SINGLE_INOUT_IDX);
   nntrainer::Tensor &router_input_ = context.getInput(1);
@@ -486,11 +706,10 @@ void SmallThinkerCachedSlimMoELayer::incremental_forwarding(
     std::vector<unsigned int> predicted =
       collect_predicted(router_logits, total_tokens, topk, num_experts);
 
-    long long activate_ns = 0, compute_ns = 0;
-#ifdef DEBUG
     int hit_count = 0, miss_count = 0;
+    long long activate_ns = 0, compute_ns = 0, sparsity_nz = 0,
+              sparsity_total = 0;
     auto t_loop0 = high_resolution_clock::now();
-#endif
 
     // Serial outer loop: the Q4_0 expert GEMV parallelizes internally via
     // ThreadManager, and nesting parallel_for deadlocks.
@@ -499,32 +718,47 @@ void SmallThinkerCachedSlimMoELayer::incremental_forwarding(
       if (assignments.empty())
         continue;
 
-      bool is_miss =
-        run_active_expert(context, input, output, assignments, expert_idx,
-                          hidden_size, activate_ns, compute_ns);
-#ifdef DEBUG
-      is_miss ? ++miss_count : ++hit_count;
-#else
-      (void)is_miss;
-#endif
+      bool is_miss = run_active_expert(context, input, output, assignments,
+                                       expert_idx, hidden_size, activate_ns,
+                                       compute_ns, sparsity_nz, sparsity_total);
+      if (kLogSparsity)
+        is_miss ? ++miss_count : ++hit_count;
+      else
+        (void)is_miss;
     }
 
     // Keep predicted experts warm, then evict the coldest beyond cache_size.
     touch_predicted(predicted);
     evict_experts(context);
 
-#ifdef DEBUG
-    auto t_loop1 = high_resolution_clock::now();
-    auto dt = duration_cast<nanoseconds>(t_loop1 - t_loop0);
-    std::cout << context.getName() << " \t| " << dt.count() / 1'000'000 << " ms"
-              << "\t| hit=" << hit_count << " miss=" << miss_count
-              << "\t| activate=" << activate_ns / 1'000'000 << "ms"
-              << " compute=" << compute_ns / 1'000'000 << "ms"
-              << " resident=" << loaded_expert_deque.size() << std::endl;
-#else
-    (void)activate_ns;
-    (void)compute_ns;
-#endif
+    if (kLogSparsity) {
+      auto t_loop1 = high_resolution_clock::now();
+      auto dt = duration_cast<nanoseconds>(t_loop1 - t_loop0);
+      float zero_pct =
+        sparsity_total > 0
+          ? 100.0f * (sparsity_total - sparsity_nz) / sparsity_total
+          : 0.0f;
+      // [SCRATCH Phase-3.0] bit-exact skip ceilings: fraction of fully-zero
+      // groups = fraction of up cols / down K-blocks we can skip reading.
+      auto pct = [](long long z, long long t) {
+        return t > 0 ? 100.0f * (float)z / (float)t : 0.0f;
+      };
+      float up4 = pct(g_grp4_zero, g_grp4_tot);
+      float up8 = pct(g_grp8_zero, g_grp8_tot);
+      float dn32 = pct(g_blk32_zero, g_blk32_tot);
+      std::cout << context.getName() << " \t| " << dt.count() / 1'000'000
+                << " ms"
+                << "\t| hit=" << hit_count << " miss=" << miss_count
+                << "\t| activate=" << activate_ns / 1'000'000 << "ms"
+                << " compute=" << compute_ns / 1'000'000 << "ms"
+                << " resident=" << loaded_expert_deque.size()
+                << "\t| relu_zero=" << zero_pct << "%"
+                << "\t| up_skip4=" << up4 << "% up_skip8=" << up8
+                << "% down_skip32=" << dn32 << "%" << std::endl;
+      g_grp4_zero = g_grp4_tot = 0;
+      g_grp8_zero = g_grp8_tot = 0;
+      g_blk32_zero = g_blk32_tot = 0;
+    }
 
     output.reshape({batch_size, 1, seq_len, hidden_size});
   }
