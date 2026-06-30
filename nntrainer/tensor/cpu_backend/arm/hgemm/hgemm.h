@@ -12,6 +12,9 @@
  *
  */
 
+#ifndef __HGEMM_H__
+#define __HGEMM_H__
+
 /**
  * @brief     hgemm computation with neon : Y = alpha*op(A)*op(B) + beta*C,
  * where op(X) is one of X or X**T
@@ -124,3 +127,5 @@ void hgemm_f16xf16_f32_fmlal(const __fp16 *A, const __fp16 *B, float *C,
                              unsigned int M, unsigned int N, unsigned int K,
                              float alpha, unsigned int lda, unsigned int ldb,
                              unsigned int ldc);
+
+#endif /* __HGEMM_H__ */

@@ -22,6 +22,27 @@
 #include <tensor_dim.h>
 
 namespace nntrainer::neon {
+
+/**
+ * @brief NEON half-precision GEMM: C = alpha*op(A)*op(B) + beta*C, all FP16.
+ * @note Declared outside ENABLE_FP16 so consumers built with ENABLE_FP16=0
+ *       (e.g. the CausalLM flash-attention path in mha_core.cpp) can call it;
+ *       the definition lives in libnntrainer (built with ENABLE_FP16=1) and
+ *       resolves at link time. Uses the __fp16 builtin (always available on
+ *       ARM), so no ENABLE_FP16-gated _FP16 type is required.
+ * @param[in] A __fp16 * for Matrix A
+ * @param[in] B __fp16 * for Matrix B
+ * @param[in] C __fp16 * for Matrix C
+ * @param[in] M number of op(A)'s and C's row
+ * @param[in] N number of op(B)'s and C's columns
+ * @param[in] K number of op(A)'s and columns and op(B)'s rows
+ * @param[in] alpha float number
+ * @param[in] beta float number
+ */
+void hgemm_f16xf16_f16(const __fp16 *A, const __fp16 *B, __fp16 *C, uint32_t M,
+                       uint32_t N, uint32_t K, float alpha, float beta,
+                       bool TransA, bool TransB);
+
 #ifdef ENABLE_FP16
 /**
  * @brief Accelerating function for rotary embedding layer forwarding
@@ -241,21 +262,6 @@ void copy_fp16_to_fp32(const unsigned int N, const __fp16 *X, float *Y);
  */
 unsigned int isamax(const unsigned int N, const __fp16 *X);
 
-/**
- * @brief     hgemm computation with neon : Y = alpha*op(A)*op(B) + beta*C,
- * where op(X) is one of X or X**T
- * @param[in] A __fp16 * for Matrix A
- * @param[in] B __fp16 * for Matrix B
- * @param[in] C __fp16 * for Matrix C
- * @param[in] M number of op(A)'s and C's row
- * @param[in] N number of op(B)'s and C's columns
- * @param[in] K number of op(A)'s and columns and op(B)'s rows
- * @param[in] alpha float number
- * @param[in] beta float number
- */
-void custom_hgemm(const __fp16 *A, const __fp16 *B, __fp16 *C, uint32_t M,
-                  uint32_t N, uint32_t K, float alpha, float beta, bool TransA,
-                  bool TransB);
 /**
  * @brief squared root transformation with neon : X = sqrt(X)
  *

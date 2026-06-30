@@ -22,7 +22,6 @@
 
 static std::mutex rope_init_mtx;
 
-#include <cpu_backend_gemm_decl.h>
 #include <fp16.h>
 #include <layer_context.h>
 #include <mha_core.h>
@@ -875,7 +874,7 @@ void MHACoreLayer::gemm_attention(nntrainer::Tensor &query_step,
   // K/V always kept as raw FP16 bits (uint16). Q either FP32 (V-JEPA
   // path) or FP16 (when forwarding() pre-converts to FP16; ENABLE_FP16+
   // Android). The FP16 Q path keeps the entire attention in FP16
-  // (custom_hgemm for QK and AV, FP16 softmax) without ever materializing
+  // (hgemm_f16xf16_f16 for QK and AV, FP16 softmax) without ever materializing
   // an FP32 score buffer.
   // Phase 2: flash attention over balanced (h_q, query-block) work units.
   // Q/K/V are de-interleaved lazily per tile inside each work unit:
@@ -934,7 +933,7 @@ void MHACoreLayer::gemm_attention(nntrainer::Tensor &query_step,
       Qp_fp32 = Qtile_fp32.data();
       Qp_fp16 = nullptr;
     }
-    // FP16-throughout path uses Sp16 for both QK output (custom_hgemm,
+    // FP16-throughout path uses Sp16 for both QK output (hgemm_f16xf16_f16,
     // FP16-stored) and AV input (softmax in-place updates the same
     // buffer). The FP32 S buffer is unused in that path.
 
@@ -994,7 +993,7 @@ void MHACoreLayer::gemm_attention(nntrainer::Tensor &query_step,
         //     No FP32 copy of Q is materialized.
         //   - !q_fp16: FP32 Q × FP16 K via shgemm / avx2 / sgemm.
         // The softmax below reads S (FP32) and stores normalized FP16 probs to
-        // Sp16 for the AV custom_hgemm.
+        // Sp16 for the AV hgemm_f16xf16_f16.
 #if defined(__x86_64__) || defined(__i386__)
         nntrainer::avx2::hsgemm_fp16bits_avx2(bq, bk, d, inv_sqrt, Qp_fp32, d,
                                               Kp, d, /** TransB */ true,
@@ -1115,7 +1114,7 @@ void MHACoreLayer::gemm_attention(nntrainer::Tensor &query_step,
             ol[x] += pa[x];
         }
 #elif defined(__ARM_NEON)
-          nntrainer::neon::custom_hgemm(
+          nntrainer::neon::hgemm_f16xf16_f16(
             reinterpret_cast<const __fp16 *>(Sp16.data()),
             reinterpret_cast<const __fp16 *>(Vp),
             reinterpret_cast<__fp16 *>(Pacc16.data()), bq, d, bk, 1.0f, 0.0f,
