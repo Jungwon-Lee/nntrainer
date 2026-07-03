@@ -16,7 +16,7 @@
 #ifndef __XLM_ROBERTA_H__
 #define __XLM_ROBERTA_H__
 
-#include <bert_transformer.h>
+#include "../bert/bert_transformer.h"
 
 namespace causallm {
 

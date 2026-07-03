@@ -26,9 +26,11 @@ CAUSALLM_COMMON_INCLUDES := \
     $(LOCAL_PATH)/../models/qwen3_slim_moe \
     $(LOCAL_PATH)/../models/qwen3_cached_slim_moe \
     $(LOCAL_PATH)/../models/gemma3 \
+    $(LOCAL_PATH)/../models/bert \
     $(LOCAL_PATH)/../models/timm_vit \
     $(LOCAL_PATH)/../models/deberta_v2 \
     $(LOCAL_PATH)/../models/gemma4 \
+    $(LOCAL_PATH)/../models/xlm_roberta \
     $(LOCAL_PATH)/../third_party/minja/include \
     $(LOCAL_PATH)/../third_party \
 
@@ -103,6 +105,8 @@ LOCAL_SRC_FILES := \
     ../models/gemma3/function.cpp \
     ../models/timm_vit/timm_vit_transformer.cpp \
     ../models/deberta_v2/deberta_v2.cpp \
+    ../models/bert/bert_transformer.cpp \
+    ../models/xlm_roberta/xlm_roberta.cpp \
     ../layers/deberta_attention_layer.cpp \
     ../layers/shared_fully_connected_layer.cpp \
     ../api/streamer.cpp \
@@ -238,6 +242,8 @@ LOCAL_SRC_FILES := ../quantize.cpp \
     ../models/gemma4/gemma4_causallm.cpp \
     ../models/gemma3/function.cpp \
     ../models/deberta_v2/deberta_v2.cpp \
+    ../models/bert/bert_transformer.cpp \
+    ../models/xlm_roberta/xlm_roberta.cpp \
     ../layers/deberta_attention_layer.cpp \
     ../layers/shared_fully_connected_layer.cpp \
     ../api/streamer.cpp
@@ -257,8 +263,10 @@ LOCAL_C_INCLUDES += $(NNTRAINER_INCLUDES) \
     $(LOCAL_PATH)/../models/qwen3_slim_moe \
     $(LOCAL_PATH)/../models/qwen3_cached_slim_moe \
     $(LOCAL_PATH)/../models/gemma3 \
+    $(LOCAL_PATH)/../models/bert \
     $(LOCAL_PATH)/../models/deberta_v2 \
     $(LOCAL_PATH)/../models/gemma4 \
+    $(LOCAL_PATH)/../models/xlm_roberta \
 
 include $(BUILD_EXECUTABLE)
 
