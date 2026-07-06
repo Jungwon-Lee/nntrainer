@@ -2533,10 +2533,13 @@ void causal_depthwise_conv1d_k3_decode(const float *x_cur,
 //                       B is N rows x K cols, row-major, ldb columns
 //   TransB=false (AV): C[m, n] = alpha * sum_k A[m,k] * fp16(B[k,n])
 //                       B is K rows x N cols, row-major, ldb columns
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((target("avx2,f16c,fma")))
+#endif
 void hsgemm_fp16bits_avx2(unsigned int M, unsigned int N, unsigned int K,
-                          float alpha, const float *A, unsigned int lda,
-                          const uint16_t *B, unsigned int ldb, bool TransB,
-                          float *C, unsigned int ldc) {
+                     float alpha, const float *A, unsigned int lda,
+                     const uint16_t *B, unsigned int ldb, bool TransB, float *C,
+                     unsigned int ldc) {
   const __m256 valpha = _mm256_set1_ps(alpha);
   if (TransB) {
     // QK path. Block 4 m-rows so we amortize the B (K-row) conversion across 4
