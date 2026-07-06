@@ -23,13 +23,17 @@
 
 namespace nntrainer::neon {
 
+#if defined(ENABLE_FP16) || defined(__ARM_FEATURE_FP16_VECTOR_ARITHMETIC)
 /**
  * @brief NEON half-precision GEMM: C = alpha*op(A)*op(B) + beta*C, all FP16.
  * @note Declared outside ENABLE_FP16 so consumers built with ENABLE_FP16=0
  *       (e.g. the CausalLM flash-attention path in mha_core.cpp) can call it;
  *       the definition lives in libnntrainer (built with ENABLE_FP16=1) and
- *       resolves at link time. Uses the __fp16 builtin (always available on
- *       ARM), so no ENABLE_FP16-gated _FP16 type is required.
+ *       resolves at link time. Gated on __ARM_FEATURE_FP16_VECTOR_ARITHMETIC
+ *       (set only when the compiler is targeting -march=...+fp16) in addition
+ *       to ENABLE_FP16, since __fp16 is not a usable type on ARM targets built
+ *       without that extension (e.g. Tizen armv7l/aarch64, which do not
+ *       support fp16 NEON).
  * @param[in] A __fp16 * for Matrix A
  * @param[in] B __fp16 * for Matrix B
  * @param[in] C __fp16 * for Matrix C
@@ -42,6 +46,7 @@ namespace nntrainer::neon {
 void hgemm_f16xf16_f16(const __fp16 *A, const __fp16 *B, __fp16 *C, uint32_t M,
                        uint32_t N, uint32_t K, float alpha, float beta,
                        bool TransA, bool TransB);
+#endif
 
 #ifdef ENABLE_FP16
 /**
