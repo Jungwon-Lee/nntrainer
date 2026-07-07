@@ -131,45 +131,45 @@ void LayerNormalizationLayer::setProperty(
 
 void LayerNormalizationLayer::forwarding(RunLayerContext &context,
                                          bool training) {
+  if (!context.isStepWindowSet()) {
+    const float epsilon =
+      std::get<props::Epsilon>(layer_normalization_props).get();
+
+    const Tensor &input = context.getInput(SINGLE_INOUT_IDX);
+    Tensor &output = context.getOutput(SINGLE_INOUT_IDX);
+
+    Tensor &gamma = context.getWeight(wt_idx[LNParams::gamma]);
+    Tensor &beta = context.getWeight(wt_idx[LNParams::beta]);
+
+    Tensor &deviation = context.getTensor(wt_idx[LNParams::deviation]);
+    Tensor &variance = context.getTensor(wt_idx[LNParams::variance]);
+    Tensor &inv_std_dev = context.getTensor(wt_idx[LNParams::inv_std_dev]);
+
+    Tensor &temp_full_size = output;
+    Tensor &temp_norm_size = inv_std_dev;
+
+    input.average(normalize_axes, temp_norm_size);
+    input.subtract(temp_norm_size, deviation);
+
+    deviation.pow(2.0, temp_full_size);
+    temp_full_size.average(normalize_axes, variance);
+
+    variance.add_i(epsilon);
+    variance.pow(-0.5, inv_std_dev);
+
+    deviation.multiply(inv_std_dev, output);
+    output.multiply_i(gamma);
+    output.add_i(beta);
+    return;
+  }
+
   const float epsilon =
     std::get<props::Epsilon>(layer_normalization_props).get();
 
   const Tensor &input = context.getInput(SINGLE_INOUT_IDX);
   Tensor &output = context.getOutput(SINGLE_INOUT_IDX);
 
-  Tensor &gamma = context.getWeight(wt_idx[LNParams::gamma]);
-  Tensor &beta = context.getWeight(wt_idx[LNParams::beta]);
-
-  Tensor &deviation = context.getTensor(wt_idx[LNParams::deviation]);
-  Tensor &variance = context.getTensor(wt_idx[LNParams::variance]);
-  Tensor &inv_std_dev = context.getTensor(wt_idx[LNParams::inv_std_dev]);
-
-  Tensor &temp_full_size = output;
-  Tensor &temp_norm_size = inv_std_dev;
-
-  input.average(normalize_axes, temp_norm_size);
-  input.subtract(temp_norm_size, deviation);
-
-  deviation.pow(2.0, temp_full_size);
-  temp_full_size.average(normalize_axes, variance);
-
-  variance.add_i(epsilon);
-  variance.pow(-0.5, inv_std_dev);
-
-  deviation.multiply(inv_std_dev, output);
-  output.multiply_i(gamma);
-  output.add_i(beta);
-}
-
-void LayerNormalizationLayer::incremental_forwarding(RunLayerContext &context,
-                                                     unsigned int from,
-                                                     unsigned int to,
-                                                     bool training) {
-  const float epsilon =
-    std::get<props::Epsilon>(layer_normalization_props).get();
-
-  const Tensor &input = context.getInput(SINGLE_INOUT_IDX);
-  Tensor &output = context.getOutput(SINGLE_INOUT_IDX);
+  auto [from, to] = context.getStepWindow(input.getDim().height());
 
   Tensor &gamma = context.getWeight(wt_idx[LNParams::gamma]);
   Tensor &beta = context.getWeight(wt_idx[LNParams::beta]);

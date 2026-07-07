@@ -38,15 +38,15 @@ void SwiGLULayer::finalize(nntrainer::InitLayerContext &context) {
 }
 
 void SwiGLULayer::forwarding(nntrainer::RunLayerContext &context,
-                             bool training) {}
+                             bool training) {
+  if (!context.isStepWindowSet())
+    return;
 
-void SwiGLULayer::incremental_forwarding(nntrainer::RunLayerContext &context,
-                                         unsigned int from, unsigned int to,
-                                         bool training) {
   nntrainer::Tensor &in1 = context.getInput(INPUT_IDX_1);
   nntrainer::Tensor &in2 = context.getInput(INPUT_IDX_2);
   nntrainer::Tensor &out = context.getOutput(OUT_IDX);
 
+  auto [from, to] = context.getStepWindow(in1.height());
   bool is_prefill = !from || (to - from) > 1;
   if (skip_prefill && is_prefill)
     return;

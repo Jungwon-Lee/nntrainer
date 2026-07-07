@@ -49,28 +49,10 @@ void ScalarMultiplyLayer::finalize(nntrainer::InitLayerContext &context) {
 
 void ScalarMultiplyLayer::forwarding(nntrainer::RunLayerContext &context,
                                      bool training) {
-  // Use incremental_forwarding for actual computation
-  auto &in = context.getInput(SINGLE_INOUT_IDX);
-  auto &out = context.getOutput(SINGLE_INOUT_IDX);
-
-  bool use_weight = std::get<props::UseWeight>(scalar_multiply_props).get();
-
-  float multiplier;
-  if (use_weight) {
-    nntrainer::Tensor &weight = context.getWeight(wt_idx[0]);
-    multiplier = weight.getValue<float>(0, 0, 0, 0);
-  } else {
-    multiplier = std::get<props::ScalarMultiplier>(scalar_multiply_props).get();
-  }
-
-  in.multiply(multiplier, out);
-}
-
-void ScalarMultiplyLayer::incremental_forwarding(
-  nntrainer::RunLayerContext &context, unsigned int from, unsigned int to,
-  bool training) {
+  nntrainer::Tensor &in = context.getInput(SINGLE_INOUT_IDX);
+  auto [from, to] = context.getStepWindow(in.getDim().height());
   bool is_prefill = !from || (to - from) > 1;
-  if (skip_prefill && is_prefill)
+  if (context.isStepWindowSet() && skip_prefill && is_prefill)
     return;
 
   bool use_weight = std::get<props::UseWeight>(scalar_multiply_props).get();
@@ -83,7 +65,6 @@ void ScalarMultiplyLayer::incremental_forwarding(
     multiplier = std::get<props::ScalarMultiplier>(scalar_multiply_props).get();
   }
 
-  nntrainer::Tensor &in = context.getInput(SINGLE_INOUT_IDX);
   nntrainer::Tensor &out = context.getOutput(SINGLE_INOUT_IDX);
 
   ml::train::TensorDim in_dim = in.getDim();

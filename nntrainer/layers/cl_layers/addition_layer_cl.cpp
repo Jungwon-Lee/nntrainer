@@ -29,25 +29,26 @@ void AdditionLayerCL::finalize(InitLayerContext &context) {
 }
 
 void AdditionLayerCL::forwarding(RunLayerContext &context, bool training) {
-  Tensor &hidden_ = context.getOutput(SINGLE_INOUT_IDX);
+  if (!context.isStepWindowSet()) {
+    Tensor &hidden_ = context.getOutput(SINGLE_INOUT_IDX);
 
-  /** @todo check possibility for in-place of addition layer */
-  for (unsigned int idx = 0; idx < context.getNumInputs(); ++idx) {
-    const Tensor &input_ = context.getInput(idx);
-    if (!idx) {
-      hidden_.copy(input_);
-    } else {
-      add_i_cl(hidden_, input_);
+    /** @todo check possibility for in-place of addition layer */
+    for (unsigned int idx = 0; idx < context.getNumInputs(); ++idx) {
+      const Tensor &input_ = context.getInput(idx);
+      if (!idx) {
+        hidden_.copy(input_);
+      } else {
+        add_i_cl(hidden_, input_);
+      }
     }
+    return;
   }
-}
 
-void AdditionLayerCL::incremental_forwarding(RunLayerContext &context,
-                                             unsigned int from, unsigned int to,
-                                             bool training) {
   Tensor &hidden_ = context.getOutput(SINGLE_INOUT_IDX);
   TensorDim hidden_dim = hidden_.getDim();
   TensorDim hidden_step_dim = hidden_dim;
+
+  auto [from, to] = context.getStepWindow(hidden_dim.height());
 
   if (from) {
     NNTR_THROW_IF(to - from != 1, std::invalid_argument)

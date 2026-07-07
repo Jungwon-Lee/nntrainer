@@ -37,32 +37,26 @@ public:
    */
   void forwarding(RunLayerContext &context, bool training) override {
     Tensor &hidden_ = context.getOutput(SINGLE_INOUT_IDX);
-
     const Tensor input = context.getInput(0);
-    forwarding_operation(input, hidden_);
-  }
 
-  /**
-   * @copydoc Layer::incremental_forwarding(RunLayerContext &context, unsigned
-   * int from, unsigned int to, bool training)
-   *
-   */
-  void incremental_forwarding(RunLayerContext &context, unsigned int from,
-                              unsigned int to, bool training) override {
+    if (!context.isStepWindowSet()) {
+      forwarding_operation(input, hidden_);
+      return;
+    }
+
+    auto [from, to] = context.getStepWindow(input.getDim().height());
     if (from) {
       // Normalize to 0-based while preserving step size for multi-token prefill
       to = to - from;
       from = 0;
     }
 
-    Tensor &hidden_ = context.getOutput(SINGLE_INOUT_IDX);
     TensorDim hidden_dim = hidden_.getDim();
     TensorDim hidden_step_dim = hidden_dim;
 
     hidden_step_dim.batch(1);
     hidden_step_dim.height(to - from);
 
-    const Tensor &input = context.getInput(0);
     TensorDim input_dim = input.getDim();
     TensorDim input_step_dim = input_dim;
     input_step_dim.batch(1);
@@ -101,34 +95,26 @@ public:
    */
   void forwarding(RunLayerContext &context, bool training) override {
     Tensor &hidden_ = context.getOutput(SINGLE_INOUT_IDX);
-
     const Tensor &input0 = context.getInput(0);
     const Tensor &input1 = context.getInput(1);
-    forwarding_operation(input0, input1, hidden_);
-  }
 
-  /**
-   * @copydoc Layer::incremental_forwarding(RunLayerContext &context, unsigned
-   * int from, unsigned int to, bool training)
-   *
-   */
-  void incremental_forwarding(RunLayerContext &context, unsigned int from,
-                              unsigned int to, bool training) override {
+    if (!context.isStepWindowSet()) {
+      forwarding_operation(input0, input1, hidden_);
+      return;
+    }
+
+    auto [from, to] = context.getStepWindow(input0.getDim().height());
     if (from) {
       // Normalize to 0-based while preserving step size for multi-token prefill
       to = to - from;
       from = 0;
     }
 
-    Tensor &hidden_ = context.getOutput(SINGLE_INOUT_IDX);
     TensorDim hidden_dim = hidden_.getDim();
     TensorDim hidden_step_dim = hidden_dim;
 
     hidden_step_dim.batch(1);
     hidden_step_dim.height(to - from);
-
-    const Tensor &input0 = context.getInput(0);
-    const Tensor &input1 = context.getInput(1);
 
     TensorDim input0_dim = input0.getDim();
     TensorDim input1_dim = input1.getDim();

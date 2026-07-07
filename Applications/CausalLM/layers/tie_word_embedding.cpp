@@ -183,23 +183,21 @@ void TieWordEmbedding::setProperty(const std::vector<std::string> &values) {
 }
 
 void TieWordEmbedding::forwarding(nntrainer::RunLayerContext &context,
-                                  bool training) {}
+                                  bool training) {
+  if (!context.isStepWindowSet())
+    return;
 
-void TieWordEmbedding::incremental_forwarding(
-  nntrainer::RunLayerContext &context, unsigned int from, unsigned int to,
-  bool training) {
-
-  if (mode_ == mode::embedding)
-    incremental_forwarding_embedding(context, from, to, training);
-  else if (mode_ == mode::lm_head)
-    incremental_forwarding_lmhead(context, from, to, training);
-  else
-    throw std::invalid_argument("lm_head is not supported yet");
+  if (mode_ == mode::embedding) {
+    forwarding_embedding(context, training);
+  } else if (mode_ == mode::lm_head) {
+    forwarding_lmhead(context, training);
+  } else {
+    throw std::invalid_argument("TieWordEmbedding: unknown mode");
+  }
 }
 
-void TieWordEmbedding::incremental_forwarding_embedding(
-  nntrainer::RunLayerContext &context, unsigned int from, unsigned int to,
-  bool training) {
+void TieWordEmbedding::forwarding_embedding(nntrainer::RunLayerContext &context,
+                                            bool training) {
   /// @todo get input and output dimension from input_ and hidden itself
   unsigned int in_dim =
     std::get<nntrainer::props::InDim>(tieword_embedding_props);
@@ -209,12 +207,13 @@ void TieWordEmbedding::incremental_forwarding_embedding(
     std::get<nntrainer::props::Scale>(tieword_embedding_props).empty()
       ? 1.0f
       : std::get<nntrainer::props::Scale>(tieword_embedding_props).get();
-  unsigned int _from = from;
 
   nntrainer::Tensor &weight =
     context.getWeight(weight_idx[TieWordEmbeddingParams::weight]);
   nntrainer::Tensor &hidden_ = context.getOutput(SINGLE_INOUT_IDX);
   nntrainer::Tensor &input_ = context.getInput(SINGLE_INOUT_IDX);
+
+  auto [from, to] = context.getStepWindow(input_.getDim().width());
 
   nntrainer::TensorDim out_tensor_dim =
     nntrainer::TensorDim({1, 1, 1, out_dim}, hidden_.getTensorType());
@@ -297,9 +296,11 @@ void TieWordEmbedding::incremental_forwarding_embedding(
   }
 }
 
-void TieWordEmbedding::incremental_forwarding_lmhead(
-  nntrainer::RunLayerContext &context, unsigned int from, unsigned int to,
-  bool training) {
+void TieWordEmbedding::forwarding_lmhead(nntrainer::RunLayerContext &context,
+                                         bool training) {
+  nntrainer::Tensor &input_ = context.getInput(SINGLE_INOUT_IDX);
+  auto [from, to] = context.getStepWindow(input_.getDim().height());
+
   bool is_prefill = !from;
   if (skip_prefill && is_prefill)
     return;
@@ -307,7 +308,6 @@ void TieWordEmbedding::incremental_forwarding_lmhead(
   nntrainer::Tensor weight =
     context.getWeight(weight_idx[TieWordEmbeddingParams::weight]);
 
-  nntrainer::Tensor &input_ = context.getInput(SINGLE_INOUT_IDX);
   nntrainer::Tensor &hidden_ = context.getOutput(SINGLE_INOUT_IDX);
 
   ml::train::TensorDim input_dim = input_.getDim();

@@ -109,25 +109,22 @@ void FullyConnectedLayerCl::setProperty(
 
 void FullyConnectedLayerCl::forwarding(RunLayerContext &context,
                                        bool training) {
+  if (!context.isStepWindowSet()) {
+    Tensor &weight = context.getWeight(weight_idx[FCParams::weight]);
+    Tensor &hidden_ = context.getOutput(SINGLE_INOUT_IDX);
+    Tensor &input_ = context.getInput(SINGLE_INOUT_IDX);
 
-  Tensor &weight = context.getWeight(weight_idx[FCParams::weight]);
-  Tensor &hidden_ = context.getOutput(SINGLE_INOUT_IDX);
-  Tensor &input_ = context.getInput(SINGLE_INOUT_IDX);
+    hidden_.setZero();
+    dotCl(input_, weight, hidden_);
 
-  hidden_.setZero();
-  dotCl(input_, weight, hidden_);
-
-  if (auto &disable_bias = std::get<props::DisableBias>(*layer_impl_props);
-      disable_bias.empty() || disable_bias.get() == false) {
-    Tensor &bias = context.getWeight(weight_idx[FCParams::bias]);
-    hidden_.add_i(bias);
+    if (auto &disable_bias = std::get<props::DisableBias>(*layer_impl_props);
+        disable_bias.empty() || disable_bias.get() == false) {
+      Tensor &bias = context.getWeight(weight_idx[FCParams::bias]);
+      hidden_.add_i(bias);
+    }
+    return;
   }
-}
 
-void FullyConnectedLayerCl::incremental_forwarding(RunLayerContext &context,
-                                                   unsigned int from,
-                                                   unsigned int to,
-                                                   bool training) {
   Tensor w;
   Tensor &weight = w;
   context.getWeight(weight, weight_idx[FCParams::weight]);
@@ -140,6 +137,8 @@ void FullyConnectedLayerCl::incremental_forwarding(RunLayerContext &context,
 
   TensorDim input_step_dim = input_dim;
   TensorDim hidden_step_dim = hidden_dim;
+
+  auto [from, to] = context.getStepWindow(hidden_dim.height());
 
   if (from) {
     NNTR_THROW_IF(to - from != 1, std::invalid_argument)

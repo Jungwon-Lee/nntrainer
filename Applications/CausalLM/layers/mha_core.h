@@ -15,10 +15,9 @@
  *         in a layer, this layer is attached after Q / K / V
  *         fully connected layer to post-process them
  *         including KV-Cache.
- *         For inference, incremental_forwarding is called,
- *         which takes inputs of seq_len = 1 via `from` / `to` param.
- *         For training, forwarding is called,
- *         which takes all input seqences at once.
+ *         forwarding() dispatches on the incremental step window (see
+ *         RunLayerContext::getStepWindow): a step of seq_len = 1 for
+ *         inference, or the full input sequence at once for training.
  */
 
 #ifndef __MHA_CORE_H__
@@ -268,11 +267,11 @@ public:
     ml::train::TensorDim &cache_value_dim,
     ml::train::TensorDim &cache_value_step_dim, nntrainer::Tensor &sink_step);
   /**
-   * @copydoc Layer::calcDerivative(RunLayerContext &context)
+   * @brief legacy internal-cache incremental forwarding path (used when
+   *        use_external_cache is false)
    */
-  WIN_EXPORT void incremental_forwarding(nntrainer::RunLayerContext &context,
-                                         unsigned int from, unsigned int to,
-                                         bool training) override;
+  void legacyIncrementalForwarding(nntrainer::RunLayerContext &context,
+                                   bool training);
 
   /**
    * @copydoc Layer::calcDerivative(RunLayerContext &context)
@@ -414,7 +413,8 @@ private:
   float rope_partial_rotary_factor = 1.0f;
   unsigned int original_max_position_embeddings = 4096;
 
-  /** set by incremental_forwarding, used by forwarding */
+  /** set from the step window when a generic caller provides one, used by
+   * forwarding's external-cache path */
   unsigned int incremental_step_size = 0;
 
   /****************** ROTARY EMBEDDING *****************/

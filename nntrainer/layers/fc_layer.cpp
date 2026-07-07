@@ -215,50 +215,52 @@ void FullyConnectedLayer::setBatch(nntrainer::RunLayerContext &context,
 }
 
 void FullyConnectedLayer::forwarding(RunLayerContext &context, bool training) {
-  Tensor &weight = context.getWeight(weight_idx[FCParams::weight]);
-  Tensor &hidden_ = context.getOutput(SINGLE_INOUT_IDX);
-  Tensor &input_ = context.getInput(SINGLE_INOUT_IDX);
+  if (!context.isStepWindowSet()) {
+    Tensor &weight = context.getWeight(weight_idx[FCParams::weight]);
+    Tensor &hidden_ = context.getOutput(SINGLE_INOUT_IDX);
+    Tensor &input_ = context.getInput(SINGLE_INOUT_IDX);
 
-  ///@todo This dequantization action should be moved to tensor.dot()
-  if (quantizer != nullptr) {
-    Tensor weight_ = quantizer->dequantize(weight, input_.getDataType());
-    input_.dot(weight_, hidden_, false, false);
-  } else {
-    input_.dot(weight, hidden_, false, false);
-  }
-
-  if (!std::get<props::LoraRank>(fc_props).empty()) {
-    Tensor &loraA = context.getWeight(lora_idx[LORAParams::loraA]);
-    Tensor &loraB = context.getWeight(lora_idx[LORAParams::loraB]);
-    Tensor &hidden_tmp_lora = context.getTensor(lora_idx[LORAParams::loraTmp]);
-    Tensor &hidden_out_lora = context.getTensor(lora_idx[LORAParams::loraOut]);
-
-    input_.dot(loraA, hidden_tmp_lora, false, false);
-    hidden_tmp_lora.dot(loraB, hidden_out_lora, false, false);
-    hidden_out_lora.multiply_i(lora_scaling);
-    hidden_.add_i(hidden_out_lora);
-  }
-
-  if (auto &disable_bias = std::get<props::DisableBias>(*layer_impl_props);
-      disable_bias.empty() || disable_bias.get() == false) {
-    Tensor &bias = context.getWeight(weight_idx[FCParams::bias]);
-    if (bias.getDataType() != hidden_.getDataType()) {
-      Tensor bias_cast = bias.clone(hidden_.getDataType());
-      hidden_.add_i(bias_cast);
+    ///@todo This dequantization action should be moved to tensor.dot()
+    if (quantizer != nullptr) {
+      Tensor weight_ = quantizer->dequantize(weight, input_.getDataType());
+      input_.dot(weight_, hidden_, false, false);
     } else {
-      hidden_.add_i(bias);
+      input_.dot(weight, hidden_, false, false);
     }
-  }
-}
 
-void FullyConnectedLayer::incremental_forwarding(RunLayerContext &context,
-                                                 unsigned int from,
-                                                 unsigned int to,
-                                                 bool training) {
+    if (!std::get<props::LoraRank>(fc_props).empty()) {
+      Tensor &loraA = context.getWeight(lora_idx[LORAParams::loraA]);
+      Tensor &loraB = context.getWeight(lora_idx[LORAParams::loraB]);
+      Tensor &hidden_tmp_lora =
+        context.getTensor(lora_idx[LORAParams::loraTmp]);
+      Tensor &hidden_out_lora =
+        context.getTensor(lora_idx[LORAParams::loraOut]);
+
+      input_.dot(loraA, hidden_tmp_lora, false, false);
+      hidden_tmp_lora.dot(loraB, hidden_out_lora, false, false);
+      hidden_out_lora.multiply_i(lora_scaling);
+      hidden_.add_i(hidden_out_lora);
+    }
+
+    if (auto &disable_bias = std::get<props::DisableBias>(*layer_impl_props);
+        disable_bias.empty() || disable_bias.get() == false) {
+      Tensor &bias = context.getWeight(weight_idx[FCParams::bias]);
+      if (bias.getDataType() != hidden_.getDataType()) {
+        Tensor bias_cast = bias.clone(hidden_.getDataType());
+        hidden_.add_i(bias_cast);
+      } else {
+        hidden_.add_i(bias);
+      }
+    }
+    return;
+  }
+
   Tensor &weight = context.getWeight(weight_idx[FCParams::weight]);
   Tensor &input_ = context.getInput(SINGLE_INOUT_IDX);
   Tensor &hidden_ = context.getOutput(SINGLE_INOUT_IDX);
   Tensor loraA, loraB, hidden_tmp_lora, hidden_out_lora;
+
+  auto [from, to] = context.getStepWindow(input_.height());
 
   bool is_prefill = !from || (to - from) > 1;
   if (skip_prefill && is_prefill)

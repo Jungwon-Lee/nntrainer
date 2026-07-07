@@ -33,24 +33,15 @@ void MultiOutLayer::finalize(InitLayerContext &context) {
 void MultiOutLayer::forwarding(RunLayerContext &context, bool training) {
   if (!context.getInPlace()) {
     const Tensor &input_ = context.getInput(SINGLE_INOUT_IDX);
-    for (unsigned int idx = 0; idx < context.getNumOutputs(); ++idx) {
-      context.getOutput(idx).fill(input_);
-    }
-  }
-}
+    TensorDim input_dim = input_.getDim();
 
-void MultiOutLayer::incremental_forwarding(RunLayerContext &context,
-                                           unsigned int from, unsigned int to,
-                                           bool training) {
-  if (!context.getInPlace()) {
+    auto [from, to] = context.getStepWindow(input_dim.height());
     if (from) {
       // Normalize to 0-based while preserving step size for multi-token prefill
       to = to - from;
       from = 0;
     }
 
-    const Tensor &input_ = context.getInput(SINGLE_INOUT_IDX);
-    TensorDim input_dim = input_.getDim();
     TensorDim input_step_dim = {input_dim.batch(), input_dim.channel(),
                                 to - from, input_dim.width()};
     Tensor input_step = input_.getSharedDataTensor(input_step_dim, 0, true);

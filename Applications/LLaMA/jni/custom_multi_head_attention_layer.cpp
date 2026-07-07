@@ -360,6 +360,16 @@ void MultiHeadAttentionLayer::finalize(InitLayerContext &context) {
 
 void MultiHeadAttentionLayer::forwarding(RunLayerContext &context,
                                          bool training) {
+  if (context.isStepWindowSet()) {
+    Tensor &query_probe = context.getInput(INOUT_INDEX::QUERY);
+    auto [_from, _to] = context.getStepWindow(query_probe.getDim().height());
+    if (!_from) {
+      initial_incremental_forwarding(context, _from, _to, training);
+    } else {
+      incrementalForwardingImpl(context, _from, _to, training);
+    }
+    return;
+  }
 
   const bool disable_bias =
     std::get<props::DisableBias>(*layer_impl_props).get();
@@ -861,16 +871,9 @@ void MultiHeadAttentionLayer::initial_incremental_forwarding(
   // std::cout.flush();
 }
 
-void MultiHeadAttentionLayer::incremental_forwarding(RunLayerContext &context,
-                                                     unsigned int _from,
-                                                     unsigned int _to,
-                                                     bool training) {
-
-  if (!_from) {
-    initial_incremental_forwarding(context, _from, _to, training);
-    return;
-  }
-
+void MultiHeadAttentionLayer::incrementalForwardingImpl(
+  RunLayerContext &context, unsigned int _from, unsigned int _to,
+  bool training) {
   unsigned int max_timestep =
     std::get<props::MaxTimestep>(multi_head_attention_props).get();
 

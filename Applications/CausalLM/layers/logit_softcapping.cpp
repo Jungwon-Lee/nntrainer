@@ -54,12 +54,12 @@ void LogitSoftCappingLayer::forwarding(nntrainer::RunLayerContext &context,
   nntrainer::Tensor &out = context.getOutput(SINGLE_INOUT_IDX);
   out.copyData(in);
 
-  applyOnRange(context, 0, in.height());
-}
+  if (!context.isStepWindowSet()) {
+    applyOnRange(context, 0, in.height());
+    return;
+  }
 
-void LogitSoftCappingLayer::incremental_forwarding(
-  nntrainer::RunLayerContext &context, unsigned int from, unsigned int to,
-  bool training) {
+  auto [from, to] = context.getStepWindow(in.height());
   bool is_prefill = !from || (to - from) > 1;
   if (skip_prefill && is_prefill)
     return;

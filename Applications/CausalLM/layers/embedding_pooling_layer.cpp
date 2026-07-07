@@ -78,43 +78,7 @@ void EmbeddingPoolingLayer::forwarding(nntrainer::RunLayerContext &context,
   nntrainer::Tensor &input = context.getInput(SINGLE_INOUT_IDX);
   nntrainer::Tensor &output = context.getOutput(SINGLE_INOUT_IDX);
 
-  unsigned int batch = input.batch();
-  unsigned int seq_len = input.height();
-  unsigned int dim = input.width();
-
-  bool mode_lasttoken = std::get<props::PoolingModeLastToken>(pooling_props);
-  bool mode_mean = std::get<props::PoolingModeMeanTokens>(pooling_props);
-
-  if (mode_lasttoken) {
-    for (unsigned int b = 0; b < batch; ++b) {
-      // Last token index = seq_len - 1
-      nntrainer::Tensor source = input.getSharedDataTensor(
-        {1, 1, 1, dim}, b * seq_len * dim + (seq_len - 1) * dim);
-
-      nntrainer::Tensor dest =
-        output.getSharedDataTensor({1, 1, 1, dim}, b * dim);
-      dest.copyData(source);
-    }
-  } else if (mode_mean) {
-    for (unsigned int b = 0; b < batch; ++b) {
-      nntrainer::Tensor source =
-        input.getSharedDataTensor({1, 1, seq_len, dim}, b * seq_len * dim);
-      nntrainer::Tensor dest =
-        output.getSharedDataTensor({1, 1, 1, dim}, b * dim);
-
-      // Calculate mean along average dim (height/seq_len)
-      dest.copyData(source.average(2));
-    }
-  } else {
-    output.setZero();
-  }
-}
-
-void EmbeddingPoolingLayer::incremental_forwarding(
-  nntrainer::RunLayerContext &context, unsigned int from, unsigned int to,
-  bool training) {
-  nntrainer::Tensor &input = context.getInput(SINGLE_INOUT_IDX);
-  nntrainer::Tensor &output = context.getOutput(SINGLE_INOUT_IDX);
+  auto [from, to] = context.getStepWindow(input.height());
 
   unsigned int batch = input.batch();
   unsigned int dim = input.width();

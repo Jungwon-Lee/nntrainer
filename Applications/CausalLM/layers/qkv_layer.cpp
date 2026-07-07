@@ -128,12 +128,9 @@ void QKVLayer::setProperty(const std::vector<std::string> &values) {
 }
 
 void QKVLayer::forwarding(nntrainer::RunLayerContext &context, bool training) {
-  return;
-}
+  if (!context.isStepWindowSet())
+    return;
 
-void QKVLayer::incremental_forwarding(nntrainer::RunLayerContext &context,
-                                      unsigned int from, unsigned int to,
-                                      bool training) {
   nntrainer::Tensor &Qweight = context.getWeight(weight_idx[QKVParams::Q]);
   nntrainer::Tensor &Kweight = context.getWeight(weight_idx[QKVParams::K]);
   nntrainer::Tensor &Vweight = context.getWeight(weight_idx[QKVParams::V]);
@@ -143,6 +140,7 @@ void QKVLayer::incremental_forwarding(nntrainer::RunLayerContext &context,
   nntrainer::Tensor &Vhidden_ = context.getOutput(QKVParams::V);
 
   nntrainer::TensorDim input_dim = input_.getDim();
+  auto [from, to] = context.getStepWindow(input_dim.height());
   nntrainer::TensorDim input_step_dim = input_dim;
   input_step_dim.batch(1);
   input_step_dim.height(to - from);

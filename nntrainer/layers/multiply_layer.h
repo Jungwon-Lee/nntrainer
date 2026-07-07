@@ -69,11 +69,9 @@ public:
                             Tensor &hidden) final;
 
   /**
-   * @copydoc Layer::incremental_forwarding(RunLayerContext &context, unsigned
-   * int from, unsigned int to, bool training)
+   * @copydoc Layer::forwarding(RunLayerContext &context, bool training)
    */
-  void incremental_forwarding(RunLayerContext &context, unsigned int from,
-                              unsigned int to, bool training) final;
+  void forwarding(RunLayerContext &context, bool training) final;
 
   /**
    * @copydoc Layer::calcDerivative(RunLayerContext &context)

@@ -147,67 +147,66 @@ void ConcatLayer::forwarding(RunLayerContext &context, bool training) {
   Tensor &output = context.getOutput(SINGLE_INOUT_IDX);
 
   const TensorDim out_dim = output.getDim();
-  output.reshape(output_reshape_helper);
-  unsigned int output_width_offset = 0;
-  TensorDim::TensorType tensor_type = output.getTensorType();
 
-  for (unsigned int idx = 0; idx < context.getNumInputs(); idx++) {
-    Tensor &input = context.getInput(idx);
-    const TensorDim in_dim = input.getDim();
-    auto const &irh = input_reshape_helper[idx];
-    input.reshape(irh);
-    unsigned int data_copy_size = irh.width();
+  if (!context.isStepWindowSet()) {
+    output.reshape(output_reshape_helper);
+    unsigned int output_width_offset = 0;
+    TensorDim::TensorType tensor_type = output.getTensorType();
 
-    /** loop over the dimensions before the concat dimension */
-    if (in_dim.getDataType() == TensorDim::DataType::FP32) {
-      /** copy continous tensor data (reshaped width) */
-      for (unsigned int batch = 0; batch < output.batch(); batch++) {
-        Tensor dest_tensor = Tensor::Map<float>(
-          output.getAddress<float>(batch, 0, 0, output_width_offset),
-          data_copy_size * sizeof(float),
-          {1, 1, 1, data_copy_size, tensor_type});
-        const Tensor source_tensor =
-          Tensor::Map<float>(input.getAddress<float>(batch, 0, 0, 0),
-                             data_copy_size * sizeof(float),
-                             {1, 1, 1, data_copy_size, tensor_type});
-        dest_tensor.copy(source_tensor);
-      }
-    } else if (in_dim.getDataType() == TensorDim::DataType::FP16) {
+    for (unsigned int idx = 0; idx < context.getNumInputs(); idx++) {
+      Tensor &input = context.getInput(idx);
+      const TensorDim in_dim = input.getDim();
+      auto const &irh = input_reshape_helper[idx];
+      input.reshape(irh);
+      unsigned int data_copy_size = irh.width();
+
+      /** loop over the dimensions before the concat dimension */
+      if (in_dim.getDataType() == TensorDim::DataType::FP32) {
+        /** copy continous tensor data (reshaped width) */
+        for (unsigned int batch = 0; batch < output.batch(); batch++) {
+          Tensor dest_tensor = Tensor::Map<float>(
+            output.getAddress<float>(batch, 0, 0, output_width_offset),
+            data_copy_size * sizeof(float),
+            {1, 1, 1, data_copy_size, tensor_type});
+          const Tensor source_tensor =
+            Tensor::Map<float>(input.getAddress<float>(batch, 0, 0, 0),
+                               data_copy_size * sizeof(float),
+                               {1, 1, 1, data_copy_size, tensor_type});
+          dest_tensor.copy(source_tensor);
+        }
+      } else if (in_dim.getDataType() == TensorDim::DataType::FP16) {
 #ifdef ENABLE_FP16
-      /** copy continous tensor data (reshaped width) */
-      for (unsigned int batch = 0; batch < output.batch(); batch++) {
-        Tensor dest_tensor = Tensor::Map<_FP16>(
-          output.getAddress<_FP16>(batch, 0, 0, output_width_offset),
-          data_copy_size * sizeof(_FP16),
-          {1, 1, 1, data_copy_size, tensor_type});
-        const Tensor source_tensor =
-          Tensor::Map<_FP16>(input.getAddress<_FP16>(batch, 0, 0, 0),
-                             data_copy_size * sizeof(_FP16),
-                             {1, 1, 1, data_copy_size, tensor_type});
-        dest_tensor.copy(source_tensor);
-      }
+        /** copy continous tensor data (reshaped width) */
+        for (unsigned int batch = 0; batch < output.batch(); batch++) {
+          Tensor dest_tensor = Tensor::Map<_FP16>(
+            output.getAddress<_FP16>(batch, 0, 0, output_width_offset),
+            data_copy_size * sizeof(_FP16),
+            {1, 1, 1, data_copy_size, tensor_type});
+          const Tensor source_tensor =
+            Tensor::Map<_FP16>(input.getAddress<_FP16>(batch, 0, 0, 0),
+                               data_copy_size * sizeof(_FP16),
+                               {1, 1, 1, data_copy_size, tensor_type});
+          dest_tensor.copy(source_tensor);
+        }
 #else
-      throw std::invalid_argument("Error: enable-fp16 is not enabled");
+        throw std::invalid_argument("Error: enable-fp16 is not enabled");
 #endif
+      }
+
+      output_width_offset += irh.width();
+      input.reshape(in_dim);
     }
 
-    output_width_offset += irh.width();
-    input.reshape(in_dim);
+    output.reshape(out_dim);
+    return;
   }
 
-  output.reshape(out_dim);
-}
-
-void ConcatLayer::incremental_forwarding(RunLayerContext &context,
-                                         unsigned int from, unsigned int to,
-                                         bool training) {
   /**
    * @todo avoid copy by creating input here as a shared_tensor of the output
    * here and then this layer can be in_place as well
    */
-  Tensor &output = context.getOutput(SINGLE_INOUT_IDX);
+  auto [from, to] = context.getStepWindow(out_dim.height());
 
-  const TensorDim out_dim = output.getDim();
   output.reshape(output_reshape_helper);
   unsigned int output_height_offset = 0;
   unsigned int data_copy_size = output_reshape_helper.width();

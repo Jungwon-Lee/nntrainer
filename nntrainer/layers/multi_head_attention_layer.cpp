@@ -332,6 +332,11 @@ void MultiHeadAttentionLayer::finalize(InitLayerContext &context) {
 
 void MultiHeadAttentionLayer::forwarding(RunLayerContext &context,
                                          bool training) {
+  if (context.isStepWindowSet()) {
+    incrementalForwardingImpl(context, training);
+    return;
+  }
+
   const bool disable_bias =
     std::get<props::DisableBias>(*layer_impl_props).get();
 
@@ -542,10 +547,8 @@ void MultiHeadAttentionLayer::forwarding(RunLayerContext &context,
     {batch_size, 1, query_height, num_heads * projected_value_dim_prop}));
 }
 
-void MultiHeadAttentionLayer::incremental_forwarding(RunLayerContext &context,
-                                                     unsigned int from,
-                                                     unsigned int to,
-                                                     bool training) {
+void MultiHeadAttentionLayer::incrementalForwardingImpl(
+  RunLayerContext &context, bool training) {
   const bool disable_bias =
     std::get<props::DisableBias>(*layer_impl_props).get();
 
@@ -579,6 +582,8 @@ void MultiHeadAttentionLayer::incremental_forwarding(RunLayerContext &context,
   TensorDim query_dim = query.getDim();
   TensorDim key_dim = key.getDim();
   TensorDim value_dim = value.getDim();
+
+  auto [from, to] = context.getStepWindow(query_dim.height());
 
   Tensor &output = context.getOutput(INOUT_INDEX::OUTPUT);
 

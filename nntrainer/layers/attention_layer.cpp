@@ -87,40 +87,37 @@ void AttentionLayer::forwarding(RunLayerContext &context, bool training) {
   Tensor &value = context.getInput(wt_idx[AttentionParams::value]);
   Tensor &key = context.getInput(wt_idx[AttentionParams::key]);
 
-  Tensor &output = context.getOutput(SINGLE_INOUT_IDX);
-  Tensor &weights = context.getTensor(wt_idx[AttentionParams::weights]);
+  if (!context.isStepWindowSet()) {
+    Tensor &output = context.getOutput(SINGLE_INOUT_IDX);
+    Tensor &weights = context.getTensor(wt_idx[AttentionParams::weights]);
 
-  query.dotBatched(key, weights, false, true); /** dot 1 */
-  if (std::get<props::ScaledDotProduct>(attention_props).get()) {
-    weights.multiply_i(1 / sqrt((float)key.getDim().width()));
-  }
-  if (std::get<props::CausalMask>(attention_props).get()) {
-    unsigned int mask_size = weights.getDim().width();
-    unsigned int mask_dim_height = mask_size;
-    unsigned int mask_dim_width = mask_size;
+    query.dotBatched(key, weights, false, true); /** dot 1 */
+    if (std::get<props::ScaledDotProduct>(attention_props).get()) {
+      weights.multiply_i(1 / sqrt((float)key.getDim().width()));
+    }
+    if (std::get<props::CausalMask>(attention_props).get()) {
+      unsigned int mask_size = weights.getDim().width();
+      unsigned int mask_dim_height = mask_size;
+      unsigned int mask_dim_width = mask_size;
 
-    Tensor causal_mask(TensorDim{mask_size, mask_size});
+      Tensor causal_mask(TensorDim{mask_size, mask_size});
 
-    causal_mask.setZero();
-    for (unsigned int i = 0; i < mask_dim_height; ++i) {
-      for (unsigned int j = i + 1; j < mask_dim_width; ++j) {
-        causal_mask.setValue(0, 0, i, j, -1e10);
+      causal_mask.setZero();
+      for (unsigned int i = 0; i < mask_dim_height; ++i) {
+        for (unsigned int j = i + 1; j < mask_dim_width; ++j) {
+          causal_mask.setValue(0, 0, i, j, -1e10);
+        }
       }
+
+      weights.add_i(causal_mask);
     }
 
-    weights.add_i(causal_mask);
+    sm.run_fn(weights, weights);       /** softmax */
+    weights.dotBatched(value, output); /** dot 2 */
+    return;
   }
 
-  sm.run_fn(weights, weights);       /** softmax */
-  weights.dotBatched(value, output); /** dot 2 */
-}
-
-void AttentionLayer::incremental_forwarding(RunLayerContext &context,
-                                            unsigned int from, unsigned int to,
-                                            bool training) {
-  Tensor &query = context.getInput(wt_idx[AttentionParams::query]);
-  Tensor &value = context.getInput(wt_idx[AttentionParams::value]);
-  Tensor &key = context.getInput(wt_idx[AttentionParams::key]);
+  auto [from, to] = context.getStepWindow(query.getDim().height());
 
   TensorDim query_dim = query.getDim();
   TensorDim value_dim = value.getDim();

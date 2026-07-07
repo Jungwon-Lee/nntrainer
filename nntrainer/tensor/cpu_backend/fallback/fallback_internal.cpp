@@ -413,8 +413,8 @@ void __fallback_calc_trigonometric_vals_dup(unsigned int N_half, float *angle,
                                             unsigned int from,
                                             float attention_scaling) {
   throw std::runtime_error(
-    "Error: No implementation of rotary embedding layer incremental_forwarding "
-    "with SIMD acceleration except for NEON!");
+    "Error: No implementation of rotary embedding layer step-window "
+    "forwarding with SIMD acceleration except for NEON!");
 }
 
 void __fallback_swiglu(const unsigned int N, float *X, float *Y, float *Z) {

@@ -334,18 +334,18 @@ int DebertaAttentionLayer::lookup_bucket(int relative_pos) const {
   return bucket_table[idx];
 }
 
+/**
+ * @brief forwarding (also handles incremental steps via the context's step
+ * window)
+ */
 void DebertaAttentionLayer::forwarding(nntrainer::RunLayerContext &context,
                                        bool training) {
-  throw nntrainer::exception::not_supported(
-    "DebertaAttentionLayer::forwarding is not supported yet");
-}
+  if (!context.isStepWindowSet())
+    throw nntrainer::exception::not_supported(
+      "DebertaAttentionLayer::forwarding is not supported yet");
 
-/**
- * @brief incremental forwarding
- */
-void DebertaAttentionLayer::incremental_forwarding(
-  nntrainer::RunLayerContext &context, unsigned int _from, unsigned int _to,
-  bool training) {
+  nntrainer::Tensor &query = context.getInput(INPUT_IDX_Q);
+  auto [_from, _to] = context.getStepWindow(query.getDim().height());
 
   auto get_step_dim = [_from, _to](const ml::train::TensorDim &dim) {
     auto step_dim = dim;
@@ -354,7 +354,6 @@ void DebertaAttentionLayer::incremental_forwarding(
     return step_dim;
   };
 
-  nntrainer::Tensor &query = context.getInput(INPUT_IDX_Q);
   nntrainer::Tensor &key = context.getInput(INPUT_IDX_K);
   nntrainer::Tensor &value = context.getInput(INPUT_IDX_V);
   nntrainer::Tensor &output = context.getOutput(OUTPUT_IDX);

@@ -80,10 +80,6 @@ public:
   WIN_EXPORT void forwarding(nntrainer::RunLayerContext &context,
                              bool training) override;
 
-  WIN_EXPORT void incremental_forwarding(nntrainer::RunLayerContext &context,
-                                         unsigned int from, unsigned int to,
-                                         bool training) override;
-
   WIN_EXPORT void calcDerivative(nntrainer::RunLayerContext &context) override;
 
   WIN_EXPORT bool supportBackwarding() const override { return false; };

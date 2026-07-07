@@ -615,15 +615,14 @@ void EmbeddingLayer::forwardSidecarLut(nntrainer::RunLayerContext &context,
 
 void EmbeddingLayer::forwarding(nntrainer::RunLayerContext &context,
                                 bool training) {
-  if (quant_lut) {
-    nntrainer::Tensor &input = context.getInput(SINGLE_INOUT_IDX);
-    forwardSidecarLut(context, 0, input.width());
-  }
-}
+  nntrainer::Tensor &input_ = context.getInput(SINGLE_INOUT_IDX);
+  auto [from, to] = context.getStepWindow(input_.getDim().width());
 
-void EmbeddingLayer::incremental_forwarding(nntrainer::RunLayerContext &context,
-                                            unsigned int from, unsigned int to,
-                                            bool training) {
+  if (!quant_lut && !context.isStepWindowSet()) {
+    // legacy plain forwarding without a quantized LUT is a no-op; the
+    // embedding gather only happens via the incremental step-window path
+    return;
+  }
 
   /// @todo get input and output dimension from input_ and hidden itself
   unsigned int in_dim = std::get<nntrainer::props::InDim>(embedding_props);
@@ -640,7 +639,6 @@ void EmbeddingLayer::incremental_forwarding(nntrainer::RunLayerContext &context,
 
   nntrainer::Tensor &weight = context.getWeight(weight_idx);
   nntrainer::Tensor &hidden_ = context.getOutput(SINGLE_INOUT_IDX);
-  nntrainer::Tensor &input_ = context.getInput(SINGLE_INOUT_IDX);
 
   nntrainer::TensorDim out_tensor_dim =
     nntrainer::TensorDim({1, 1, 1, out_dim}, hidden_.getTensorType());

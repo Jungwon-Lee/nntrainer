@@ -65,19 +65,17 @@ public:
   void forwarding(RunLayerContext &context, bool training) override;
 
   /**
-   * @copydoc Layer::incremental_forwarding(RunLayerContext &context, unsigned
-   * int from, unsigned int to, bool training)
+   * @brief forwarding for the initial (from == 0) incremental step window
    */
   void initial_incremental_forwarding(RunLayerContext &context,
                                       unsigned int from, unsigned int to,
                                       bool training);
 
   /**
-   * @copydoc Layer::incremental_forwarding(RunLayerContext &context, unsigned
-   * int from, unsigned int to, bool training)
+   * @brief forwarding for a subsequent (from > 0) incremental step window
    */
-  void incremental_forwarding(RunLayerContext &context, unsigned int from,
-                              unsigned int to, bool training) override;
+  void incrementalForwardingImpl(RunLayerContext &context, unsigned int from,
+                                 unsigned int to, bool training);
 
   /**
    * @copydoc Layer::calcDerivative(RunLayerContext &context)

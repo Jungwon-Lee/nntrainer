@@ -35,17 +35,17 @@ void PerLayerSliceLayer::finalize(nntrainer::InitLayerContext &context) {
 }
 
 void PerLayerSliceLayer::forwarding(nntrainer::RunLayerContext &context,
-                                    bool training) {}
-
-void PerLayerSliceLayer::incremental_forwarding(
-  nntrainer::RunLayerContext &context, unsigned int from, unsigned int to,
-  bool training) {
-  bool is_prefill = !from || (to - from) > 1;
-  if (skip_prefill && is_prefill)
+                                    bool training) {
+  if (!context.isStepWindowSet())
     return;
 
   auto &in = context.getInput(SINGLE_INOUT_IDX);
   auto &out = context.getOutput(SINGLE_INOUT_IDX);
+
+  auto [from, to] = context.getStepWindow(in.getDim().height());
+  bool is_prefill = !from || (to - from) > 1;
+  if (skip_prefill && is_prefill)
+    return;
 
   unsigned int feature_size = std::get<props::FeatureSize>(slice_props).get();
   unsigned int layer_index = std::get<props::LayerIndex>(slice_props).get();

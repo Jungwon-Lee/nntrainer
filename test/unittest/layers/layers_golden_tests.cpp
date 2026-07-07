@@ -26,8 +26,8 @@
 
 #pragma GCC diagnostic ignored "-Wunused-local-typedefs"
 
-#define EXPECT_IN_RANGE(VAL, MIN, MAX) \
-  EXPECT_GE((VAL), (MIN));             \
+#define EXPECT_IN_RANGE(VAL, MIN, MAX)                                         \
+  EXPECT_GE((VAL), (MIN));                                                     \
   EXPECT_LE((VAL), (MAX))
 
 using namespace nntrainer;
@@ -447,16 +447,16 @@ TEST_P(LayerGoldenTest, run) {
   for (int i = 0; i < 4; ++i) {
     /// warm layer multiple times
     if (use_inc_forward) {
-      layer->incremental_forwarding(rc, 0, inputHeight,
-                                    !shouldForwardWithInferenceMode());
+      rc.setStepWindow(0, inputHeight);
+      layer->forwarding(rc, !shouldForwardWithInferenceMode());
     } else {
       layer->forwarding(rc, !shouldForwardWithInferenceMode());
     }
   }
 
   if (use_inc_forward) {
-    layer->incremental_forwarding(rc, 0, inputHeight,
-                                  !shouldForwardWithInferenceMode());
+    rc.setStepWindow(0, inputHeight);
+    layer->forwarding(rc, !shouldForwardWithInferenceMode());
   } else {
     layer->forwarding(rc, !shouldForwardWithInferenceMode());
   }

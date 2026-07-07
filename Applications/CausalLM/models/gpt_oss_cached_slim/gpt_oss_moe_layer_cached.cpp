@@ -200,17 +200,15 @@ void CachedSlimGptOssMoELayer::finalize(nntrainer::InitLayerContext &context) {
 }
 
 void CachedSlimGptOssMoELayer::forwarding(nntrainer::RunLayerContext &context,
-                                          bool training) {}
-
-void CachedSlimGptOssMoELayer::incremental_forwarding(
-  nntrainer::RunLayerContext &context, unsigned int from, unsigned int to,
-  bool training) {
+                                          bool training) {
 #ifdef DEBUG
   auto t1 = high_resolution_clock::now();
 #endif
 
   nntrainer::Tensor &input_ = context.getInput(SINGLE_INOUT_IDX);
   nntrainer::Tensor &output_ = context.getOutput(SINGLE_INOUT_IDX);
+
+  auto [from, to] = context.getStepWindow(input_.height());
 
   nntrainer::Tensor &router_logits_ = context.getTensor(router_logits_idx);
 

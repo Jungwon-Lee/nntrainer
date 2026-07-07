@@ -276,7 +276,7 @@ void MHACoreLayer::finalize(nntrainer::InitLayerContext &context) {
  *       input.height().
  *
  *       In legacy 3/4-input mode (use_external_cache == false) training is
- *       NYI and incremental_forwarding() is the inference path.
+ *       NYI; legacyIncrementalForwarding() is the inference path.
  *
  *       Input layout for external cache mode:
  *         input[0] = Q   (B, 1, step_size, num_heads_Q  * head_dim)
@@ -288,7 +288,23 @@ void MHACoreLayer::finalize(nntrainer::InitLayerContext &context) {
 void MHACoreLayer::forwarding(nntrainer::RunLayerContext &context,
                               bool training) {
   if (!use_external_cache) {
+    legacyIncrementalForwarding(context, training);
     return;
+  }
+
+  // If a step window was set by a generic incremental-forwarding caller,
+  // sync cache_index/incremental_step_size from it (mirrors the old
+  // incremental_forwarding()'s external-cache delegation to forwarding()).
+  // Do NOT read the window again below: cache_index self-advances by
+  // step_size at the end of this function, and re-reading the window would
+  // double-advance it.
+  bool synced_from_step_window = false;
+  if (context.isStepWindowSet()) {
+    nntrainer::Tensor &query_probe = context.getInput(INOUT_INDEX::QUERY);
+    auto [_from, _to] = context.getStepWindow(query_probe.getDim().height());
+    cache_index = _from;
+    incremental_step_size = _to - _from;
+    synced_from_step_window = true;
   }
 
   nntrainer::Tensor &query = context.getInput(INOUT_INDEX::QUERY);
@@ -396,26 +412,19 @@ void MHACoreLayer::forwarding(nntrainer::RunLayerContext &context,
   }
 
   cache_index += step_size;
+  if (synced_from_step_window)
+    incremental_step_size = 0;
 }
 
 /**
- * @note This incremental_forwarding method is invoked for inference mode.
- *       Please note that Transformer Decoder's MHA takes only one sequence at a
- * step. Incremental forwarding function is used for this.
+ * @note This legacy internal-cache path is invoked for inference mode when
+ *       use_external_cache is false. Please note that Transformer Decoder's
+ *       MHA takes only one sequence at a step.
  */
-void MHACoreLayer::incremental_forwarding(nntrainer::RunLayerContext &context,
-                                          unsigned int _from, unsigned int _to,
-                                          bool training) {
-  // External KV cache path: from/to are interpreted as the absolute write
-  // position; route through forwarding() which reads cache_key/cache_value
-  // from input slots 3/4. forwarding() advances cache_index internally.
-  if (use_external_cache) {
-    cache_index = _from;
-    incremental_step_size = _to - _from;
-    forwarding(context, training);
-    incremental_step_size = 0;
-    return;
-  }
+void MHACoreLayer::legacyIncrementalForwarding(
+  nntrainer::RunLayerContext &context, bool training) {
+  nntrainer::Tensor &query_probe = context.getInput(INOUT_INDEX::QUERY);
+  auto [_from, _to] = context.getStepWindow(query_probe.getDim().height());
 
   /// @todo replace step_size into input height
   unsigned int step_size = _to - _from;

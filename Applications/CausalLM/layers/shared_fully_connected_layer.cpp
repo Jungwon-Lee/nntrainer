@@ -106,26 +106,10 @@ void SharedFullyConnectedLayer::forwarding(nntrainer::RunLayerContext &context,
                                            bool training) {
   nntrainer::Tensor &weight = context.getWeight(weight_idx[FCParams::weight]);
 
-  nntrainer::Tensor &hidden_ = context.getOutput(SINGLE_INOUT_IDX);
-  nntrainer::Tensor &input_ = context.getInput(SINGLE_INOUT_IDX);
-
-  input_.dot(weight, hidden_, false, false);
-
-  if (auto &disable_bias = std::get<nntrainer::props::DisableBias>(fc_props);
-      disable_bias.empty() || disable_bias.get() == false) {
-    nntrainer::Tensor &bias = context.getWeight(weight_idx[FCParams::bias]);
-
-    hidden_.add_i(bias);
-  }
-}
-
-void SharedFullyConnectedLayer::incremental_forwarding(
-  nntrainer::RunLayerContext &context, unsigned int from, unsigned int to,
-  bool training) {
-  nntrainer::Tensor &weight = context.getWeight(weight_idx[FCParams::weight]);
-
   nntrainer::Tensor &input_ = context.getInput(SINGLE_INOUT_IDX);
   nntrainer::Tensor &hidden_ = context.getOutput(SINGLE_INOUT_IDX);
+
+  auto [from, to] = context.getStepWindow(input_.getDim().height());
 
   bool FullInputRange = std::get<props::FullInputRange>(fc_props).get();
 

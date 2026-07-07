@@ -71,21 +71,22 @@ void ActivationLayer::finalize(InitLayerContext &context) {
 }
 
 void ActivationLayer::forwarding(RunLayerContext &context, bool training) {
+  if (!context.isStepWindowSet()) {
+    Tensor &hidden_ = context.getOutput(SINGLE_INOUT_IDX);
+    Tensor &input_ = context.getInput(SINGLE_INOUT_IDX);
+    acti_func.run_fn(input_, hidden_);
+    return;
+  }
+
+  (void)training;
   Tensor &hidden_ = context.getOutput(SINGLE_INOUT_IDX);
   Tensor &input_ = context.getInput(SINGLE_INOUT_IDX);
-  acti_func.run_fn(input_, hidden_);
-}
 
-void ActivationLayer::incremental_forwarding(RunLayerContext &context,
-                                             unsigned int from, unsigned int to,
-                                             bool training) {
-  (void)training;
+  auto [from, to] = context.getStepWindow(hidden_.getDim().height());
+
   bool is_prefill = !from || (to - from) > 1;
   if (skip_prefill && is_prefill)
     return;
-
-  Tensor &hidden_ = context.getOutput(SINGLE_INOUT_IDX);
-  Tensor &input_ = context.getInput(SINGLE_INOUT_IDX);
 
   TensorDim input_dim = input_.getDim();
   TensorDim hidden_dim = hidden_.getDim();

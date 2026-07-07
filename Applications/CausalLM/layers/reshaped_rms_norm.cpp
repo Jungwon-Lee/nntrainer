@@ -49,11 +49,10 @@ void ReshapedRMSNormLayer::finalize(nntrainer::InitLayerContext &context) {
 }
 
 void ReshapedRMSNormLayer::forwarding(nntrainer::RunLayerContext &context,
-                                      bool training) {}
+                                      bool training) {
+  if (!context.isStepWindowSet())
+    return;
 
-void ReshapedRMSNormLayer::incremental_forwarding(
-  nntrainer::RunLayerContext &context, unsigned int from, unsigned int to,
-  bool training) {
   auto &epsilon = std::get<nntrainer::props::Epsilon>(rms_props).get();
 
   nntrainer::Tensor &in = context.getInput(SINGLE_INOUT_IDX);
@@ -61,6 +60,8 @@ void ReshapedRMSNormLayer::incremental_forwarding(
 
   ml::train::TensorDim in_dim = in.getDim();
   ml::train::TensorDim out_dim = out.getDim();
+
+  auto [from, to] = context.getStepWindow(in_dim.height());
 
   ml::train::TensorDim in_step_dim = in_dim;
   ml::train::TensorDim out_step_dim = out_dim;

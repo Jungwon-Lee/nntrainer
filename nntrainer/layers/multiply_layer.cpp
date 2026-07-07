@@ -32,14 +32,14 @@ void MultiplyLayer::forwarding_operation(const Tensor &input0,
   input0.multiply(input1, hidden);
 }
 
-void MultiplyLayer::incremental_forwarding(RunLayerContext &context,
-                                           unsigned int from, unsigned int to,
-                                           bool training) {
+void MultiplyLayer::forwarding(RunLayerContext &context, bool training) {
+  auto [from, to] =
+    context.getStepWindow(context.getInput(0).getDim().height());
   bool is_prefill = !from || (to - from) > 1;
   if (skip_prefill && is_prefill)
     return;
 
-  BinaryOperationLayer::incremental_forwarding(context, from, to, training);
+  BinaryOperationLayer::forwarding(context, training);
 }
 
 void MultiplyLayer::calcDerivative(RunLayerContext &context) {

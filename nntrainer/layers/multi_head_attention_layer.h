@@ -61,13 +61,6 @@ public:
   void forwarding(RunLayerContext &context, bool training) override;
 
   /**
-   * @copydoc Layer::incremental_forwarding(RunLayerContext &context, unsigned
-   * int from, unsigned int to, bool training)
-   */
-  void incremental_forwarding(RunLayerContext &context, unsigned int from,
-                              unsigned int to, bool training) override;
-
-  /**
    * @copydoc Layer::calcDerivative(RunLayerContext &context)
    */
   void calcDerivative(RunLayerContext &context) override;
@@ -128,6 +121,13 @@ private:
    * @param context Context of the layer
    */
   void calcCommonDerivative(RunLayerContext &context);
+
+  /**
+   * @brief forwarding for an active incremental step window
+   * @param context Context of the layer
+   * @param training true if training
+   */
+  void incrementalForwardingImpl(RunLayerContext &context, bool training);
 };
 
 } // namespace nntrainer

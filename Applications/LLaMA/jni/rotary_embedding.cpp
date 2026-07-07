@@ -80,27 +80,23 @@ void RotaryEmbeddingLayer::forwarding(nntrainer::RunLayerContext &context,
   nntrainer::Tensor &in = context.getInput(SINGLE_INOUT_IDX);
   nntrainer::Tensor &out = context.getOutput(SINGLE_INOUT_IDX);
 
-  for (int b = 0; b < (int)in.batch(); b++) {
-    for (int c = 0; c < (int)in.channel(); c++) {
-      for (int h = 0; h < (int)in.height(); h++) {
-        for (int w = 0; w < (int)in.width(); w = w + 2) {
-          float real = in.getValue(b, c, h, w);
-          float imag = in.getValue(b, c, h, w + 1);
-          std::tie(real, imag) = apply_rotary_emb(real, imag, freqs_cis, h, w);
-          out.setValue(b, c, h, w, real);
-          out.setValue(b, c, h, w + 1, imag);
+  if (!context.isStepWindowSet()) {
+    for (int b = 0; b < (int)in.batch(); b++) {
+      for (int c = 0; c < (int)in.channel(); c++) {
+        for (int h = 0; h < (int)in.height(); h++) {
+          for (int w = 0; w < (int)in.width(); w = w + 2) {
+            float real = in.getValue(b, c, h, w);
+            float imag = in.getValue(b, c, h, w + 1);
+            std::tie(real, imag) =
+              apply_rotary_emb(real, imag, freqs_cis, h, w);
+            out.setValue(b, c, h, w, real);
+            out.setValue(b, c, h, w + 1, imag);
+          }
         }
       }
     }
+    return;
   }
-}
-
-void RotaryEmbeddingLayer::incremental_forwarding(
-  nntrainer::RunLayerContext &context, unsigned int from, unsigned int to,
-  bool training) {
-
-  nntrainer::Tensor &in = context.getInput(SINGLE_INOUT_IDX);
-  nntrainer::Tensor &out = context.getOutput(SINGLE_INOUT_IDX);
 
   if (in.getDataType() == ml::train::TensorDim::DataType::FP32) {
     for (int b = 0; b < (int)in.batch(); b++) {

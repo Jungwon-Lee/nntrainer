@@ -157,20 +157,12 @@ void ConcatLayerCl::forwarding(RunLayerContext &context, bool training) {
   Tensor &out = context.getOutput(SINGLE_INOUT_IDX);
   const Tensor &in1 = context.getInput(INPUT_IDX_1);
   const Tensor &in2 = context.getInput(INPUT_IDX_2);
-  ConcatProcess(in1, in2, out);
-}
-
-void ConcatLayerCl::incremental_forwarding(RunLayerContext &context,
-                                           unsigned int from, unsigned int to,
-                                           bool training) {
-  Tensor &out = context.getOutput(SINGLE_INOUT_IDX);
-  const Tensor &in1 = context.getInput(INPUT_IDX_1);
-  const Tensor &in2 = context.getInput(INPUT_IDX_2);
-  if (from) {
-    NNTR_THROW_IF(to - from != 1, std::invalid_argument)
-      << "incremental step size is not 1";
-    from = 0;
-    to = 1;
+  if (context.isStepWindowSet()) {
+    auto [from, to] = context.getStepWindow(in1.getDim().height());
+    if (from) {
+      NNTR_THROW_IF(to - from != 1, std::invalid_argument)
+        << "incremental step size is not 1";
+    }
   }
   ConcatProcess(in1, in2, out);
 }

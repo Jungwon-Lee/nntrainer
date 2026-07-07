@@ -401,7 +401,8 @@ TEST(CausalLmEmbeddingSidecarLut,
     output_data[i] = 999;
 
   auto run_context = makeRunContext(weights, inputs, outputs, tensors);
-  layer.incremental_forwarding(run_context, 7, 8, false);
+  run_context.setStepWindow(7, 8);
+  layer.forwarding(run_context, false);
 
   const uint16_t *output = run_context.getOutput(0).getData<uint16_t>();
   EXPECT_EQ(output[0], 40);

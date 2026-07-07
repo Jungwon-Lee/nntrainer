@@ -115,13 +115,9 @@ void LmHeadLayer::setProperty(const std::vector<std::string> &values) {
 
 void LmHeadLayer::forwarding(nntrainer::RunLayerContext &context,
                              bool training) {
-  throw nntrainer::exception::not_supported(
-    "Forwarding for LMHead layer is not supported");
-}
+  nntrainer::Tensor &input_ = context.getInput(SINGLE_INOUT_IDX);
+  auto [from, to] = context.getStepWindow(input_.getDim().height());
 
-void LmHeadLayer::incremental_forwarding(nntrainer::RunLayerContext &context,
-                                         unsigned int from, unsigned int to,
-                                         bool training) {
   bool is_prefill = !from;
   if (skip_prefill && is_prefill)
     return;
@@ -129,7 +125,6 @@ void LmHeadLayer::incremental_forwarding(nntrainer::RunLayerContext &context,
   nntrainer::Tensor weight =
     context.getWeight(weight_idx[LmHeadParams::weight]);
 
-  nntrainer::Tensor &input_ = context.getInput(SINGLE_INOUT_IDX);
   nntrainer::Tensor &hidden_ = context.getOutput(SINGLE_INOUT_IDX);
 
   ml::train::TensorDim input_dim = input_.getDim();

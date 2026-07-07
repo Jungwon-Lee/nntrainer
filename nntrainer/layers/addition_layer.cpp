@@ -30,27 +30,28 @@ void AdditionLayer::finalize(InitLayerContext &context) {
 }
 
 void AdditionLayer::forwarding(RunLayerContext &context, bool training) {
-  Tensor &hidden_ = context.getOutput(SINGLE_INOUT_IDX);
+  if (!context.isStepWindowSet()) {
+    Tensor &hidden_ = context.getOutput(SINGLE_INOUT_IDX);
 
-  /** @todo check possibility for in-place of addition layer */
-  for (unsigned int idx = 0; idx < context.getNumInputs(); ++idx) {
-    const Tensor &input_ = context.getInput(idx);
-    if (!idx) {
-      hidden_.copy(input_);
-    } else {
-      hidden_.add_i(input_);
+    /** @todo check possibility for in-place of addition layer */
+    for (unsigned int idx = 0; idx < context.getNumInputs(); ++idx) {
+      const Tensor &input_ = context.getInput(idx);
+      if (!idx) {
+        hidden_.copy(input_);
+      } else {
+        hidden_.add_i(input_);
+      }
     }
+    return;
   }
-}
 
-void AdditionLayer::incremental_forwarding(RunLayerContext &context,
-                                           unsigned int from, unsigned int to,
-                                           bool training) {
+  Tensor &hidden_ = context.getOutput(SINGLE_INOUT_IDX);
+  auto [from, to] = context.getStepWindow(hidden_.getDim().height());
+
   bool is_prefill = !from || (to - from) > 1;
   if (skip_prefill && is_prefill)
     return;
 
-  Tensor &hidden_ = context.getOutput(SINGLE_INOUT_IDX);
   TensorDim hidden_dim = hidden_.getDim();
   TensorDim hidden_step_dim = hidden_dim;
 
