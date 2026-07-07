@@ -267,11 +267,10 @@ public:
     ml::train::TensorDim &cache_value_dim,
     ml::train::TensorDim &cache_value_step_dim, nntrainer::Tensor &sink_step);
   /**
-   * @brief legacy internal-cache incremental forwarding path (used when
-   *        use_external_cache is false)
+   * @brief no-cache forwarding path (used when use_external_cache is false),
+   *        e.g. BERT/ViT encoders that never do incremental decode
    */
-  void legacyIncrementalForwarding(nntrainer::RunLayerContext &context,
-                                   bool training);
+  void noCacheForwarding(nntrainer::RunLayerContext &context, bool training);
 
   /**
    * @copydoc Layer::calcDerivative(RunLayerContext &context)
@@ -366,7 +365,6 @@ private:
   size_t num_heads_Q;
   size_t num_heads_KV;
   size_t head_dim;
-  bool cache_shift;
   float theta;
   size_t local_window_size;
   bool use_sink = false;

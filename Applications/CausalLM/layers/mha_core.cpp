@@ -123,8 +123,7 @@ MHACoreLayer::MHACoreLayer() :
   cache_index(0),
   num_heads_Q(0),
   num_heads_KV(0),
-  head_dim(0),
-  cache_shift(false) {
+  head_dim(0) {
   tensor_idx.fill(std::numeric_limits<unsigned>::max());
 }
 
@@ -275,8 +274,10 @@ void MHACoreLayer::finalize(nntrainer::InitLayerContext &context) {
  *       set the write position. After this call cache_index is advanced by
  *       input.height().
  *
- *       In legacy 3/4-input mode (use_external_cache == false) training is
- *       NYI; legacyIncrementalForwarding() is the inference path.
+ *       In 3/4-input mode (use_external_cache == false) there is no
+ *       persistent KV cache: noCacheForwarding() always (re)computes
+ *       attention over the full current input in one shot, e.g. BERT/ViT
+ *       encoders that never do incremental decode.
  *
  *       Input layout for external cache mode:
  *         input[0] = Q   (B, 1, step_size, num_heads_Q  * head_dim)
@@ -288,7 +289,7 @@ void MHACoreLayer::finalize(nntrainer::InitLayerContext &context) {
 void MHACoreLayer::forwarding(nntrainer::RunLayerContext &context,
                               bool training) {
   if (!use_external_cache) {
-    legacyIncrementalForwarding(context, training);
+    noCacheForwarding(context, training);
     return;
   }
 
@@ -417,38 +418,33 @@ void MHACoreLayer::forwarding(nntrainer::RunLayerContext &context,
 }
 
 /**
- * @note This legacy internal-cache path is invoked for inference mode when
- *       use_external_cache is false. Please note that Transformer Decoder's
- *       MHA takes only one sequence at a step.
+ * @note No-cache path: invoked when use_external_cache is false, i.e. for
+ *       encoders (BERT/ViT) that never do incremental decode. The step
+ *       window (see RunLayerContext::getStepWindow) is still consulted,
+ *       since even a single "prefill" call may trim trailing pad positions
+ *       off a fixed-size input buffer, but cache_index is never advanced:
+ *       the internal cache_key/cache_value tensors are pure per-call
+ *       scratch space, never state persisted across forwarding() calls.
  */
-void MHACoreLayer::legacyIncrementalForwarding(
-  nntrainer::RunLayerContext &context, bool training) {
+void MHACoreLayer::noCacheForwarding(nntrainer::RunLayerContext &context,
+                                     bool training) {
   nntrainer::Tensor &query_probe = context.getInput(INOUT_INDEX::QUERY);
+  // Even a single-shot "prefill" call may set a step window that trims
+  // trailing pad positions off the (possibly larger, fixed-size) input
+  // buffer, so the actual valid length must come from getStepWindow(),
+  // not the raw buffer height.
   auto [_from, _to] = context.getStepWindow(query_probe.getDim().height());
-
-  /// @todo replace step_size into input height
   unsigned int step_size = _to - _from;
 
   unsigned int max_timestep =
     std::get<nntrainer::props::MaxTimestep>(mha_core_props).get();
 
+  NNTR_THROW_IF(_to > max_timestep, std::invalid_argument)
+    << "input sequence length shouldn't be greater than max_timestep for "
+       "no-cache attention";
+
   unsigned int from = _from;
   unsigned int to = _to;
-
-  if (to >= max_timestep) {
-    // initial forwarding
-    if (!_from) {
-      throw std::invalid_argument(
-        "to shouldn't greater than max_timestep for initial forwarding");
-    } else {
-      throw std::runtime_error("NYI: cache shift is not available");
-      // exceeds the kv_cache size
-      // KV_cache is shifted!
-      cache_shift = true;
-      from = max_timestep - 1;
-      to = max_timestep;
-    }
-  }
 
   // util fn to compute tensor dimension for one step.
   auto get_step_dim = [step_size](const ml::train::TensorDim &dim) {
@@ -537,11 +533,11 @@ void MHACoreLayer::legacyIncrementalForwarding(
       V_step.copyData(value_step);
       if (use_sink) {
         one_batch_incremental_forwarding(
-          batch, _from, from, to, Q_step, K_step, V_step, O_step, cache_key,
+          batch, from, from, to, Q_step, K_step, V_step, O_step, cache_key,
           cache_value, cache_key_dim, cache_key_step_dim, cache_value_dim,
           cache_value_step_dim, sink);
       } else {
-        one_batch_incremental_forwarding(batch, _from, from, to, Q_step, K_step,
+        one_batch_incremental_forwarding(batch, from, from, to, Q_step, K_step,
                                          V_step, O_step, cache_key, cache_value,
                                          cache_key_dim, cache_key_step_dim,
                                          cache_value_dim, cache_value_step_dim);
@@ -550,26 +546,23 @@ void MHACoreLayer::legacyIncrementalForwarding(
 #else
       if (use_sink) {
         one_batch_incremental_forwarding(
-          batch, _from, from, to, query_step, key_step, value_step, output_step,
+          batch, from, from, to, query_step, key_step, value_step, output_step,
           cache_key, cache_value, cache_key_dim, cache_key_step_dim,
           cache_value_dim, cache_value_step_dim, sink);
       } else {
         one_batch_incremental_forwarding(
-          batch, _from, from, to, query_step, key_step, value_step, output_step,
+          batch, from, from, to, query_step, key_step, value_step, output_step,
           cache_key, cache_value, cache_key_dim, cache_key_step_dim,
           cache_value_dim, cache_value_step_dim);
       }
 #endif
     } else {
       one_batch_incremental_forwarding(
-        batch, _from, from, to, query_step, key_step, value_step, output_step,
+        batch, from, from, to, query_step, key_step, value_step, output_step,
         cache_key, cache_value, cache_key_dim, cache_key_step_dim,
         cache_value_dim, cache_value_step_dim);
     }
   }
-
-  // increase cache size
-  cache_index += step_size;
 }
 
 /**
