@@ -380,12 +380,12 @@ void MHACoreLayer::forwarding(nntrainer::RunLayerContext &context,
       V_step.copyData(value_step);
 
       if (use_sink) {
-        one_batch_incremental_forwarding(
+        compute_batch_attention(
           batch, from, from, to, Q_step, K_step, V_step, O_step, cache_key,
           cache_value, cache_key_dim, cache_key_step_dim, cache_value_dim,
           cache_value_step_dim, sink);
       } else {
-        one_batch_incremental_forwarding(batch, from, from, to, Q_step, K_step,
+        compute_batch_attention(batch, from, from, to, Q_step, K_step,
                                          V_step, O_step, cache_key, cache_value,
                                          cache_key_dim, cache_key_step_dim,
                                          cache_value_dim, cache_value_step_dim);
@@ -393,19 +393,19 @@ void MHACoreLayer::forwarding(nntrainer::RunLayerContext &context,
       output_step.copyData(O_step);
 #else
       if (use_sink) {
-        one_batch_incremental_forwarding(
+        compute_batch_attention(
           batch, from, from, to, query_step, key_step, value_step, output_step,
           cache_key, cache_value, cache_key_dim, cache_key_step_dim,
           cache_value_dim, cache_value_step_dim, sink);
       } else {
-        one_batch_incremental_forwarding(
+        compute_batch_attention(
           batch, from, from, to, query_step, key_step, value_step, output_step,
           cache_key, cache_value, cache_key_dim, cache_key_step_dim,
           cache_value_dim, cache_value_step_dim);
       }
 #endif
     } else {
-      one_batch_incremental_forwarding(
+      compute_batch_attention(
         batch, from, from, to, query_step, key_step, value_step, output_step,
         cache_key, cache_value, cache_key_dim, cache_key_step_dim,
         cache_value_dim, cache_value_step_dim);
@@ -532,12 +532,12 @@ void MHACoreLayer::noCacheForwarding(nntrainer::RunLayerContext &context,
       K_step.copyData(key_step);
       V_step.copyData(value_step);
       if (use_sink) {
-        one_batch_incremental_forwarding(
+        compute_batch_attention(
           batch, from, from, to, Q_step, K_step, V_step, O_step, cache_key,
           cache_value, cache_key_dim, cache_key_step_dim, cache_value_dim,
           cache_value_step_dim, sink);
       } else {
-        one_batch_incremental_forwarding(batch, from, from, to, Q_step, K_step,
+        compute_batch_attention(batch, from, from, to, Q_step, K_step,
                                          V_step, O_step, cache_key, cache_value,
                                          cache_key_dim, cache_key_step_dim,
                                          cache_value_dim, cache_value_step_dim);
@@ -545,19 +545,19 @@ void MHACoreLayer::noCacheForwarding(nntrainer::RunLayerContext &context,
       output_step.copyData(O_step);
 #else
       if (use_sink) {
-        one_batch_incremental_forwarding(
+        compute_batch_attention(
           batch, from, from, to, query_step, key_step, value_step, output_step,
           cache_key, cache_value, cache_key_dim, cache_key_step_dim,
           cache_value_dim, cache_value_step_dim, sink);
       } else {
-        one_batch_incremental_forwarding(
+        compute_batch_attention(
           batch, from, from, to, query_step, key_step, value_step, output_step,
           cache_key, cache_value, cache_key_dim, cache_key_step_dim,
           cache_value_dim, cache_value_step_dim);
       }
 #endif
     } else {
-      one_batch_incremental_forwarding(
+      compute_batch_attention(
         batch, from, from, to, query_step, key_step, value_step, output_step,
         cache_key, cache_value, cache_key_dim, cache_key_step_dim,
         cache_value_dim, cache_value_step_dim);
@@ -692,7 +692,7 @@ void MHACoreLayer::compute_kcaches(nntrainer::Tensor &in,
   }
 }
 
-void MHACoreLayer::one_batch_incremental_forwarding(
+void MHACoreLayer::compute_batch_attention(
   const unsigned int batch, const unsigned int _from, const unsigned int from,
   const unsigned int to, nntrainer::Tensor &query_step,
   nntrainer::Tensor &key_step, nntrainer::Tensor &value_step,
@@ -783,7 +783,7 @@ void MHACoreLayer::one_batch_incremental_forwarding(
                                 cache_to);
 }
 
-void MHACoreLayer::one_batch_incremental_forwarding(
+void MHACoreLayer::compute_batch_attention(
   const unsigned int batch, const unsigned int _from, const unsigned int from,
   const unsigned int to, nntrainer::Tensor &query_step,
   nntrainer::Tensor &key_step, nntrainer::Tensor &value_step,

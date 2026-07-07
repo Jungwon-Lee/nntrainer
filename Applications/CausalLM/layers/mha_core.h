@@ -247,7 +247,7 @@ public:
   WIN_EXPORT void forwarding(nntrainer::RunLayerContext &context,
                              bool training) override;
 
-  void one_batch_incremental_forwarding(
+  void compute_batch_attention(
     const unsigned int batch, const unsigned int _from, const unsigned int from,
     const unsigned int to, nntrainer::Tensor &query_step,
     nntrainer::Tensor &key_step, nntrainer::Tensor &value_step,
@@ -257,7 +257,7 @@ public:
     ml::train::TensorDim &cache_value_dim,
     ml::train::TensorDim &cache_value_step_dim);
 
-  void one_batch_incremental_forwarding(
+  void compute_batch_attention(
     const unsigned int batch, const unsigned int _from, const unsigned int from,
     const unsigned int to, nntrainer::Tensor &query_step,
     nntrainer::Tensor &key_step, nntrainer::Tensor &value_step,
