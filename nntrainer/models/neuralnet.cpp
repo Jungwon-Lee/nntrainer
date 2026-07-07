@@ -520,13 +520,14 @@ sharedConstTensors NeuralNetwork::incremental_forwarding(
     PROFILE_MEM_ANNOTATE("Forwarding for layer: " + node->getName());
 
     auto f = std::get<0>(node->getExecutionOrder());
+    node->getRunContext().setStepWindow(from, to);
     if (exec_mode == ExecutionMode::TRAIN or
         (exec_mode == ExecutionMode::INFERENCE and !fsu_mode)) {
       // auto start_layer =
       //      std::chrono::high_resolution_clock::now(); // log the
       //      start_prefill time
       model_graph.flushCacheExcept(f);
-      node->incremental_forwarding(from, to, training);
+      node->forwarding(training);
       // auto end_layer =
       //  std::chrono::high_resolution_clock::now(); // log th
       //   auto duration_ =
@@ -535,14 +536,13 @@ sharedConstTensors NeuralNetwork::incremental_forwarding(
       // ns"<<std::endl;
     } else {
       model_graph.checkLoadComplete(f);
-      node->incremental_forwarding(from, to, training);
+      node->forwarding(training);
       model_graph.inActive(f);
       model_graph.LoadTensors(f + lookahead);
     }
   };
 
-  return model_graph.incremental_forwarding(from, to, training, forwarding_op,
-                                            stop_cb, userdata);
+  return model_graph.forwarding(training, forwarding_op, stop_cb, userdata);
 }
 
 sharedConstTensors

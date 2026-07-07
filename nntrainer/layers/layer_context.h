@@ -465,7 +465,13 @@ public:
    *
    */
   RunLayerContext() :
-    loss(0.0), is_inplace(false), loss_scale(1.0), restoreData(false) {}
+    loss(0.0),
+    is_inplace(false),
+    loss_scale(1.0),
+    restoreData(false),
+    step_start(0),
+    step_end(0),
+    step_window_set(false) {}
 
   /**
    * @brief Construct a new Run Layer Context object
@@ -995,6 +1001,45 @@ public:
    */
   bool reStoreData() { return restoreData; }
 
+  /**
+   * @brief   set the incremental step window [from, to) for this run
+   *
+   */
+  void setStepWindow(unsigned int from, unsigned int to) {
+    step_start = from;
+    step_end = to;
+    step_window_set = true;
+  }
+
+  /**
+   * @brief   clear the incremental step window
+   *
+   */
+  void clearStepWindow() {
+    step_window_set = false;
+    step_start = 0;
+    step_end = 0;
+  }
+
+  /**
+   * @brief   whether the incremental step window is currently set
+   *
+   */
+  bool isStepWindowSet() const { return step_window_set; }
+
+  /**
+   * @brief   get the incremental step window, defaulting to the full range
+   *
+   * @param full_height height of the layer's own input tensor
+   * @return {step_start, step_end} if set, otherwise {0, full_height}
+   */
+  std::pair<unsigned int, unsigned int>
+  getStepWindow(unsigned int full_height) const {
+    if (step_window_set)
+      return {step_start, step_end};
+    return {0u, full_height};
+  }
+
 private:
   std::tuple<props::Name, props::Trainable> props; /**< props of the layer */
   std::shared_ptr<ContextData> ct_data;
@@ -1002,6 +1047,10 @@ private:
   bool is_inplace;  /**< if the layer is expected to run in-place */
   float loss_scale; /**< loss_scale of the layer */
   bool restoreData; /**< reset output for mixed precsion */
+
+  unsigned int step_start; /**< incremental step absolute 'from' */
+  unsigned int step_end;   /**< incremental step absolute 'to' */
+  bool step_window_set;    /**< whether a per-step window is active */
 
   std::vector<Weight *> weights;   /**< weights of the layer */
   std::vector<Var_Grad *> inputs;  /**< inputs of the layer */
