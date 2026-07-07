@@ -460,8 +460,7 @@ void EmbeddingLayer::finalize(nntrainer::InitLayerContext &context) {
 
   auto &quantized_lut_path = std::get<props::QuantizedLutPath>(embedding_props);
   const bool has_quantized_lut = !quantized_lut_path.empty();
-  if (has_quantized_lut)
-    context.setInputDataType(nntrainer::TensorDim::DataType::FP32);
+  context.setInputDataType(nntrainer::TensorDim::DataType::FP32);
 
   const nntrainer::TensorDim &input_dim =
     context.getInputDimensions()[SINGLE_INOUT_IDX];
