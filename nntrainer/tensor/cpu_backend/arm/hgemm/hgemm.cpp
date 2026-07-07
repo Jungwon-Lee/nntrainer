@@ -210,14 +210,15 @@ void hgemm_K1(const __fp16 *A, const __fp16 *B, __fp16 *C, unsigned int M,
 // must match both A's and B's stride argument (i.e. lda == ldb == K when
 // the rows are contiguous).
 //
-// Requires FEAT_FHM (asimdfhm in /proc/cpuinfo). The target attribute pulls
-// the fp16fml ISA extension in only for this function so the rest of the TU
-// can stay on the build-wide -march flags.
+// Requires FEAT_FHM (asimdfhm in /proc/cpuinfo). The "+feature" target
+// attribute form adds these ISA extensions on top of whatever -march the TU
+// is built with, rather than pinning the function to "arch=armv8.2-a" (which
+// would silently downgrade codegen -- and break builds targeting a stricter
+// baseline like armv9.2-a).
 // Single-output FP16xFP16->FP32 dot, used for the M/N tails of the blocked
 // kernel below. The 4x2 block reproduces this exact accumulation order per
 // output, so blocked and tail results are bit-identical (no token drift).
-__attribute__((
-  target("arch=armv8.2-a+fp16+fp16fml+dotprod+i8mm"))) static inline float
+__attribute__((target("+fp16+fp16fml+dotprod+i8mm"))) static inline float
 fmlal_dot_one(const __fp16 *a_row, const __fp16 *b_row, unsigned int K) {
   float32x4_t acc0 = vdupq_n_f32(0.0f);
   float32x4_t acc1 = vdupq_n_f32(0.0f);
@@ -251,7 +252,7 @@ fmlal_dot_one(const __fp16 *a_row, const __fp16 *b_row, unsigned int K) {
 // per-(m,n) reloads of B by 4x and of A by 2x. Per-output accumulation order
 // is identical to fmlal_dot_one(), so output is bit-identical to the previous
 // naive triple-loop. M/N remainders fall back to fmlal_dot_one().
-__attribute__((target("arch=armv8.2-a+fp16+fp16fml+dotprod+i8mm"))) void
+__attribute__((target("+fp16+fp16fml+dotprod+i8mm"))) void
 hgemm_f16xf16_f32_fmlal(const __fp16 *A, const __fp16 *B, float *C,
                         unsigned int M, unsigned int N, unsigned int K,
                         float alpha, unsigned int lda, unsigned int ldb,
@@ -327,4 +328,14 @@ hgemm_f16xf16_f32_fmlal(const __fp16 *A, const __fp16 *B, float *C,
     for (unsigned int n = 0; n < N; ++n)
       c_row[n] = alpha * fmlal_dot_one(a_row, B + (size_t)n * ldb, K);
   }
+}
+
+#include <sys/auxv.h>
+#ifndef HWCAP_ASIMDFHM
+#define HWCAP_ASIMDFHM (1 << 23)
+#endif
+
+bool hgemm_fp16fml_supported() {
+  static const bool supported = (getauxval(AT_HWCAP) & HWCAP_ASIMDFHM) != 0;
+  return supported;
 }

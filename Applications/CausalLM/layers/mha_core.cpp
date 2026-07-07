@@ -822,6 +822,16 @@ void MHACoreLayer::gemm_attention(nntrainer::Tensor &query_step,
   const bool o_fp16 = (attention_output_step.getDataType() ==
                        ml::train::TensorDim::DataType::FP16);
 
+  // hgemm_f16xf16_f32_fmlal() requires FEAT_FHM (asimdfhm), which is an
+  // optional extension not guaranteed by nntrainer's ARM baseline march --
+  // some ARMv8.2 FP16 devices lack it and would SIGILL on unsupported
+  // vfmlalq_* instructions. Fall back to casting Q to FP32 + shgemm there.
+#if !defined(__x86_64__) && !defined(__i386__) && defined(__ARM_NEON)
+  const bool use_fmlal = q_fp16 && hgemm_fp16fml_supported();
+#else
+  const bool use_fmlal = false;
+#endif
+
   const float *Q = nullptr;
   const uint16_t *Q_fp16_src = nullptr;
   float *O = nullptr;
@@ -895,10 +905,13 @@ void MHACoreLayer::gemm_attention(nntrainer::Tensor &query_step,
     lrow.resize(Bq);
     Ktile.resize((size_t)Bk * d);
     Vtile.resize((size_t)Bk * d);
-    if (q_fp16)
+    if (q_fp16) {
       Qtile_fp16.resize((size_t)Bq * d);
-    else
+      if (!use_fmlal)
+        Qtile_fp32.resize((size_t)Bq * d);
+    } else {
       Qtile_fp32.resize((size_t)Bq * d);
+    }
 #if !defined(__x86_64__) && !defined(__i386__) && defined(__ARM_NEON)
     Sp16.resize((size_t)Bq * Bk);
     Pacc16.resize((size_t)Bq * d);
@@ -915,8 +928,23 @@ void MHACoreLayer::gemm_attention(nntrainer::Tensor &query_step,
       for (unsigned int n = 0; n < bq; ++n)
         std::memcpy(qt + n * d, qsrc + (size_t)(qb + n) * HD_Q,
                     d * sizeof(uint16_t));
-      Qp_fp32 = nullptr;
       Qp_fp16 = Qtile_fp16.data();
+#if defined(__ARM_NEON)
+      if (use_fmlal) {
+        Qp_fp32 = nullptr;
+      } else {
+        // FEAT_FHM unavailable: widen the de-interleaved FP16 Q tile to FP32
+        // once here, then use shgemm (FP32 Q x FP16 K) for QK below.
+        float *qf = Qtile_fp32.data();
+        for (unsigned int n = 0; n < bq * d; ++n)
+          qf[n] = static_cast<float>(reinterpret_cast<const __fp16 *>(qt)[n]);
+        Qp_fp32 = Qtile_fp32.data();
+      }
+#else
+      // q_fp16 is only ever true on the ARM+ENABLE_FP16+Android build; on
+      // x86 this branch is unreachable at runtime.
+      Qp_fp32 = nullptr;
+#endif
     } else {
       float *qt = Qtile_fp32.data();
       const float *qsrc = Q + h_q * d;
@@ -992,7 +1020,7 @@ void MHACoreLayer::gemm_attention(nntrainer::Tensor &query_step,
                                               Kp, d, /** TransB */ true,
                                               S.data(), bk);
 #elif defined(__ARM_NEON)
-        if (q_fp16) {
+        if (q_fp16 && use_fmlal) {
           hgemm_f16xf16_f32_fmlal(reinterpret_cast<const __fp16 *>(Qp_fp16),
                                   reinterpret_cast<const __fp16 *>(Kp), S.data(),
                                   bq, bk, d, inv_sqrt, d, d, bk);
@@ -1005,6 +1033,18 @@ void MHACoreLayer::gemm_attention(nntrainer::Tensor &query_step,
         nntrainer::sgemm(order, false, true, bq, bk, d, inv_sqrt, Qp_fp32, d,
                          Kp, d, 0.0f, S.data(), bk);
 #endif
+
+        // Attention logit softcapping (Gemma-style): tanh(score / cap) * cap,
+        // applied to the scaled QK scores before masking/softmax so this path
+        // matches the reference softmax_triangle(). The per-row masking below
+        // overwrites invalid entries with -INFINITY, so capping the whole
+        // tile first is safe (finite entries only, as intended).
+        if (attn_logit_softcapping > 0.0f) {
+          const float inv_cap = 1.0f / attn_logit_softcapping;
+          const size_t stotal = (size_t)bq * bk;
+          for (size_t t = 0; t < stotal; ++t)
+            S[t] = std::tanh(S[t] * inv_cap) * attn_logit_softcapping;
+        }
 
         for (unsigned int i = 0; i < bq; ++i) {
           float *s = S.data() + (size_t)i * bk;

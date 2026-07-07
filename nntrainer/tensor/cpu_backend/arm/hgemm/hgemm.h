@@ -128,4 +128,16 @@ void hgemm_f16xf16_f32_fmlal(const __fp16 *A, const __fp16 *B, float *C,
                              float alpha, unsigned int lda, unsigned int ldb,
                              unsigned int ldc);
 
+/**
+ * @brief     Runtime check for FEAT_FHM (ARMv8.2-A FMLAL widening, asimdfhm)
+ * support on the current CPU. hgemm_f16xf16_f32_fmlal() is compiled with
+ * "+fp16fml", which is an optional extension on top of nntrainer's baseline
+ * march (armv8.2-a+fp16+dotprod+i8mm) -- some ARMv8.2 FP16 devices lack it,
+ * so callers must check this before dispatching to that kernel and fall back
+ * otherwise (e.g. to shgemm) to avoid SIGILL. Result is cached after the
+ * first call.
+ * @return    true if the CPU supports FEAT_FHM
+ */
+bool hgemm_fp16fml_supported();
+
 #endif /* __HGEMM_H__ */
