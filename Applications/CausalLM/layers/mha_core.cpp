@@ -1532,33 +1532,15 @@ void MHACoreLayer::setBatch(nntrainer::RunLayerContext &context,
 void MHACoreLayer::updateTensorsByInputDimensions(
   nntrainer::RunLayerContext &context,
   std::vector<nntrainer::TensorDim> input_dimensions) {
-  unsigned int height = input_dimensions[0].height();
-  unsigned int &max_timestep =
-    std::get<nntrainer::props::MaxTimestep>(mha_core_props).get();
-  unsigned int &max_new_tokens =
-    std::get<props::MaxNewTokens>(mha_core_props).get();
-  max_position_embeddings =
-    std::get<props::MaxPositionEmbeddings>(mha_core_props).get();
-  max_timestep = height + max_new_tokens;
-
+  // cache_key/cache_value keep their fixed MAX_SEQ_LEN-based size from
+  // finalize(); resizing them here would break decode-phase from/to windows.
   ml::train::TensorDim kv_dim = input_dimensions[0];
   kv_dim.width(kv_dim.width() / (num_heads_Q / num_heads_KV));
-
-  ml::train::TensorDim kv_cache_dim = kv_dim;
-#ifdef ENABLE_FP16
-  kv_cache_dim.setDataType(ml::train::TensorDim::DataType::FP16);
-#else
-  kv_cache_dim.setDataType(ml::train::TensorDim::DataType::UINT16);
-#endif
-  kv_cache_dim.height(max_timestep);
 
   context.updateInput(INOUT_INDEX::QUERY, input_dimensions[0]);
   context.updateInput(INOUT_INDEX::KEY, kv_dim);
   context.updateInput(INOUT_INDEX::VALUE, kv_dim);
   context.updateOutput(0, input_dimensions[0]);
-
-  context.updateTensor(tensor_idx[AttentionParams::cache_key], kv_cache_dim);
-  context.updateTensor(tensor_idx[AttentionParams::cache_value], kv_cache_dim);
 }
 
 void MHACoreLayer::calcDerivative(nntrainer::RunLayerContext &context) {}
