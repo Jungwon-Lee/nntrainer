@@ -14,6 +14,7 @@
 #include <gtest/gtest.h>
 
 #include <activation_layer.h>
+#include <layer_context.h>
 #include <layers_common_tests.h>
 
 auto semantic_activation_relu = LayerSemanticsParamType(
@@ -57,3 +58,34 @@ GTEST_PARAMETER_TEST(
                     semantic_activation_gelu, semantic_activation_sigmoid,
                     semantic_activation_softmax, semantic_activation_tanh,
                     semantic_activation_none));
+
+TEST(ActivationUpdateTensorsByInputDimensions,
+     updates_input_output_height_only) {
+  nntrainer::ActivationLayer acti;
+  std::vector<nntrainer::Weight> weights;
+  std::vector<nntrainer::Var_Grad> inputs = {nntrainer::Var_Grad(
+    nntrainer::TensorDim({1, 1, 4, 8}), nntrainer::Initializer::NONE, true,
+    false, "activation_input")};
+  std::vector<nntrainer::Var_Grad> outputs = {nntrainer::Var_Grad(
+    nntrainer::TensorDim({1, 1, 4, 8}), nntrainer::Initializer::NONE, true,
+    false, "activation_output")};
+  std::vector<nntrainer::Var_Grad> tensors;
+
+  std::vector<nntrainer::Weight *> weights_view;
+  std::vector<nntrainer::Var_Grad *> inputs_view = {&inputs[0]};
+  std::vector<nntrainer::Var_Grad *> outputs_view = {&outputs[0]};
+  std::vector<nntrainer::Var_Grad *> tensors_view;
+
+  nntrainer::RunLayerContext context("activation_update_dims_test", true, 0.0f,
+                                     false, 1.0f, nullptr, false, weights_view,
+                                     inputs_view, outputs_view, tensors_view);
+
+  std::vector<nntrainer::TensorDim> dims = {nntrainer::TensorDim({1, 1, 6, 8})};
+
+  EXPECT_NO_THROW(acti.updateTensorsByInputDimensions(context, dims));
+
+  EXPECT_EQ(context.getInput(0).getDim().height(), 6u);
+  EXPECT_EQ(context.getInput(0).getDim().width(), 8u);
+  EXPECT_EQ(context.getOutput(0).getDim().height(), 6u);
+  EXPECT_EQ(context.getOutput(0).getDim().width(), 8u);
+}

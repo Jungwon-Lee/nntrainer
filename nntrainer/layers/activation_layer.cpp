@@ -111,6 +111,17 @@ void ActivationLayer::incremental_forwarding(RunLayerContext &context,
   }
 }
 
+void ActivationLayer::updateTensorsByInputDimensions(
+  RunLayerContext &context, std::vector<TensorDim> input_dimensions) {
+  TensorDim input_dim = context.getInput(SINGLE_INOUT_IDX).getDim();
+  input_dim.height(input_dimensions[0].height());
+  context.updateInput(SINGLE_INOUT_IDX, input_dim);
+
+  TensorDim output_dim = context.getOutput(SINGLE_INOUT_IDX).getDim();
+  output_dim.height(input_dimensions[0].height());
+  context.updateOutput(SINGLE_INOUT_IDX, output_dim);
+}
+
 void ActivationLayer::calcDerivative(RunLayerContext &context) {
   const Tensor &deriv = context.getIncomingDerivative(SINGLE_INOUT_IDX);
   Tensor &ret = context.getOutgoingDerivative(SINGLE_INOUT_IDX);

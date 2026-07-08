@@ -58,6 +58,15 @@ public:
                               unsigned int to, bool training) override;
 
   /**
+   * @copydoc Layer::updateTensorsByInputDimensions(RunLayerContext &context,
+   * std::vector<TensorDim> input_dimensions)
+   * @details Only height (sequence length) is resized; width (feature dim)
+   * is preserved from finalize().
+   */
+  void updateTensorsByInputDimensions(
+    RunLayerContext &context, std::vector<TensorDim> input_dimensions) override;
+
+  /**
    * @copydoc Layer::calcDerivative(RunLayerContext &context)
    */
   void calcDerivative(RunLayerContext &context) override;
