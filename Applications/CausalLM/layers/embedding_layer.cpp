@@ -522,6 +522,15 @@ void EmbeddingLayer::finalize(nntrainer::InitLayerContext &context) {
     weight_decay, "Embedding", true);
 }
 
+void EmbeddingLayer::updateTensorsByInputDimensions(
+  nntrainer::RunLayerContext &context,
+  std::vector<nntrainer::TensorDim> input_dimensions) {
+  nntrainer::TensorDim output_dim =
+    context.getOutput(SINGLE_INOUT_IDX).getDim();
+  output_dim.height(input_dimensions[0].height());
+  context.updateOutput(SINGLE_INOUT_IDX, output_dim);
+}
+
 void EmbeddingLayer::setProperty(const std::vector<std::string> &values) {
   auto remain_props = loadProperties(values, embedding_props);
   LayerImpl::setProperty(remain_props);

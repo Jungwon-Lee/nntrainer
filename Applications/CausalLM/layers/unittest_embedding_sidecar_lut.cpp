@@ -102,6 +102,31 @@ nntrainer::TensorDim makeInputDim(nntrainer::TensorDim::DataType dtype,
 
 } // namespace
 
+TEST(CausalLmEmbeddingSidecarLut,
+     updateTensorsByInputDimensionsOnlyChangesOutputHeight) {
+  causallm::EmbeddingLayer layer;
+
+  std::vector<nntrainer::Weight> weights;
+  std::vector<nntrainer::Var_Grad> inputs = {nntrainer::Var_Grad(
+    makeInputDim(nntrainer::TensorDim::DataType::FP32, 4),
+    nntrainer::Initializer::NONE, true, false, "embedding_input")};
+  std::vector<nntrainer::Var_Grad> outputs = {nntrainer::Var_Grad(
+    nntrainer::TensorDim({1, 1, 4, 8}), nntrainer::Initializer::NONE, true,
+    false, "embedding_output")};
+  std::vector<nntrainer::Var_Grad> tensors;
+
+  auto context = makeRunContext(weights, inputs, outputs, tensors);
+
+  std::vector<nntrainer::TensorDim> new_dims = {
+    nntrainer::TensorDim({1, 1, 6, 8})};
+  layer.updateTensorsByInputDimensions(context, new_dims);
+
+  EXPECT_EQ(context.getOutput(0).getDim().height(), 6u);
+  EXPECT_EQ(context.getOutput(0).getDim().width(), 8u);
+  EXPECT_EQ(context.getInput(0).getDim().width(), 4u);
+  EXPECT_EQ(context.getInput(0).getDim().height(), 1u);
+}
+
 TEST(CausalLmEmbeddingSidecarLut, rawUint16RequiresExactHintedSize) {
   TempDir dir("nntrainer_embedding_sidecar_raw_u16");
   const auto raw_path = dir.path() / "embedding.u16";

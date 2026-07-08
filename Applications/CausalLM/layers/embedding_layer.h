@@ -149,6 +149,18 @@ public:
   WIN_EXPORT void finalize(nntrainer::InitLayerContext &context) override;
 
   /**
+   * @copydoc Layer::updateTensorsByInputDimensions(RunLayerContext &context,
+   * std::vector<TensorDim> input_dimensions)
+   * @details Only the output tensor's height (sequence length) is updated;
+   * the input tensor keeps the raw token-id shape produced by InputLayer,
+   * which is intentionally excluded from this broadcast (see
+   * NetworkGraph::resetInputDimension).
+   */
+  WIN_EXPORT void updateTensorsByInputDimensions(
+    nntrainer::RunLayerContext &context,
+    std::vector<nntrainer::TensorDim> input_dimensions) override;
+
+  /**
    * @copydoc Layer::forwarding(RunLayerContext &context, bool training)
    */
   WIN_EXPORT void forwarding(nntrainer::RunLayerContext &context,
