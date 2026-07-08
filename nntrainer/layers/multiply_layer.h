@@ -139,6 +139,14 @@ public:
    */
   const std::string getType() const final { return MultiplyLayer::type; };
 
+  /**
+   * @copydoc Layer::updateTensorsByInputDimensions(RunLayerContext &context,
+   * std::vector<TensorDim> input_dimensions)
+   */
+  void updateTensorsByInputDimensions(
+    nntrainer::RunLayerContext &context,
+    std::vector<nntrainer::TensorDim> input_dimensions) final;
+
   std::tuple<props::Print, props::InPlaceProp, props::InPlaceDirectionProp,
              props::SkipPrefill>
     multiply_props;
