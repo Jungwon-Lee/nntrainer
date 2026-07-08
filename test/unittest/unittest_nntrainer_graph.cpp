@@ -403,6 +403,36 @@ TEST(nntrainerGraphUnitTest, NoLossLayerWhenInferenceMode) {
   ans.clear();
 }
 
+TEST(nntrainerGraphUnitTest, ResetInputDimensionSkipsInputLayer) {
+  std::unique_ptr<ml::train::Model> model =
+    ml::train::createModel(ml::train::ModelType::NEURAL_NET);
+
+  model->addLayer(ml::train::createLayer(
+    "input", {nntrainer::withKey("name", "input0"),
+              nntrainer::withKey("input_shape", "1:1:4")}));
+  model->addLayer(ml::train::createLayer(
+    "fully_connected",
+    {nntrainer::withKey("unit", 8),
+     nntrainer::withKey("weight_initializer", "xavier_uniform"),
+     nntrainer::withKey("bias_initializer", "zeros")}));
+
+  model->setProperty({nntrainer::withKey("batch_size", 1),
+                      nntrainer::withKey("model_tensor_type", "FP32-FP32")});
+
+  ASSERT_EQ(model->compile(ml::train::ExecutionMode::INFERENCE), ML_ERROR_NONE);
+  ASSERT_EQ(model->initialize(ml::train::ExecutionMode::INFERENCE),
+            ML_ERROR_NONE);
+
+  std::vector<ml::train::TensorDim> new_dims = {
+    ml::train::TensorDim({1, 1, 6, 8})};
+
+  EXPECT_NO_THROW(model->resetInputDimension(new_dims));
+
+  // input0's own dim (raw width-based shape) must stay untouched.
+  EXPECT_EQ(model->getInputDimension()[0].width(), 4u);
+  EXPECT_EQ(model->getInputDimension()[0].height(), 1u);
+}
+
 void check_sorted_graph(nntrainer::GraphCore graph,
                         std::vector<std::string> expected_layer_names) {
   int expected_graph_size = expected_layer_names.size();

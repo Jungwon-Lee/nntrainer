@@ -338,13 +338,14 @@ void NetworkGraph::resetInputDimension(std::vector<TensorDim> dims) {
     deallocateTensors();
 
   for (auto iter = cbegin(); iter != cend(); iter++) {
-    if ((*iter)->isFinalized()) {
+    /// @note InputLayer is excluded: its raw input tensor doesn't follow the
+    /// height-based convention `dims` uses for every other layer.
+    if ((*iter)->isFinalized() && (*iter)->getType() != InputLayer::type) {
       (*iter)->updateTensorsByInputDimensions(dims);
     }
   }
 
-  if (allocated)
-    allocateTensors(exec_mode);
+  allocateTensors(exec_mode);
 
   /** update input and label dimensions */
   for (unsigned int idx = 0; idx < input_list.size(); idx++)
