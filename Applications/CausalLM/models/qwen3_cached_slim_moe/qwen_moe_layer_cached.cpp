@@ -534,14 +534,27 @@ void CachedSlimMoELayer::updateTensorsByInputDimensions(
   nntrainer::RunLayerContext &context,
   std::vector<nntrainer::TensorDim> input_dimensions) {
   ml::train::TensorDim input_dim = context.getInput(SINGLE_INOUT_IDX).getDim();
+  const unsigned int batch_size = input_dim.batch();
+  const unsigned int new_height = input_dimensions[0].height();
+  const unsigned int total_tokens = batch_size * new_height;
+
+  input_dim.height(new_height);
+  context.updateInput(SINGLE_INOUT_IDX, input_dim);
+
   ml::train::TensorDim output_dim =
     context.getOutput(SINGLE_INOUT_IDX).getDim();
-
-  input_dim.height(input_dimensions[0].height());
-  output_dim.height(input_dimensions[0].height());
-
-  context.updateInput(SINGLE_INOUT_IDX, input_dim);
+  output_dim.height(new_height);
   context.updateOutput(SINGLE_INOUT_IDX, output_dim);
+
+  ml::train::TensorDim router_logits_dim =
+    context.getTensor(router_logits_idx).getDim();
+  router_logits_dim.batch(total_tokens);
+  context.updateTensor(router_logits_idx, router_logits_dim);
+
+  ml::train::TensorDim expert_mask_dim =
+    context.getTensor(expert_mask_idx).getDim();
+  expert_mask_dim.width(total_tokens);
+  context.updateTensor(expert_mask_idx, expert_mask_dim);
 }
 
 } // namespace causallm

@@ -113,6 +113,16 @@ public:
    */
   bool supportBackwarding() const override { return false; }
 
+  /**
+   * @copydoc Layer::updateTensorsByInputDimensions(RunLayerContext &context,
+   * std::vector<TensorDim> input_dimensions)
+   * @details Resizes input/output height plus the router_logits/expert_mask
+   * tensors (sized by total_tokens = batch * seq_len) to match.
+   */
+  void updateTensorsByInputDimensions(
+    nntrainer::RunLayerContext &context,
+    std::vector<nntrainer::TensorDim> input_dimensions) override;
+
   static constexpr const char *type = "moe_slim"; /**< type of the layer */
 
 private:
