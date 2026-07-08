@@ -599,6 +599,12 @@ void CausalLM::run(const WSTR prompt, bool do_sample, const WSTR system_prompt,
 
   auto start_generation = std::chrono::high_resolution_clock::now();
 
+  std::vector<ml::train::TensorDim> decode_input_dims;
+  decode_input_dims.push_back(
+    ml::train::TensorDim(1, 1, 1, static_cast<unsigned int>(DIM)));
+  model->resetInputDimension(decode_input_dims);
+  kv_cache_bound = false;
+
   for (unsigned int token_generation_idx = input_len + 1;
        token_generation_idx < input_len + 1 + NUM_TO_GENERATE &&
        !stop_requested_.load(std::memory_order_acquire);
