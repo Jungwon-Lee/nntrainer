@@ -575,9 +575,7 @@ void CausalLM::run(const WSTR prompt, bool do_sample, const WSTR system_prompt,
 
     // post process of model output
     id_list = generate(output[0], do_sample, 1, ids_history, init_len);
-
-    if (init_len < INIT_SEQ_LEN)
-      registerOutputs(tokenizer, id_list, init_len, eos_list, log_output);
+    registerOutputs(tokenizer, id_list, init_len, eos_list, log_output);
   }
   // output should be deallocated after use
   for (auto &out : output) {
