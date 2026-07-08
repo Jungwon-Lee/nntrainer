@@ -1534,13 +1534,26 @@ void MHACoreLayer::updateTensorsByInputDimensions(
   std::vector<nntrainer::TensorDim> input_dimensions) {
   // cache_key/cache_value keep their fixed MAX_SEQ_LEN-based size from
   // finalize(); resizing them here would break decode-phase from/to windows.
-  ml::train::TensorDim kv_dim = input_dimensions[0];
-  kv_dim.width(kv_dim.width() / (num_heads_Q / num_heads_KV));
+  // QUERY/KEY/VALUE/OUTPUT widths are also preserved from finalize(), since
+  // hidden_size / (num_heads_Q/num_heads_KV) != head_dim whenever
+  // head_dim != hidden_size / num_heads_Q (e.g. Qwen3). Only height changes.
+  unsigned int height = input_dimensions[0].height();
 
-  context.updateInput(INOUT_INDEX::QUERY, input_dimensions[0]);
-  context.updateInput(INOUT_INDEX::KEY, kv_dim);
-  context.updateInput(INOUT_INDEX::VALUE, kv_dim);
-  context.updateOutput(0, input_dimensions[0]);
+  ml::train::TensorDim query_dim =
+    context.getInput(INOUT_INDEX::QUERY).getDim();
+  query_dim.height(height);
+  ml::train::TensorDim key_dim = context.getInput(INOUT_INDEX::KEY).getDim();
+  key_dim.height(height);
+  ml::train::TensorDim value_dim =
+    context.getInput(INOUT_INDEX::VALUE).getDim();
+  value_dim.height(height);
+  ml::train::TensorDim output_dim = context.getOutput(0).getDim();
+  output_dim.height(height);
+
+  context.updateInput(INOUT_INDEX::QUERY, query_dim);
+  context.updateInput(INOUT_INDEX::KEY, key_dim);
+  context.updateInput(INOUT_INDEX::VALUE, value_dim);
+  context.updateOutput(0, output_dim);
 }
 
 void MHACoreLayer::calcDerivative(nntrainer::RunLayerContext &context) {}

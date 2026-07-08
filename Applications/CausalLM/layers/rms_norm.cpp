@@ -125,8 +125,17 @@ void RMSNormLayer::incremental_forwarding(nntrainer::RunLayerContext &context,
 void RMSNormLayer::updateTensorsByInputDimensions(
   nntrainer::RunLayerContext &context,
   std::vector<nntrainer::TensorDim> input_dimensions) {
-  context.updateInput(SINGLE_INOUT_IDX, input_dimensions[0]);
-  context.updateOutput(SINGLE_INOUT_IDX, input_dimensions[0]);
+  // Only height is updated; width is preserved from finalize(), since it
+  // need not match the broadcast hidden_size width.
+  nntrainer::TensorDim input_dim = context.getInput(SINGLE_INOUT_IDX).getDim();
+  nntrainer::TensorDim output_dim =
+    context.getOutput(SINGLE_INOUT_IDX).getDim();
+
+  input_dim.height(input_dimensions[0].height());
+  output_dim.height(input_dimensions[0].height());
+
+  context.updateInput(SINGLE_INOUT_IDX, input_dim);
+  context.updateOutput(SINGLE_INOUT_IDX, output_dim);
 }
 
 void RMSNormLayer::calcDerivative(nntrainer::RunLayerContext &context) {

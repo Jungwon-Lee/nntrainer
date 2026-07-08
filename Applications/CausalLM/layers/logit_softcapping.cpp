@@ -113,8 +113,16 @@ void LogitSoftCappingLayer::applyOnRange(nntrainer::RunLayerContext &context,
 void LogitSoftCappingLayer::updateTensorsByInputDimensions(
   nntrainer::RunLayerContext &context,
   std::vector<nntrainer::TensorDim> input_dimensions) {
-  context.updateInput(SINGLE_INOUT_IDX, input_dimensions[0]);
-  context.updateOutput(SINGLE_INOUT_IDX, input_dimensions[0]);
+  // This layer sits on lm_head's output, whose height is fixed at 1
+  // regardless of prompt length; propagate that actual height instead of
+  // the broadcast sequence length.
+  nntrainer::TensorDim input_dim = context.getInput(SINGLE_INOUT_IDX).getDim();
+  nntrainer::TensorDim output_dim =
+    context.getOutput(SINGLE_INOUT_IDX).getDim();
+
+  output_dim.height(input_dim.height());
+
+  context.updateOutput(SINGLE_INOUT_IDX, output_dim);
 }
 
 void LogitSoftCappingLayer::calcDerivative(

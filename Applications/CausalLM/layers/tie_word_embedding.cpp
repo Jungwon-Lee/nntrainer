@@ -426,10 +426,12 @@ void TieWordEmbedding::updateTensorsByInputDimensions(
 
   if (mode_ == mode::embedding) {
     in_dim.width(height);
+    out_dim.height(height);
   } else {
+    // lm_head mode: output is always the last-token logits (height == 1,
+    // fixed in finalize_lmhead()); only the input sequence length changes.
     in_dim.height(height);
   }
-  out_dim.height(height);
 
   context.updateInput(SINGLE_INOUT_IDX, in_dim);
   context.updateOutput(SINGLE_INOUT_IDX, out_dim);
