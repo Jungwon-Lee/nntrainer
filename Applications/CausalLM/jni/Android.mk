@@ -34,6 +34,7 @@ CAUSALLM_COMMON_INCLUDES := \
     $(LOCAL_PATH)/../models/lfm2 \
     $(LOCAL_PATH)/../third_party/minja/include \
     $(LOCAL_PATH)/../third_party \
+    $(LOCAL_PATH)/../third_party/nlohmann \
 
 # Prebuilt nntrainer libraries
 include $(CLEAR_VARS)
@@ -69,6 +70,7 @@ LOCAL_SRC_FILES := \
     ../chat_template.cpp \
     ../models/causal_lm.cpp \
     ../models/transformer.cpp \
+    ../models/tokenizer_loader.cpp \
     ../models/sentence_transformer.cpp \
     ../kv_cache_manager.cpp \
     ../models/qwen2/qwen2_causallm.cpp \
@@ -80,7 +82,9 @@ LOCAL_SRC_FILES := \
     ../models/qwen3_cached_slim_moe/qwen3_cached_slim_moe_causallm.cpp \
     ../models/gpt_oss/gptoss_causallm.cpp \
     ../models/gpt_oss_cached_slim/gptoss_cached_slim_causallm.cpp \
-    ../huggingface_tokenizer.cpp \
+    ../tokenizers/huggingface_tokenizer.cpp \
+    ../tokenizers/bpe_tokenizer.cpp \
+    ../tokenizers/wordpiece_tokenizer.cpp \
     ../llm_util.cpp \
     ../layers/embedding_layer.cpp \
     ../layers/embedding_pooling_layer.cpp \
@@ -211,6 +215,10 @@ LOCAL_LDLIBS := -llog -landroid -DENABLE_FP16=1 -DUSE__FP16=1 -D__ARM_NEON__=1 -
 LOCAL_SRC_FILES := ../quantize.cpp \
     ../models/causal_lm.cpp \
     ../models/transformer.cpp \
+    ../models/tokenizer_loader.cpp \
+    ../tokenizers/huggingface_tokenizer.cpp \
+    ../tokenizers/bpe_tokenizer.cpp \
+    ../tokenizers/wordpiece_tokenizer.cpp \
     ../models/sentence_transformer.cpp \
     ../kv_cache_manager.cpp \
     ../models/qwen2/qwen2_causallm.cpp \
@@ -275,6 +283,8 @@ LOCAL_C_INCLUDES += $(NNTRAINER_INCLUDES) \
     $(LOCAL_PATH)/../models/gemma4 \
     $(LOCAL_PATH)/../models/xlm_roberta \
     $(LOCAL_PATH)/../models/lfm2 \
+    $(LOCAL_PATH)/../third_party \
+    $(LOCAL_PATH)/../third_party/nlohmann \
 
 include $(BUILD_EXECUTABLE)
 
