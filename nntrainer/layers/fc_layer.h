@@ -59,6 +59,15 @@ public:
   void forwarding(RunLayerContext &context, bool training) override;
 
   /**
+   * @copydoc Layer::updateTensorsByInputDimensions(RunLayerContext &context,
+   * std::vector<TensorDim> input_dimensions)
+   * @details Only height (sequence length) is resized; width (feature dim)
+   * is preserved from finalize().
+   */
+  void updateTensorsByInputDimensions(
+    RunLayerContext &context, std::vector<TensorDim> input_dimensions) override;
+
+  /**
 ￼   * @copydoc Layer::incremental_forwarding(RunLayerContext &context, unsigned
 ￼   * int from, unsigned int to, bool training)
 ￼   */
