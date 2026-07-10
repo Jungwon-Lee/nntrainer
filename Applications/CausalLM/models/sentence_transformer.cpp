@@ -334,6 +334,15 @@ std::vector<float *> SentenceTransformer::encode(const WSTR prompt,
 
   std::vector<float *> label; // Empty label for inference
 
+  // mha_core derives its step width from the query tensor's own height
+  // rather than an explicit incremental_forwarding from/to, so keep it in
+  // sync via resetInputDimension() whenever the actual token count is
+  // shorter than the compiled INIT_SEQ_LEN. Must happen before
+  // allocateAndBindKVCache(), since resetInputDimension() silently rebinds
+  // the KV cache placeholders back to internal memory.
+  model->resetInputDimension(
+    {ml::train::TensorDim(1, 1, input_len, static_cast<unsigned int>(DIM))});
+
   allocateAndBindKVCache();
   auto build_inference_inputs = [&]() {
     std::vector<std::pair<std::string, float *>> cache_inputs;

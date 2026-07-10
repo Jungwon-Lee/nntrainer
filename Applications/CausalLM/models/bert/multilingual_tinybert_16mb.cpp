@@ -71,6 +71,13 @@ std::vector<float *> MultilingualTinyBert::encode(const WSTR prompt,
   std::vector<float *> input = {input_sample, position_ids, token_type_ids};
   std::vector<float *> label;
 
+  // mha_core (internal-cache path) derives its step width from the query
+  // tensor's own height rather than an explicit incremental_forwarding
+  // from/to, so keep it in sync via resetInputDimension() whenever the
+  // actual token count is shorter than the compiled INIT_SEQ_LEN.
+  model->resetInputDimension(
+    {ml::train::TensorDim(1, 1, input_len, static_cast<unsigned int>(DIM))});
+
   auto start_prefill = std::chrono::high_resolution_clock::now();
   auto output = model->incremental_inference(BATCH_SIZE, input, label,
                                              input_len, 0, input_len, false);

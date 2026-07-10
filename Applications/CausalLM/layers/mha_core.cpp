@@ -269,14 +269,17 @@ void MHACoreLayer::finalize(nntrainer::InitLayerContext &context) {
 /**
  * @note In external KV cache mode (use_external_cache == true), this
  *       implements the inference forward pass using cache tensors supplied
- *       as input[3] (cache_key) and input[4] (cache_value). The host (e.g.
- *       KVCacheManager via setExternalTensors) is responsible for owning
- *       these buffers and for calling setCacheIndex() before each step to
- *       set the write position. After this call cache_index is advanced by
- *       input.height().
+ *       as input[3] (cache_key) and input[4] (cache_value). The step width
+ *       comes from the query tensor's own height, and the absolute write
+ *       position from the bound KVCacheManager (see setKVCacheManager()) when
+ *       present, or the local cache_index fallback otherwise. Callers must
+ *       keep the query/key/value tensors' height in sync with the true token
+ *       count via resetInputDimension() / updateTensorsByInputDimensions()
+ *       before each prefill/decode phase change.
  *
- *       In legacy 3/4-input mode (use_external_cache == false) training is
- *       NYI and incremental_forwarding() is the inference path.
+ *       In legacy 3/4-input mode (use_external_cache == false), this is a
+ *       single-shot, non-autoregressive path (e.g. BERT/TimmViT-style
+ *       encoders) that always starts at position 0; training is NYI.
  *
  *       Input layout for external cache mode:
  *         input[0] = Q   (B, 1, step_size, num_heads_Q  * head_dim)
@@ -287,33 +290,57 @@ void MHACoreLayer::finalize(nntrainer::InitLayerContext &context) {
  */
 void MHACoreLayer::forwarding(nntrainer::RunLayerContext &context,
                               bool training) {
-  if (!use_external_cache) {
-    return;
-  }
-
   nntrainer::Tensor &query = context.getInput(INOUT_INDEX::QUERY);
   nntrainer::Tensor &key = context.getInput(INOUT_INDEX::KEY);
   nntrainer::Tensor &value = context.getInput(INOUT_INDEX::VALUE);
   nntrainer::Tensor &output = context.getOutput(INOUT_INDEX::OUTPUT);
-
-  nntrainer::Tensor &cache_key = context.getInput(3);
-  nntrainer::Tensor &cache_value = context.getInput(4);
 
   nntrainer::Tensor sink;
   if (use_sink) {
     sink = context.getWeight(sink_idx);
   }
 
-  unsigned int step_size = (incremental_step_size > 0)
-                             ? incremental_step_size
-                             : (unsigned int)query.height();
-  unsigned int from =
-    kv_cache_manager_ ? kv_cache_manager_->getPosition() : cache_index;
-  unsigned int to = from + step_size;
+  // Step width always comes from the query tensor's own height. Callers are
+  // responsible for keeping it accurate via resetInputDimension() /
+  // updateTensorsByInputDimensions() before each prefill/decode phase change
+  // (see CausalLM::run() and the CausalLM test harness).
+  unsigned int step_size = (unsigned int)query.height();
+  unsigned int from;
+  unsigned int to;
+  nntrainer::Tensor *cache_key_ptr;
+  nntrainer::Tensor *cache_value_ptr;
+
+  if (use_external_cache) {
+    // Absolute write position: when a KVCacheManager is bound, it is the
+    // single source of truth (multiple mha_core layers, one per attention
+    // block, must agree on one shared position); otherwise fall back to the
+    // locally-tracked cache_index (back-compat / no host wiring, e.g.
+    // SentenceTransformer's single-shot use at position 0).
+    from = kv_cache_manager_ ? kv_cache_manager_->getPosition() : cache_index;
+    to = from + step_size;
+    cache_key_ptr = &context.getInput(3);
+    cache_value_ptr = &context.getInput(4);
+  } else {
+    // Legacy internal-cache path: single-shot, non-autoregressive attention
+    // (e.g. BERT/TimmViT-style encoders) that always processes the full
+    // input sequence starting at position 0 in one call.
+    unsigned int max_timestep =
+      std::get<nntrainer::props::MaxTimestep>(mha_core_props).get();
+    from = 0;
+    to = step_size;
+    if (to >= max_timestep) {
+      throw std::invalid_argument(
+        "to shouldn't greater than max_timestep for initial forwarding");
+    }
+    cache_key_ptr = &context.getTensor(tensor_idx[AttentionParams::cache_key]);
+    cache_value_ptr =
+      &context.getTensor(tensor_idx[AttentionParams::cache_value]);
+  }
+  nntrainer::Tensor &cache_key = *cache_key_ptr;
+  nntrainer::Tensor &cache_value = *cache_value_ptr;
   // one_batch_incremental_forwarding() below indexes the cache through the
   // cache_index member; keep it in sync with the resolved absolute position
-  // for this call, whether it came from the bound manager or the local
-  // fallback.
+  // for this call.
   cache_index = from;
 
   auto get_step_dim = [step_size](const ml::train::TensorDim &dim) {
@@ -406,184 +433,11 @@ void MHACoreLayer::forwarding(nntrainer::RunLayerContext &context,
   // completes (see CausalLM::advanceKVCachePosition), since multiple
   // mha_core layers (one per attention block) all forward within a single
   // step. Self-advancing here would over-advance the shared position.
-  if (!kv_cache_manager_) {
+  // The internal-cache path is single-shot (always starts back at position 0
+  // on the next call), so it never advances either.
+  if (use_external_cache && !kv_cache_manager_) {
     cache_index += step_size;
   }
-}
-
-/**
- * @note This incremental_forwarding method is invoked for inference mode.
- *       Please note that Transformer Decoder's MHA takes only one sequence at a
- * step. Incremental forwarding function is used for this.
- */
-void MHACoreLayer::incremental_forwarding(nntrainer::RunLayerContext &context,
-                                          unsigned int _from, unsigned int _to,
-                                          bool training) {
-  // External KV cache path: route through forwarding(), which reads
-  // cache_key/cache_value from input slots 3/4. The step size (width of this
-  // call) still comes from _to - _from: some callers (e.g. test harnesses)
-  // invoke incremental_forwarding() without resizing the input tensors via
-  // resetInputDimension() first, so query.height() alone isn't a reliable
-  // stand-in for the step width. The *absolute* write position is what moves
-  // to the KVCacheManager: when bound, it is the single source of truth
-  // instead of the _from plumbed through here, since multiple mha_core
-  // layers (one per attention block) must agree on one shared position.
-  // Without a bound manager (back-compat / no host wiring), fall back to the
-  // legacy contract of taking the absolute position from _from directly.
-  if (use_external_cache) {
-    incremental_step_size = _to - _from;
-    if (!kv_cache_manager_) {
-      cache_index = _from;
-    }
-    forwarding(context, training);
-    incremental_step_size = 0;
-    return;
-  }
-
-  /// @todo replace step_size into input height
-  unsigned int step_size = _to - _from;
-
-  unsigned int max_timestep =
-    std::get<nntrainer::props::MaxTimestep>(mha_core_props).get();
-
-  unsigned int from = _from;
-  unsigned int to = _to;
-
-  if (to >= max_timestep) {
-    // initial forwarding
-    if (!_from) {
-      throw std::invalid_argument(
-        "to shouldn't greater than max_timestep for initial forwarding");
-    } else {
-      throw std::runtime_error("NYI: cache shift is not available");
-      // exceeds the kv_cache size
-      // KV_cache is shifted!
-      cache_shift = true;
-      from = max_timestep - 1;
-      to = max_timestep;
-    }
-  }
-
-  // util fn to compute tensor dimension for one step.
-  auto get_step_dim = [step_size](const ml::train::TensorDim &dim) {
-    auto step_dim = dim;
-    step_dim.batch(1);
-    step_dim.height(step_size);
-    return step_dim;
-  };
-
-  /** incremental forwarding for each batch */
-  nntrainer::Tensor &query =
-    context.getInput(INOUT_INDEX::QUERY); // projected query
-  nntrainer::Tensor &key = context.getInput(INOUT_INDEX::KEY); // projected key
-  nntrainer::Tensor &value =
-    context.getInput(INOUT_INDEX::VALUE); // projected value
-  nntrainer::Tensor &output =
-    context.getOutput(INOUT_INDEX::OUTPUT); // output to be projected
-
-  nntrainer::Tensor &cache_key =
-    context.getTensor(tensor_idx[AttentionParams::cache_key]);
-  nntrainer::Tensor &cache_value =
-    context.getTensor(tensor_idx[AttentionParams::cache_value]);
-
-  nntrainer::Tensor sink;
-  if (use_sink) {
-    sink = context.getWeight(sink_idx);
-  }
-
-  ml::train::TensorDim query_dim =
-    query.getDim(); // (B, 1, seq_len, n_heads_Q * head_dim)
-  ml::train::TensorDim key_dim =
-    key.getDim(); // (B, 1, seq_len, n_heads_KV * head_dim)
-  ml::train::TensorDim value_dim =
-    value.getDim(); // (B, 1, seq_len, n_heads_KV * head_dim)
-  ml::train::TensorDim output_dim =
-    output.getDim(); // (B, 1, seq_len, n_heads_Q * head_dim)
-  ml::train::TensorDim cache_key_dim =
-    cache_key.getDim(); // (B, 1, max_timestep, n_heads_KV * head_dim)
-  ml::train::TensorDim cache_value_dim =
-    cache_value.getDim(); // (B, 1, max_timestep, n_heads_KV * head_dim)
-
-  ml::train::TensorDim query_step_dim =
-    get_step_dim(query_dim); // (1, 1, step_size, n_heads_Q * head_dim)
-  ml::train::TensorDim key_step_dim = get_step_dim(key_dim);
-  ml::train::TensorDim value_step_dim = get_step_dim(value_dim);
-  ml::train::TensorDim output_step_dim =
-    get_step_dim(output_dim); // (1, 1, step_size, n_heads_Q * head_dim)
-  ml::train::TensorDim cache_key_step_dim =
-    get_step_dim(cache_key_dim); // (1, 1, step_size, n_heads_KV * head_dim)
-
-  ml::train::TensorDim cache_value_step_dim =
-    get_step_dim(cache_value_dim); // (1, 1, step_size, n_heads_KV * head_dim)
-
-  unsigned int batch_size = query_dim.batch();
-  // do the incremental forwarding
-  for (unsigned int batch = 0; batch < batch_size; ++batch) {
-
-    // preparing step tensors
-    nntrainer::Tensor query_step = query.getSharedDataTensor(
-      query_step_dim, batch * query_dim.getFeatureLen(), true);
-    nntrainer::Tensor key_step = key.getSharedDataTensor(
-      key_step_dim, batch * key_dim.getFeatureLen(), true);
-    nntrainer::Tensor value_step = value.getSharedDataTensor(
-      value_step_dim, batch * value_dim.getFeatureLen(), true);
-    nntrainer::Tensor output_step = output.getSharedDataTensor(
-      output_step_dim, batch * output_dim.getFeatureLen(), true);
-
-    if (query_step.getDataType() == ml::train::TensorDim::DataType::FP32) {
-#if ENABLE_FP16 && defined(__ANDROID__)
-      nntrainer::TensorDim Q_step_dim = query_step_dim;
-      nntrainer::TensorDim K_step_dim = key_step_dim;
-      nntrainer::TensorDim V_step_dim = value_step_dim;
-      nntrainer::TensorDim O_step_dim = output_step_dim;
-      Q_step_dim.setDataType(ml::train::TensorDim::DataType::FP16);
-      K_step_dim.setDataType(ml::train::TensorDim::DataType::FP16);
-      V_step_dim.setDataType(ml::train::TensorDim::DataType::FP16);
-      O_step_dim.setDataType(ml::train::TensorDim::DataType::FP16);
-
-      nntrainer::Tensor Q_step = nntrainer::Tensor(Q_step_dim, true);
-      nntrainer::Tensor K_step = nntrainer::Tensor(K_step_dim, true);
-      nntrainer::Tensor V_step = nntrainer::Tensor(V_step_dim, true);
-      nntrainer::Tensor O_step = nntrainer::Tensor(O_step_dim, true);
-
-      Q_step.copyData(query_step);
-      K_step.copyData(key_step);
-      V_step.copyData(value_step);
-      if (use_sink) {
-        one_batch_incremental_forwarding(
-          batch, _from, from, to, Q_step, K_step, V_step, O_step, cache_key,
-          cache_value, cache_key_dim, cache_key_step_dim, cache_value_dim,
-          cache_value_step_dim, sink);
-      } else {
-        one_batch_incremental_forwarding(batch, _from, from, to, Q_step, K_step,
-                                         V_step, O_step, cache_key, cache_value,
-                                         cache_key_dim, cache_key_step_dim,
-                                         cache_value_dim, cache_value_step_dim);
-      }
-      output_step.copyData(O_step);
-#else
-      if (use_sink) {
-        one_batch_incremental_forwarding(
-          batch, _from, from, to, query_step, key_step, value_step, output_step,
-          cache_key, cache_value, cache_key_dim, cache_key_step_dim,
-          cache_value_dim, cache_value_step_dim, sink);
-      } else {
-        one_batch_incremental_forwarding(
-          batch, _from, from, to, query_step, key_step, value_step, output_step,
-          cache_key, cache_value, cache_key_dim, cache_key_step_dim,
-          cache_value_dim, cache_value_step_dim);
-      }
-#endif
-    } else {
-      one_batch_incremental_forwarding(
-        batch, _from, from, to, query_step, key_step, value_step, output_step,
-        cache_key, cache_value, cache_key_dim, cache_key_step_dim,
-        cache_value_dim, cache_value_step_dim);
-    }
-  }
-
-  // increase cache size
-  cache_index += step_size;
 }
 
 /**
