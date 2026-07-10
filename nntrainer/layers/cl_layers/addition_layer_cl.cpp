@@ -104,4 +104,13 @@ void AdditionLayerCL::setProperty(const std::vector<std::string> &values) {
     throw exception::not_supported(msg);
   }
 }
+
+void AdditionLayerCL::updateTensorsByInputDimensions(
+  RunLayerContext &context, std::vector<TensorDim> input_dimensions) {
+  for (size_t i = 0; i < context.getNumInputs(); ++i) {
+    context.updateInput(i, input_dimensions[0]);
+  }
+  context.updateOutput(SINGLE_INOUT_IDX, input_dimensions[0]);
+}
+
 } /* namespace nntrainer */

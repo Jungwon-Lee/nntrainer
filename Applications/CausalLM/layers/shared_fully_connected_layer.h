@@ -129,6 +129,14 @@ public:
   void setProperty(const std::vector<std::string> &values) override;
 
   /**
+   * @copydoc Layer::updateTensorsByInputDimensions(RunLayerContext &context,
+   * std::vector<TensorDim> input_dimensions)
+   */
+  void updateTensorsByInputDimensions(
+    nntrainer::RunLayerContext &context,
+    std::vector<nntrainer::TensorDim> input_dimensions) override;
+
+  /**
    * @copydoc Layer::getType()
    */
   const std::string getType() const override {

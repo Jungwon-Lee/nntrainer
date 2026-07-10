@@ -166,6 +166,19 @@ void SharedFullyConnectedLayer::incremental_forwarding(
   }
 }
 
+void SharedFullyConnectedLayer::updateTensorsByInputDimensions(
+  nntrainer::RunLayerContext &context,
+  std::vector<nntrainer::TensorDim> input_dimensions) {
+  nntrainer::TensorDim input_dim = context.getInput(SINGLE_INOUT_IDX).getDim();
+  input_dim.height(input_dimensions[0].height());
+  context.updateInput(SINGLE_INOUT_IDX, input_dim);
+
+  nntrainer::TensorDim output_dim =
+    context.getOutput(SINGLE_INOUT_IDX).getDim();
+  output_dim.height(input_dimensions[0].height());
+  context.updateOutput(SINGLE_INOUT_IDX, output_dim);
+}
+
 void SharedFullyConnectedLayer::calcDerivative(
   nntrainer::RunLayerContext &context) {
   throw nntrainer::exception::not_supported(

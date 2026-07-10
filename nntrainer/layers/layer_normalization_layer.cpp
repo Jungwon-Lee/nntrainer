@@ -332,4 +332,52 @@ void LayerNormalizationLayer::setBatch(RunLayerContext &context,
   context.updateTensor(wt_idx[LNParams::temp_normalized_size], batch);
 }
 
+void LayerNormalizationLayer::updateTensorsByInputDimensions(
+  RunLayerContext &context, std::vector<TensorDim> input_dimensions) {
+  // @todo: consider NHWC format
+  bool is_height_normalize =
+    std::find(normalize_axes.begin(), normalize_axes.end(), 1) !=
+    normalize_axes.end();
+
+  unsigned int height = input_dimensions[0].height();
+
+  TensorDim input_dim = context.getInput(SINGLE_INOUT_IDX).getDim();
+  input_dim.height(height);
+  context.updateInput(SINGLE_INOUT_IDX, input_dim);
+
+  TensorDim output_dim = context.getOutput(SINGLE_INOUT_IDX).getDim();
+  output_dim.height(height);
+  context.updateOutput(SINGLE_INOUT_IDX, output_dim);
+
+  TensorDim deviation_dim =
+    context.getTensor(wt_idx[LNParams::deviation]).getDim();
+  deviation_dim.height(height);
+  context.updateTensor(wt_idx[LNParams::deviation], deviation_dim);
+
+  TensorDim temp_origin_dim =
+    context.getTensor(wt_idx[LNParams::temp_origin_size]).getDim();
+  temp_origin_dim.height(height);
+  context.updateTensor(wt_idx[LNParams::temp_origin_size], temp_origin_dim);
+
+  /** variance/inv_std_dev/temp_normalized_size only carry sequence length in
+   * their height when height is not one of the normalize axes */
+  if (!is_height_normalize) {
+    TensorDim variance_dim =
+      context.getTensor(wt_idx[LNParams::variance]).getDim();
+    variance_dim.height(height);
+    context.updateTensor(wt_idx[LNParams::variance], variance_dim);
+
+    TensorDim inv_std_dev_dim =
+      context.getTensor(wt_idx[LNParams::inv_std_dev]).getDim();
+    inv_std_dev_dim.height(height);
+    context.updateTensor(wt_idx[LNParams::inv_std_dev], inv_std_dev_dim);
+
+    TensorDim temp_normalized_dim =
+      context.getTensor(wt_idx[LNParams::temp_normalized_size]).getDim();
+    temp_normalized_dim.height(height);
+    context.updateTensor(wt_idx[LNParams::temp_normalized_size],
+                         temp_normalized_dim);
+  }
+}
+
 } /* namespace nntrainer */

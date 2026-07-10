@@ -120,6 +120,13 @@ public:
    */
   void setBatch(RunLayerContext &context, unsigned int batch) override;
 
+  /**
+   * @copydoc Layer::updateTensorsByInputDimensions(RunLayerContext &context,
+   * std::vector<TensorDim> input_dimensions)
+   */
+  void updateTensorsByInputDimensions(
+    RunLayerContext &context, std::vector<TensorDim> input_dimensions) override;
+
   static constexpr const char *type = "layer_normalization";
 
 private:

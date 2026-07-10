@@ -198,4 +198,15 @@ void FullyConnectedLayerCl::calcGradient(RunLayerContext &context) {
     !context.isGradientFirstAccess(weight_idx[FCParams::weight]));
 }
 
+void FullyConnectedLayerCl::updateTensorsByInputDimensions(
+  RunLayerContext &context, std::vector<TensorDim> input_dimensions) {
+  TensorDim input_dim = context.getInput(SINGLE_INOUT_IDX).getDim();
+  input_dim.height(input_dimensions[0].height());
+  context.updateInput(SINGLE_INOUT_IDX, input_dim);
+
+  TensorDim output_dim = context.getOutput(SINGLE_INOUT_IDX).getDim();
+  output_dim.height(input_dimensions[0].height());
+  context.updateOutput(SINGLE_INOUT_IDX, output_dim);
+}
+
 } /* namespace nntrainer */

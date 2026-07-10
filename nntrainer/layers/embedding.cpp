@@ -228,4 +228,11 @@ void EmbeddingLayer::exportTo(Exporter &exporter,
   exporter.saveResult(embedding_props, method, this);
 }
 
+void EmbeddingLayer::updateTensorsByInputDimensions(
+  RunLayerContext &context, std::vector<TensorDim> input_dimensions) {
+  TensorDim output_dim = context.getOutput(SINGLE_INOUT_IDX).getDim();
+  output_dim.height(input_dimensions[0].height());
+  context.updateOutput(SINGLE_INOUT_IDX, output_dim);
+}
+
 } // namespace nntrainer

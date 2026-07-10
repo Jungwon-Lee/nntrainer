@@ -100,9 +100,18 @@ public:
     setBatch(batch);
   }
 
+  /**
+   * @copydoc Layer::updateTensorsByInputDimensions(RunLayerContext &context,
+   * std::vector<TensorDim> input_dimensions)
+   */
+  void updateTensorsByInputDimensions(
+    RunLayerContext &context, std::vector<TensorDim> input_dimensions) override;
+
   static constexpr const char *type = "concat";
 
 private:
+  unsigned int concat_dimension;   /**< axis along which inputs are
+                                      concatenated */
   unsigned int leading_helper_dim; /**< batch dimension of helper dimension not
                                 containing the actual batch */
   std::vector<TensorDim>

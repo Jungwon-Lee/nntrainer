@@ -26,7 +26,8 @@
 #include <util_func.h>
 
 namespace nntrainer {
-ConcatLayer::ConcatLayer() : Layer(), leading_helper_dim(1) {}
+ConcatLayer::ConcatLayer() :
+  Layer(), concat_dimension(1), leading_helper_dim(1) {}
 
 static constexpr size_t SINGLE_INOUT_IDX = 0;
 
@@ -36,8 +37,7 @@ void ConcatLayer::finalize(InitLayerContext &context) {
   /// @todo this is hacky way to force concat dimension to width if channel
   /// dimension is taken, this is because recurrent realizer, return sequence
   /// exploits concat layer but have no control over where to stack/axis
-  unsigned int concat_dimension =
-    context.getInputDimensions().front().channel() > 1 ? 3 : 1;
+  concat_dimension = context.getInputDimensions().front().channel() > 1 ? 3 : 1;
   if (!concat_dimension_prop.empty())
     concat_dimension = concat_dimension_prop.get();
 
@@ -325,6 +325,61 @@ void ConcatLayer::exportTo(Exporter &exporter,
                            const ml::train::ExportMethods &method) const {
   Layer::exportTo(exporter, method);
   exporter.saveResult(concat_props, method, this);
+}
+
+void ConcatLayer::updateTensorsByInputDimensions(
+  RunLayerContext &context, std::vector<TensorDim> input_dimensions) {
+  /** @todo height-axis concat (concat_dimension == 2) sums heights across
+   * inputs rather than sharing a single sequence length, so the assumption
+   * below (all inputs/outputs simply adopt input_dimensions[0].height())
+   * does not hold for it */
+  NNTR_THROW_IF(concat_dimension == 2, std::invalid_argument)
+    << "[ConcatLayer] updateTensorsByInputDimensions does not support "
+       "concat_dimension == 2 (height-axis concat)";
+
+  unsigned int height = input_dimensions[0].height();
+
+  TensorDim output_dim = context.getOutput(SINGLE_INOUT_IDX).getDim();
+  output_dim.height(height);
+  context.updateOutput(SINGLE_INOUT_IDX, output_dim);
+
+  std::vector<TensorDim> input_dims(context.getNumInputs());
+  for (unsigned int idx = 0; idx < context.getNumInputs(); ++idx) {
+    TensorDim input_dim = context.getInput(idx).getDim();
+    input_dim.height(height);
+    context.updateInput(idx, input_dim);
+    input_dims[idx] = input_dim;
+  }
+
+  /// Recompute output_reshape_helper for the new height
+  output_reshape_helper.channel(1);
+  output_reshape_helper.height(1);
+  output_reshape_helper.width(1);
+  for (unsigned int axis = concat_dimension;
+       axis < ml::train::TensorDim::getNumDim(); ++axis) {
+    output_reshape_helper.width(output_reshape_helper.width() *
+                                output_dim.getTensorDim(axis));
+  }
+
+  /// Recompute input_reshape_helper for the new height
+  for (unsigned int idx = 0; idx < input_reshape_helper.size(); idx++) {
+    input_reshape_helper[idx].channel(1);
+    input_reshape_helper[idx].height(1);
+    input_reshape_helper[idx].width(1);
+
+    for (unsigned int axis = concat_dimension;
+         axis < ml::train::TensorDim::getNumDim(); ++axis) {
+      input_reshape_helper[idx].width(input_reshape_helper[idx].width() *
+                                      input_dims[idx].getTensorDim(axis));
+    }
+  }
+
+  leading_helper_dim = 1;
+  for (unsigned int idx = 1; idx < concat_dimension; ++idx) {
+    leading_helper_dim *= output_dim.getTensorDim(idx);
+  }
+
+  setBatch(output_dim.batch());
 }
 
 } /* namespace nntrainer */
