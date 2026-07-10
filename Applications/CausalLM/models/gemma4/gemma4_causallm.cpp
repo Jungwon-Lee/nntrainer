@@ -14,11 +14,14 @@
 
 #include <algorithm>
 #include <cmath>
+#include <functional>
+#include <sstream>
 
 #include <app_context.h>
 #include <engine.h>
 #include <llm_util.hpp>
 #include <logit_softcapping.h>
+#include <mha_core.h>
 #include <model.h>
 #include <per_layer_slice.h>
 #include <reshaped_rms_norm.h>
@@ -904,6 +907,20 @@ void Gemma4CausalLM::allocateAndBindKVCache() {
     kp->setData(kc.getMemoryData(), kc.getOffset(), false);
     vp->setData(vc.getMemoryData(), vc.getOffset(), false);
   }
+
+  // Bind every mha_core layer to the shared KVCacheManager so they read the
+  // absolute write position directly from it, instead of falling back to
+  // their own per-layer cache_index (see CausalLM::allocateAndBindKVCache()).
+  std::ostringstream kv_cache_addr;
+  kv_cache_addr << std::hex << reinterpret_cast<uintptr_t>(&kv_cache);
+  std::function<void(ml::train::Layer &, nntrainer::RunLayerContext &, void *)>
+    bind_kv_cache_manager = [&kv_cache_addr](ml::train::Layer &l,
+                                             nntrainer::RunLayerContext &,
+                                             void *) {
+      if (l.getType() == causallm::MHACoreLayer::type)
+        l.setProperty({"kv_cache_manager_addr=" + kv_cache_addr.str()});
+    };
+  model->forEachLayer(bind_kv_cache_manager, nullptr);
 
   kv_cache_bound = true;
 }
