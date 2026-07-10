@@ -290,8 +290,7 @@ TryLoadBPETokenizerCache(const std::string &cache_file,
   return nullptr;
 }
 
-std::vector<std::string>
-BuildBPEConformancePrompts(const json &tokenizer_json) {
+std::vector<std::string> BuildConformancePrompts(const json &tokenizer_json) {
   std::vector<std::string> prompts = {
     "",
     "Hello world!",
@@ -304,6 +303,7 @@ BuildBPEConformancePrompts(const json &tokenizer_json) {
     "kana \xE3\x81\x8B\xE3\x82\x99 \xE3\x82\xAB\xE3\x82\x99",
     "\xEC\x95\x88\xEB\x85\x95\xED\x95\x98\xEC\x84\xB8\xEC\x9A\x94 "
     "\xEC\x84\xB8\xEA\xB3\x84",
+    "\xE4\xBD\xA0\xE5\xA5\xBD\xE4\xB8\x96\xE7\x95\x8C",
     "emoji \xF0\x9F\x98\x80 test",
     "tabs\tand\nnewlines\n",
   };
@@ -361,7 +361,7 @@ LoadExactBPETokenizer(const std::string &tokenizer_blob,
     auto candidate_tokenizer =
       tokenizers::Tokenizer::FromBlobBPEJSON(tokenizer_json.dump());
     if (HasSameEncoding(*original_tokenizer, *candidate_tokenizer,
-                        BuildBPEConformancePrompts(tokenizer_json))) {
+                        BuildConformancePrompts(tokenizer_json))) {
       if (cache_enabled) {
         const std::string cache_blob = candidate_tokenizer->SerializeToCache();
         if (!TryWriteBytesToFile(cache_file, cache_blob)) {
@@ -377,6 +377,50 @@ LoadExactBPETokenizer(const std::string &tokenizer_blob,
               << std::endl;
   } catch (const std::exception &e) {
     std::cerr << "Ignoring BPE tokenizer cache candidate: " << e.what()
+              << std::endl;
+  }
+
+  return original_tokenizer;
+}
+
+std::unique_ptr<tokenizers::Tokenizer> LoadExactWordPieceTokenizer(
+  const std::string &tokenizer_blob, const std::string &cache_file,
+  const std::string &source_file, const json &tokenizer_json,
+  WordPieceConfig &config, bool cache_enabled) {
+  if (cache_enabled) {
+    auto cached_tokenizer =
+      TryLoadWordPieceTokenizerCache(cache_file, source_file);
+    if (cached_tokenizer) {
+      return cached_tokenizer;
+    }
+  }
+
+  auto original_tokenizer = tokenizers::Tokenizer::FromBlobJSON(tokenizer_blob);
+
+  try {
+    const std::string vocab_blob =
+      BuildWordPieceVocabBlob(tokenizer_json, config);
+    auto candidate_tokenizer = tokenizers::Tokenizer::FromBlobWordPiece(
+      vocab_blob, config.do_lower_case, config.unk_token,
+      config.continuing_subword_prefix, config.max_input_chars_per_word,
+      config.cls_token, config.sep_token);
+    if (HasSameEncoding(*original_tokenizer, *candidate_tokenizer,
+                        BuildConformancePrompts(tokenizer_json))) {
+      if (cache_enabled) {
+        const std::string cache_blob = candidate_tokenizer->SerializeToCache();
+        if (!TryWriteBytesToFile(cache_file, cache_blob)) {
+          std::cerr << "Failed to write WordPiece tokenizer cache: "
+                    << cache_file << std::endl;
+        }
+      }
+      return candidate_tokenizer;
+    }
+
+    std::cerr << "Ignoring WordPiece tokenizer cache candidate: conformance "
+                 "check failed"
+              << std::endl;
+  } catch (const std::exception &e) {
+    std::cerr << "Ignoring WordPiece tokenizer cache candidate: " << e.what()
               << std::endl;
   }
 
@@ -481,9 +525,9 @@ std::unique_ptr<tokenizers::Tokenizer> LoadTokenizer(nlohmann::json &nntr_cfg) {
 
   if (is_wordpiece_json) {
     json &json_blob = get_tokenizer_json();
-    std::string vocab_blob = BuildWordPieceVocabBlob(json_blob, config);
-    return LoadWordPieceTokenizer(vocab_blob, wordpiece_cache_file,
-                                  tokenizer_file, config, cache_enabled);
+    return LoadExactWordPieceTokenizer(tokenizer_blob, wordpiece_cache_file,
+                                       tokenizer_file, json_blob, config,
+                                       cache_enabled);
   }
 
   if (!looks_like_tokenizer_json &&
