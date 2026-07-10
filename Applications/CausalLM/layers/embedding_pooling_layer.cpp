@@ -152,6 +152,19 @@ void EmbeddingPoolingLayer::incremental_forwarding(
   }
 }
 
+void EmbeddingPoolingLayer::updateTensorsByInputDimensions(
+  nntrainer::RunLayerContext &context,
+  std::vector<nntrainer::TensorDim> input_dimensions) {
+  // Input height is the current sequence length; output stays fixed at
+  // height 1 (pooled to a single vector per finalize()), so only the input
+  // needs to track the new step size.
+  unsigned int height = input_dimensions[0].height();
+
+  nntrainer::TensorDim input_dim = context.getInput(SINGLE_INOUT_IDX).getDim();
+  input_dim.height(height);
+  context.updateInput(SINGLE_INOUT_IDX, input_dim);
+}
+
 void EmbeddingPoolingLayer::calcDerivative(
   nntrainer::RunLayerContext &context) {
   throw nntrainer::exception::not_supported(

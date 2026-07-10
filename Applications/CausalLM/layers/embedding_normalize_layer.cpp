@@ -62,6 +62,14 @@ void EmbeddingNormalizeLayer::incremental_forwarding(
   forwarding(context, training);
 }
 
+void EmbeddingNormalizeLayer::updateTensorsByInputDimensions(
+  nntrainer::RunLayerContext &context,
+  std::vector<nntrainer::TensorDim> input_dimensions) {
+  // No-op: this layer always sits after Pooling, so its input/output is
+  // already the fixed [batch, 1, 1, dim] pooled vector and never varies with
+  // sequence length.
+}
+
 void EmbeddingNormalizeLayer::calcDerivative(
   nntrainer::RunLayerContext &context) {
   throw nntrainer::exception::not_supported(

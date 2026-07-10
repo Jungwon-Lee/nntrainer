@@ -154,6 +154,14 @@ public:
                               bool training) override;
 
   /**
+   * @copydoc Layer::updateTensorsByInputDimensions(RunLayerContext &context,
+   * std::vector<TensorDim> input_dimensions)
+   */
+  void updateTensorsByInputDimensions(
+    nntrainer::RunLayerContext &context,
+    std::vector<nntrainer::TensorDim> input_dimensions) override;
+
+  /**
    * @copydoc Layer::calcDerivative(RunLayerContext &context)
    */
   void calcDerivative(nntrainer::RunLayerContext &context) override;
