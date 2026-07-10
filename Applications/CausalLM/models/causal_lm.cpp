@@ -23,6 +23,7 @@
 #include <algorithm>
 #include <app_context.h>
 #include <cmath>
+#include <cstdint>
 #include <cstdlib>
 #include <engine.h>
 #include <filesystem>
@@ -30,6 +31,7 @@
 #include <iostream>
 #include <iterator>
 #include <limits>
+#include <sstream>
 #include <utility>
 #include <vector>
 
@@ -195,22 +197,30 @@ void CausalLM::allocateAndBindKVCache() {
     vp->setData(vc.getMemoryData(), vc.getOffset(), false);
   }
 
+  // Bind every mha_core layer to the shared KVCacheManager so they read the
+  // absolute write position directly from it, instead of the host having to
+  // push it into each layer via setProperty("cache_index=...") before every
+  // step. All attention layers share the same position since they all
+  // advance in lockstep with the token stream.
+  std::ostringstream kv_cache_addr;
+  kv_cache_addr << std::hex << reinterpret_cast<uintptr_t>(&kv_cache);
+  std::function<void(ml::train::Layer &, nntrainer::RunLayerContext &, void *)>
+    bind_kv_cache_manager = [&kv_cache_addr](ml::train::Layer &l,
+                                             nntrainer::RunLayerContext &,
+                                             void *) {
+      if (l.getType() == causallm::MHACoreLayer::type)
+        l.setProperty({"kv_cache_manager_addr=" + kv_cache_addr.str()});
+    };
+  model->forEachLayer(bind_kv_cache_manager, nullptr);
+
   kv_cache_bound = true;
 }
 
 void CausalLM::setKVCachePosition(unsigned int pos) {
   kv_cache.setPosition(pos);
-  std::function<void(ml::train::Layer &, nntrainer::RunLayerContext &, void *)>
-    fn = [pos](ml::train::Layer &l, nntrainer::RunLayerContext &, void *) {
-      if (l.getType() == causallm::MHACoreLayer::type)
-        l.setProperty({"cache_index=" + std::to_string(pos)});
-    };
-  model->forEachLayer(fn, nullptr);
 }
 
 void CausalLM::advanceKVCachePosition(unsigned int step_size) {
-  // mha_core advances its own cache_index inside forwarding(), so the host
-  // only has to keep KVCacheManager's tracked position in sync.
   kv_cache.advance(step_size);
 }
 
@@ -523,6 +533,7 @@ void CausalLM::run(const WSTR prompt, bool do_sample, const WSTR system_prompt,
     setKVCachePosition(0);
     output = model->incremental_inference(BATCH_SIZE, input, label, input_len,
                                           0, input_len, false);
+    advanceKVCachePosition(input_len);
 
     SYS_PROMP_LEN = input_len;
     save_kvcache(PRE_COMPUTED_CACHE_PATH, SYS_PROMP_LEN);
@@ -559,6 +570,7 @@ void CausalLM::run(const WSTR prompt, bool do_sample, const WSTR system_prompt,
     setKVCachePosition(prefill_from);
     output = model->incremental_inference(
       BATCH_SIZE, input, label, init_len - 1, prefill_from, prefill_to, false);
+    advanceKVCachePosition(prefill_to - prefill_from);
 
     for (unsigned int b = 0; b < BATCH_SIZE; ++b)
       id_list.push_back(skipped_token);
@@ -572,6 +584,7 @@ void CausalLM::run(const WSTR prompt, bool do_sample, const WSTR system_prompt,
     setKVCachePosition(prefill_from);
     output = model->incremental_inference(BATCH_SIZE, input, label, init_len,
                                           prefill_from, prefill_to, false);
+    advanceKVCachePosition(prefill_to - prefill_from);
 
     // post process of model output
     id_list = generate(output[0], do_sample, 1, ids_history, init_len);
@@ -615,6 +628,9 @@ void CausalLM::run(const WSTR prompt, bool do_sample, const WSTR system_prompt,
       model->incremental_inference(BATCH_SIZE, input, label, input_len,
                                    token_generation_idx - 1 + global_token_len,
                                    token_generation_idx + global_token_len);
+    // mha_core no longer self-advances once bound to kv_cache; advance the
+    // shared position by the single decoded token processed this step.
+    advanceKVCachePosition(1);
     std::vector<unsigned int> ids_list(generate(output_interval[0], do_sample));
 
     // Feed the newly generated token back as the next input token.

@@ -307,8 +307,14 @@ void MHACoreLayer::forwarding(nntrainer::RunLayerContext &context,
   unsigned int step_size = (incremental_step_size > 0)
                              ? incremental_step_size
                              : (unsigned int)query.height();
-  unsigned int from = cache_index;
-  unsigned int to = cache_index + step_size;
+  unsigned int from =
+    kv_cache_manager_ ? kv_cache_manager_->getPosition() : cache_index;
+  unsigned int to = from + step_size;
+  // one_batch_incremental_forwarding() below indexes the cache through the
+  // cache_index member; keep it in sync with the resolved absolute position
+  // for this call, whether it came from the bound manager or the local
+  // fallback.
+  cache_index = from;
 
   auto get_step_dim = [step_size](const ml::train::TensorDim &dim) {
     auto step_dim = dim;
@@ -395,7 +401,14 @@ void MHACoreLayer::forwarding(nntrainer::RunLayerContext &context,
     }
   }
 
-  cache_index += step_size;
+  // When a KVCacheManager is bound, it owns the write position: the host
+  // advances it exactly once per step after the full graph forward pass
+  // completes (see CausalLM::advanceKVCachePosition), since multiple
+  // mha_core layers (one per attention block) all forward within a single
+  // step. Self-advancing here would over-advance the shared position.
+  if (!kv_cache_manager_) {
+    cache_index += step_size;
+  }
 }
 
 /**
@@ -406,12 +419,22 @@ void MHACoreLayer::forwarding(nntrainer::RunLayerContext &context,
 void MHACoreLayer::incremental_forwarding(nntrainer::RunLayerContext &context,
                                           unsigned int _from, unsigned int _to,
                                           bool training) {
-  // External KV cache path: from/to are interpreted as the absolute write
-  // position; route through forwarding() which reads cache_key/cache_value
-  // from input slots 3/4. forwarding() advances cache_index internally.
+  // External KV cache path: route through forwarding(), which reads
+  // cache_key/cache_value from input slots 3/4. The step size (width of this
+  // call) still comes from _to - _from: some callers (e.g. test harnesses)
+  // invoke incremental_forwarding() without resizing the input tensors via
+  // resetInputDimension() first, so query.height() alone isn't a reliable
+  // stand-in for the step width. The *absolute* write position is what moves
+  // to the KVCacheManager: when bound, it is the single source of truth
+  // instead of the _from plumbed through here, since multiple mha_core
+  // layers (one per attention block) must agree on one shared position.
+  // Without a bound manager (back-compat / no host wiring), fall back to the
+  // legacy contract of taking the absolute position from _from directly.
   if (use_external_cache) {
-    cache_index = _from;
     incremental_step_size = _to - _from;
+    if (!kv_cache_manager_) {
+      cache_index = _from;
+    }
     forwarding(context, training);
     incremental_step_size = 0;
     return;
@@ -1575,6 +1598,17 @@ void MHACoreLayer::setProperty(const std::vector<std::string> &values) {
     if (nntrainer::getKeyValue(value, key, parsed_value) == ML_ERROR_NONE &&
         key == "cache_index") {
       setCacheIndex(static_cast<unsigned int>(std::stoul(parsed_value)));
+    } else if (nntrainer::getKeyValue(value, key, parsed_value) ==
+                 ML_ERROR_NONE &&
+               key == "kv_cache_manager_addr") {
+      // ml::train::Layer only exposes setProperty()/getProperty() to the
+      // host, so the host binds this layer to its shared KVCacheManager by
+      // passing the manager's address once (see
+      // CausalLM::allocateAndBindKVCache()) rather than through a typed
+      // setter, which isn't reachable from outside this layer's own type.
+      auto addr =
+        static_cast<uintptr_t>(std::stoull(parsed_value, nullptr, 16));
+      setKVCacheManager(reinterpret_cast<KVCacheManager *>(addr));
     } else {
       props.push_back(value);
     }

@@ -1,5 +1,6 @@
 causallm_layer_inc_abs = [meson.current_source_dir()]
-causallm_layer_inc = [include_directories('.')]
+# '..' pulls in Applications/CausalLM/kv_cache_manager.h, needed by mha_core.h
+causallm_layer_inc = [include_directories('.', '..')]
 
 causallm_rms_norm_src_abs = [meson.current_source_dir() / 'rms_norm.cpp']
 causallm_swiglu_src_abs = [meson.current_source_dir() / 'swiglu.cpp']

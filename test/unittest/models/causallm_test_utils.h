@@ -289,6 +289,16 @@ public:
 
     auto [input, cache_inputs] = buildCacheInput(input_sample);
     std::vector<float *> label;
+
+    // mha_core derives its step width from the query tensor's own height
+    // instead of an explicit incremental_forwarding from/to, so keep it in
+    // sync via resetInputDimension() the same way CausalLM::run() does
+    // before every prefill/decode phase change.
+    this->model->resetInputDimension({ml::train::TensorDim(
+      1, 1, init_len, static_cast<unsigned int>(this->DIM))});
+    this->kv_cache_bound = false;
+    this->allocateAndBindKVCache();
+
     this->setKVCachePosition(0);
     auto output = this->model->incremental_inference(
       this->BATCH_SIZE, input, label, init_len, 0, init_len, false);
@@ -319,12 +329,30 @@ public:
     auto [input, cache_inputs] = buildCacheInput(input_sample);
     std::vector<float *> label;
 
+    // mha_core derives its step width from the query tensor's own height
+    // instead of an explicit incremental_forwarding from/to, so keep it in
+    // sync via resetInputDimension() the same way CausalLM::run() does
+    // before every prefill/decode phase change.
+    this->model->resetInputDimension({ml::train::TensorDim(
+      1, 1, init_len, static_cast<unsigned int>(this->DIM))});
+    this->kv_cache_bound = false;
+    this->allocateAndBindKVCache();
+
     this->setKVCachePosition(0);
     auto output = this->model->incremental_inference(
       this->BATCH_SIZE, input, label, init_len, 0, init_len, false);
 
     std::vector<unsigned int> generated;
     generated.reserve(n);
+
+    if (n > 1) {
+      // Every subsequent decode step processes exactly one token; switch the
+      // graph to that width once before the loop, matching CausalLM::run()'s
+      // decode phase.
+      this->model->resetInputDimension(
+        {ml::train::TensorDim(1, 1, 1, static_cast<unsigned int>(this->DIM))});
+      this->kv_cache_bound = false;
+    }
 
     for (size_t step = 0; step < n; ++step) {
       unsigned int next_tok = static_cast<unsigned int>(std::distance(
@@ -342,6 +370,7 @@ public:
 
       unsigned int from = init_len + static_cast<unsigned int>(step);
       unsigned int to = from + 1;
+      this->allocateAndBindKVCache();
       this->setKVCachePosition(from);
       output = this->model->incremental_inference(this->BATCH_SIZE, input,
                                                   label, 1, from, to, false);

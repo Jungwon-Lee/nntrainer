@@ -46,6 +46,8 @@
 #include <unordered_map>
 #include <utility>
 
+#include <kv_cache_manager.h>
+
 namespace causallm {
 
 namespace props {
@@ -322,15 +324,33 @@ public:
 
   /**
    * @brief Set the cache index for external cache mode.
-   *        Must be called before forwarding() when use_external_cache is true.
+   *        Only used as a fallback when no KVCacheManager is bound (see
+   *        setKVCacheManager()); ignored otherwise since the manager becomes
+   *        the single source of truth for the write position.
    * @param[in] idx current write position in the KV cache
    */
   WIN_EXPORT void setCacheIndex(unsigned int idx) { cache_index = idx; }
 
   /**
-   * @brief Get the current cache index
+   * @brief Get the current cache index (delegates to the bound
+   *        KVCacheManager when present).
    */
-  WIN_EXPORT unsigned int getCacheIndex() const { return cache_index; }
+  WIN_EXPORT unsigned int getCacheIndex() const {
+    return kv_cache_manager_ ? kv_cache_manager_->getPosition() : cache_index;
+  }
+
+  /**
+   * @brief Bind the shared KVCacheManager that owns the absolute write
+   *        position for this (and every other) mha_core layer. Once bound,
+   *        this layer reads its write position from the manager instead of
+   *        tracking it locally, and no longer self-advances; the host is
+   *        responsible for advancing the manager's position exactly once per
+   *        step after the full graph forward pass completes.
+   * @param[in] manager pointer to the host-owned KVCacheManager (not owned)
+   */
+  WIN_EXPORT void setKVCacheManager(KVCacheManager *manager) {
+    kv_cache_manager_ = manager;
+  }
 
   inline static const std::string type = "mha_core";
 
@@ -352,7 +372,16 @@ private:
   nntrainer::ActiFunc sm;
 
   float epsilon;            /** to avoid overflow */
-  unsigned int cache_index; /** idx of kv cache */
+  unsigned int cache_index; /** idx of kv cache; fallback when
+                                kv_cache_manager_ is not bound */
+
+  /**
+   * @brief Shared KV cache manager owning the absolute write position across
+   *        all mha_core layers. Not owned by this layer. When bound, this
+   *        layer treats it as the single source of truth for the current
+   *        cache position instead of tracking cache_index itself.
+   */
+  KVCacheManager *kv_cache_manager_ = nullptr;
 
   /**
    * @brief Whether to use externally provided cache tensors
