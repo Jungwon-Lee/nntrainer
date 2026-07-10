@@ -251,8 +251,7 @@ public:
                              bool training) override;
 
   void one_batch_incremental_forwarding(
-    const unsigned int batch, const unsigned int _from, const unsigned int from,
-    const unsigned int to, nntrainer::Tensor &query_step,
+    const unsigned int batch, nntrainer::Tensor &query_step,
     nntrainer::Tensor &key_step, nntrainer::Tensor &value_step,
     nntrainer::Tensor &attention_output_step, nntrainer::Tensor &cache_key,
     nntrainer::Tensor &cache_value, ml::train::TensorDim &cache_key_dim,
@@ -261,8 +260,7 @@ public:
     ml::train::TensorDim &cache_value_step_dim);
 
   void one_batch_incremental_forwarding(
-    const unsigned int batch, const unsigned int _from, const unsigned int from,
-    const unsigned int to, nntrainer::Tensor &query_step,
+    const unsigned int batch, nntrainer::Tensor &query_step,
     nntrainer::Tensor &key_step, nntrainer::Tensor &value_step,
     nntrainer::Tensor &attention_output_step, nntrainer::Tensor &cache_key,
     nntrainer::Tensor &cache_value, ml::train::TensorDim &cache_key_dim,
@@ -504,15 +502,15 @@ private:
                bool process_all);
 
   void compute_kcaches(nntrainer::Tensor &in, nntrainer::Tensor &cache,
-                       nntrainer::Tensor &out, unsigned int from,
-                       size_t sequence_len, unsigned int num_heads,
-                       unsigned int group_size, unsigned int head_dim);
+                       nntrainer::Tensor &out, size_t sequence_len,
+                       unsigned int num_heads, unsigned int group_size,
+                       unsigned int head_dim);
+
+  void softmax_triangle(nntrainer::Tensor &qk_out, size_t row,
+                        size_t num_heads);
 
   void softmax_triangle(nntrainer::Tensor &qk_out, size_t row, size_t num_heads,
-                        unsigned int from);
-
-  void softmax_triangle(nntrainer::Tensor &qk_out, size_t row, size_t num_heads,
-                        unsigned int from, nntrainer::Tensor &sink_step);
+                        nntrainer::Tensor &sink_step);
 
   void compute_vcaches(nntrainer::Tensor &in, nntrainer::Tensor &vcache,
                        nntrainer::Tensor &out, unsigned int from,
@@ -521,9 +519,9 @@ private:
 
   void compute_fp16vcache_transposed(nntrainer::Tensor &in,
                                      nntrainer::Tensor &vcache,
-                                     nntrainer::Tensor &output, int from,
+                                     nntrainer::Tensor &output,
                                      int num_cache_head, int gqa_size,
-                                     int head_dim, int to);
+                                     int head_dim, int step_size);
 
   /************** END OF  ROTARY EMBEDDING *************/
 
