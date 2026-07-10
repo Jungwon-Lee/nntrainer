@@ -79,6 +79,23 @@ public:
     }
   }
 
+  /**
+   * @copydoc Layer::updateTensorsByInputDimensions(RunLayerContext &context,
+   * std::vector<TensorDim> input_dimensions)
+   *
+   */
+  void updateTensorsByInputDimensions(
+    RunLayerContext &context,
+    std::vector<TensorDim> input_dimensions) override {
+    TensorDim input_dim = context.getInput(0).getDim();
+    input_dim.height(input_dimensions[0].height());
+    context.updateInput(0, input_dim);
+
+    TensorDim output_dim = context.getOutput(SINGLE_INOUT_IDX).getDim();
+    output_dim.height(input_dimensions[0].height());
+    context.updateOutput(SINGLE_INOUT_IDX, output_dim);
+  }
+
   static constexpr size_t SINGLE_INOUT_IDX = 0;
 };
 
@@ -154,6 +171,27 @@ public:
 
       forwarding_operation(input0_step, input1_step, hidden_step);
     }
+  }
+
+  /**
+   * @copydoc Layer::updateTensorsByInputDimensions(RunLayerContext &context,
+   * std::vector<TensorDim> input_dimensions)
+   *
+   */
+  void updateTensorsByInputDimensions(
+    RunLayerContext &context,
+    std::vector<TensorDim> input_dimensions) override {
+    TensorDim input0_dim = context.getInput(0).getDim();
+    input0_dim.height(input_dimensions[0].height());
+    context.updateInput(0, input0_dim);
+
+    TensorDim input1_dim = context.getInput(1).getDim();
+    input1_dim.height(input_dimensions[0].height());
+    context.updateInput(1, input1_dim);
+
+    TensorDim output_dim = context.getOutput(SINGLE_INOUT_IDX).getDim();
+    output_dim.height(input_dimensions[0].height());
+    context.updateOutput(SINGLE_INOUT_IDX, output_dim);
   }
 
   static constexpr size_t SINGLE_INOUT_IDX = 0;
