@@ -14,6 +14,7 @@
 #define __CAUSALLM_TEST_UTILS_H__
 
 #include <algorithm>
+#include <cmath>
 #include <filesystem>
 #include <functional>
 #include <map>
@@ -22,6 +23,10 @@
 #include <string>
 #include <utility>
 #include <vector>
+
+#ifdef ENABLE_FP16
+#include <fp16.h>
+#endif
 
 #include <causal_lm.h>
 #include <layer.h>
@@ -130,6 +135,13 @@ public:
    * @return true if run() completed
    */
   virtual bool hasRun() const = 0;
+
+  /**
+   * @brief Check whether the final logits tensor (output_of_causallm) is
+   * entirely finite (no NaN/Inf) after the most recent run()/runPrompt()
+   * @return true if every element of the output tensor is finite
+   */
+  virtual bool lastOutputIsFinite() const = 0;
 
   /**
    * @brief Read one token from the model input/output history
@@ -363,6 +375,50 @@ public:
   bool hasRun() const override { return causallm::CausalLM::hasRun(); }
 
   /**
+   * @brief Check the final logits tensor (output_of_causallm) is finite
+   *
+   * Reads the raw output tensor directly, independent of dtype, so it
+   * catches dtype-reinterpretation corruption (e.g. an FP16 buffer viewed
+   * through a stale FP32 dimension) that a text-decoding check would miss.
+   */
+  bool lastOutputIsFinite() const override {
+    bool found = false;
+    bool finite = true;
+
+    this->model->forEachLayer([&](ml::train::Layer &layer,
+                                  nntrainer::RunLayerContext &context, void *) {
+      if (found || layer.getName() != "output_of_causallm")
+        return;
+      found = true;
+
+      nntrainer::Tensor &out = context.getOutput(0);
+      for (unsigned int i = 0; i < out.size(); ++i) {
+        float v = 0.0f;
+#ifdef ENABLE_FP16
+        if (out.getDataType() == ml::train::TensorDim::DataType::FP16)
+          v = static_cast<float>(out.template getData<_FP16>()[i]);
+        else
+#endif
+          if (out.getDataType() == ml::train::TensorDim::DataType::FP32)
+          v = out.template getData<float>()[i];
+        else
+          throw std::logic_error(
+            "lastOutputIsFinite: unsupported output tensor dtype");
+
+        if (!std::isfinite(v)) {
+          finite = false;
+          break;
+        }
+      }
+    });
+
+    if (!found)
+      throw std::logic_error(
+        "lastOutputIsFinite: output_of_causallm layer not found");
+    return finite;
+  }
+
+  /**
    * @brief Read one token from the model input/output history
    */
   unsigned int tokenAt(size_t idx) const override {
@@ -504,6 +560,10 @@ public:
     throw std::logic_error("getOutputText not supported for embedding models");
   }
   bool hasRun() const override { return false; }
+  bool lastOutputIsFinite() const override {
+    throw std::logic_error(
+      "lastOutputIsFinite not supported for embedding models");
+  }
   unsigned int tokenAt(size_t) const override {
     throw std::logic_error("tokenAt not supported for embedding models");
   }

@@ -193,17 +193,24 @@ causallm::json makeTinyGemma4Config() {
 /**
  * @brief Build, initialize and zero-weight a tiny model of the given type,
  * then run two prompts of different lengths through the same instance.
+ *
+ * Asserts the final logits tensor is finite after each run: dtype-clobbering
+ * bugs in a layer's updateTensorsByInputDimensions() (e.g. a residual add
+ * whose input view gets reinterpreted at the wrong dtype) corrupt the
+ * activation stream with NaN/Inf without necessarily throwing, so a plain
+ * ASSERT_NO_THROW is not sufficient to catch them.
  */
 template <typename Model>
-void runResetInputDimensionRegression(const std::string &suite,
-                                      const std::string &test,
-                                      const std::string &fixture_name,
-                                      causallm::json model_cfg) {
+void runResetInputDimensionRegression(
+  const std::string &suite, const std::string &test,
+  const std::string &fixture_name, causallm::json model_cfg,
+  const causallm_test::TinyCausalLMDataType &data_type =
+    causallm_test::makeTinyFp32DataType()) {
   auto files = causallm_test::makeTinyCausalLMFiles(suite, test, fixture_name);
 
   auto gen_cfg = causallm_test::makeTinyGenerationConfig();
-  auto nntr_cfg = causallm_test::makeTinyNntrainerConfig(
-    files.tokenizer_path, causallm_test::makeTinyFp32DataType());
+  auto nntr_cfg =
+    causallm_test::makeTinyNntrainerConfig(files.tokenizer_path, data_type);
 
   auto model = std::make_unique<Model>(model_cfg, gen_cfg, nntr_cfg);
   model->initializeModel();
@@ -213,12 +220,14 @@ void runResetInputDimensionRegression(const std::string &suite,
   // the sequence length away from whatever finalize() originally allocated.
   ASSERT_NO_THROW(model->runPrompt("hello tok4 tok5 tok6 tok7"));
   EXPECT_TRUE(model->hasRun());
+  EXPECT_TRUE(model->lastOutputIsFinite());
 
   // Run a second, shorter prompt through the same model instance:
   // resetInputDimension() is called on every run(), so this exercises
   // shrinking tensors back down too.
   ASSERT_NO_THROW(model->runPrompt("hello"));
   EXPECT_TRUE(model->hasRun());
+  EXPECT_TRUE(model->lastOutputIsFinite());
 }
 
 TEST(RunPromptResetInputDimensionEndToEnd, Qwen2RunPromptDoesNotCrash) {
@@ -244,5 +253,57 @@ TEST(RunPromptResetInputDimensionEndToEnd, Gemma4RunPromptDoesNotCrash) {
     "RunPromptResetInputDimensionEndToEnd", "Gemma4RunPromptDoesNotCrash",
     "Gemma4_FP32", makeTinyGemma4Config());
 }
+
+#ifdef ENABLE_FP16
+/**
+ * @brief FP16-activation coverage for the same resetInputDimension() path.
+ *
+ * Regression test for a bug where AdditionLayer/MultiplyLayer/MultiOutLayer/
+ * PerLayerSliceLayer's updateTensorsByInputDimensions() overwrote a tensor's
+ * entire TensorDim (including dtype) with the caller-supplied dimension --
+ * which defaults to FP32 -- instead of only updating height. On an FP16
+ * activation build this silently reinterpreted FP16 buffers as FP32 at the
+ * first decoder block's residual add, corrupting the activation stream with
+ * NaN/Inf from layer 0 onward. Only reproduces with FP16 activations:
+ * FP32 models never hit the dtype mismatch, and this file is excluded from
+ * the FP32-only host meson suite (see enable_causallm_model_unittest in
+ * Applications/CausalLM/meson.build), so this only runs in the Android
+ * FP16 unittest_causallm_models build.
+ *
+ * Uses the Q4_0-FP16 (weight+activation) data type -- the actual combination
+ * shipped on Android -- since plain FP32 weights are not supported with
+ * FP16 activations: FC/lm_head layers compute `input_.dot(weight_, ...)`,
+ * so with FP16 activations the dot is dispatched through HalfTensor::dot(),
+ * which only accepts an FP16, Q4_0, or Q6_K weight operand and throws
+ * "unsupported datatype" for a plain FP32 weight.
+ */
+TEST(RunPromptResetInputDimensionEndToEnd, Qwen2RunPromptFp16IsFinite) {
+  runResetInputDimensionRegression<TinyQwen2CausalLM>(
+    "RunPromptResetInputDimensionEndToEnd", "Qwen2RunPromptFp16IsFinite",
+    "Qwen2_FP16", makeTinyQwen2Config(),
+    causallm_test::makeTinyQ40Fp16DataType());
+}
+
+TEST(RunPromptResetInputDimensionEndToEnd, Qwen3RunPromptFp16IsFinite) {
+  runResetInputDimensionRegression<TinyQwen3CausalLM>(
+    "RunPromptResetInputDimensionEndToEnd", "Qwen3RunPromptFp16IsFinite",
+    "Qwen3_FP16", makeTinyQwen3Config(),
+    causallm_test::makeTinyQ40Fp16DataType());
+}
+
+TEST(RunPromptResetInputDimensionEndToEnd, Gemma3RunPromptFp16IsFinite) {
+  runResetInputDimensionRegression<TinyGemma3CausalLM>(
+    "RunPromptResetInputDimensionEndToEnd", "Gemma3RunPromptFp16IsFinite",
+    "Gemma3_FP16", makeTinyGemma3Config(),
+    causallm_test::makeTinyQ40Fp16DataType());
+}
+
+TEST(RunPromptResetInputDimensionEndToEnd, Gemma4RunPromptFp16IsFinite) {
+  runResetInputDimensionRegression<TinyGemma4CausalLM>(
+    "RunPromptResetInputDimensionEndToEnd", "Gemma4RunPromptFp16IsFinite",
+    "Gemma4_FP16", makeTinyGemma4Config(),
+    causallm_test::makeTinyQ40Fp16DataType());
+}
+#endif // ENABLE_FP16
 
 } // namespace

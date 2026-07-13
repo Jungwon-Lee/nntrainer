@@ -100,9 +100,12 @@ void PerLayerSliceLayer::incremental_forwarding(
 void PerLayerSliceLayer::updateTensorsByInputDimensions(
   nntrainer::RunLayerContext &context,
   std::vector<nntrainer::TensorDim> input_dimensions) {
-  auto out_dim = input_dimensions[0];
-  out_dim.width(std::get<props::FeatureSize>(slice_props).get());
-  context.updateInput(SINGLE_INOUT_IDX, input_dimensions[0]);
+  auto in_dim = context.getInput(SINGLE_INOUT_IDX).getDim();
+  in_dim.height(input_dimensions[0].height());
+  context.updateInput(SINGLE_INOUT_IDX, in_dim);
+
+  auto out_dim = context.getOutput(SINGLE_INOUT_IDX).getDim();
+  out_dim.height(input_dimensions[0].height());
   context.updateOutput(SINGLE_INOUT_IDX, out_dim);
 }
 
