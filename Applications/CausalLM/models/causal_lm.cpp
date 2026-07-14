@@ -36,6 +36,7 @@
 #include <layer_context.h>
 #include <lm_head.h>
 #include <mha_core.h>
+#include <sparse_lm_head.h>
 #include <nntrainer_error.h>
 #include <tensor.h>
 
@@ -69,6 +70,13 @@ void CausalLM::setupParameters(json &cfg, json &generation_cfg,
   SKIP_PREFILL = nntr_cfg.contains("skip_prefill")
                    ? nntr_cfg["skip_prefill"].get<bool>()
                    : false;
+
+  SPARSE_LMHEAD = nntr_cfg.contains("sparse_lmhead")
+                    ? nntr_cfg["sparse_lmhead"].get<bool>()
+                    : false;
+  PREDICTOR_UNIT = nntr_cfg.contains("predictor_unit")
+                     ? nntr_cfg["predictor_unit"].get<unsigned int>()
+                     : 128u;
 
   USE_KVCACHE = false;
   PRE_COMPUTED_CACHE_PATH = "";
@@ -195,8 +203,13 @@ std::pair<Tensor, Tensor> CausalLM::constructModel() {
   // base transformer (input, output_norm)
   auto [x, h] = Transformer::constructModel();
 
-  const std::string lmhead_type =
-    TIE_WORD_EMBEDDINGS ? "tie_word_embeddings" : "lm_head";
+  // Sparse lm-head predictor (§6.2). It carries its OWN plain weight + predictor
+  // (never shared_from embedding), so it works for both tied and untied models;
+  // the bin must provide those tensors at the end (see quantize_stream).
+  const bool use_sparse_lmhead = SPARSE_LMHEAD;
+  const std::string lmhead_type = use_sparse_lmhead ? "sparse_lm_head"
+                                  : TIE_WORD_EMBEDDINGS ? "tie_word_embeddings"
+                                                        : "lm_head";
 
   std::vector<std::string> lmhead_prop = {
     withKey("name", "output_of_causallm"),
@@ -205,8 +218,10 @@ std::pair<Tensor, Tensor> CausalLM::constructModel() {
     withKey("weight_dtype", LMHEAD_DTYPE),
   };
 
-  if (TIE_WORD_EMBEDDINGS)
+  if (TIE_WORD_EMBEDDINGS && !use_sparse_lmhead)
     lmhead_prop.emplace_back(withKey("shared_from", "embedding0"));
+  if (use_sparse_lmhead)
+    lmhead_prop.emplace_back(withKey("predictor_unit", PREDICTOR_UNIT));
 
   LayerHandle lmhead(createLayer(lmhead_type, lmhead_prop));
   Tensor y = lmhead(h);
@@ -328,6 +343,8 @@ void CausalLM::registerCustomLayers() {
     static_cast<nntrainer::AppContext *>(ct_engine.getRegisteredContext("cpu"));
   try {
     app_context->registerFactory(nntrainer::createLayer<causallm::LmHeadLayer>);
+    app_context->registerFactory(
+      nntrainer::createLayer<causallm::SparseLmHeadLayer>);
   } catch (std::invalid_argument &e) {
     std::cerr << "failed to register factory, reason: " << e.what()
               << std::endl;

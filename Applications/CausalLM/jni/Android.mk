@@ -88,6 +88,7 @@ LOCAL_SRC_FILES := \
     ../layers/logit_softcapping.cpp \
     ../layers/mha_core.cpp \
     ../layers/lm_head.cpp \
+    ../layers/sparse_lm_head.cpp \
     ../models/qwen3_moe/qwen_moe_layer.cpp \
     ../layers/reshaped_rms_norm.cpp \
     ../layers/rms_norm.cpp \
@@ -235,6 +236,7 @@ LOCAL_SRC_FILES := ../quantize.cpp \
     ../layers/swiglu.cpp \
     ../layers/tie_word_embedding.cpp\
     ../layers/lm_head.cpp\
+    ../layers/sparse_lm_head.cpp\
     ../models/qwen3_cached_slim_moe/qwen_moe_layer_cached.cpp \
     ../layers/qkv_layer.cpp \
     ../models/qwen3_slim_moe/qwen_moe_layer_fsu.cpp \

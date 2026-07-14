@@ -244,9 +244,17 @@ void SmallThinkerSlimCausalLM::registerCustomLayers() {
 }
 
 // Check at startup whether prefetch is enabled (env var read once).
+// Mirrors g_prefetch_threads in smallthinker_moe_layer_cached_slim.cpp:
+//   Android default = enabled (background madvise hides real I/O latency),
+//   x86 default = disabled (warm page cache → mmap_lock contention on x86
+//   causes ~3× regression when background workers run during attention).
 static const bool g_prefetch_enabled = []() {
   const char *env = std::getenv("NNTR_MOE_PREFETCH_THREADS");
+#ifdef __ANDROID__
   return !env || std::stoi(env) != 0;
+#else
+  return env != nullptr && std::stoi(env) != 0;
+#endif
 }();
 
 Tensor SmallThinkerCachedSlimCausalLM::createTransformerDecoderBlock(

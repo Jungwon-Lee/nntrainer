@@ -1,3 +1,104 @@
+# SmallThinker — Sparse LM-Head Predictor (paper §6.2, PowerInfer port) — DONE
+
+## Status (2026-07-01)
+
+- **Phases 1–4 DONE; 4B x86 validated & WINS.** Implemented as a NEW standalone layer
+  `sparse_lm_head` (`Applications/CausalLM/layers/sparse_lm_head.{h,cpp}`, kernels in
+  `q4_0_row_kernels.h`) — lm_head.{h,cpp} left pristine. Predictor = 2 dense `.dot()`s
+  (mid=h·W1, score=mid·W2); active vocab = `score>threshold` (+ top-K floor); exact logits
+  only for active rows via `q4_0_row_dot_q8` on a PLAIN lm_head; others −inf. 3 weights
+  (plain lm_head, W1, W2) appended at the end (binding is by ORDER). Config-gated
+  (`sparse_lmhead:true` + `predictor_unit`), works for tied (4B) and untied (21B).
+- **4B x86 full comparison (437-tok Thyme, 4 thr, OPENBLAS=1, 5-run stable warm):**
+  | Variant | Decode TPS | vs Dense |
+  |---|---|---|
+  | Dense cached_slim | 65.9 | — |
+  | Sparse FFN only | 67.0 | +2% |
+  | Sparse lmhead only | **75.8** | **+15%** |
+  | Combo (FFN+lmhead) | 74.8 | +14% |
+  Sparse lmhead dominates: lm_head is ~14% of 4B decode and the 4B model is bandwidth-bound
+  enough at the lmhead step that predictor savings outweigh overhead (unlike 21B x86 which regresses).
+  Combo +14% ≈ lmhead-only +15% — sparse FFN adds negligible overhead on top.
+  **Recommended: `Q4_0_sparse_lmhead_x86` (pure lmhead, +15%) or combo (+14%).**
+  Bins: `Q4_0_sparse_lmhead_x86`, `Q4_0_sparse_ffn_lmhead_x86` (both 2.3 GB).
+  Accuracy (thr=0): ~7% vocab active, 13% dense-argmax miss → threshold −1..−2 recommended.
+- **Phase 5 DONE — 21B Android S25 = BIG WIN.** arch SmallThinkerCachedSlimForCausalLM +
+  `sparse_lmhead:true`, cache=32, 4 threads. Decode: predictor **ON thr−2 = 6.7 TPS** vs
+  same-bin OFF **4.2** vs repacked dense baseline **3.95** → **+59% same-bin / +70% vs
+  baseline.** thr−2: 6% vocab active, **2.0% argmax miss**, coherent. (thr0 same speed,
+  13% miss → thr−2 sweet spot.) Win is large because dense lm_head (152k×2560) is ~40% of
+  21B decode on the bandwidth-bound device. 21B ARM bin `Q4_0_sparse_lmhead_arm` (12.1GB)
+  built with quantize_stream `--predictor_fp32` (79MB side file, no 86GB FP32 copy).
+  sparse_lm_head.cpp added to both jni/Android.mk sections (monolithic libcausallm_core.so).
+  **The §6.2 LM-head predictor is the real Android decode lever (FFN sparsity was par here).**
+- **21B x86 sparse lmhead: REGRESSES (−11%).** Crash from prior session was `init_seq_len=64`
+  misconfiguration (quantize_stream default, fixed to 1024). With correct config (437-tok Thyme
+  input, 128 gen, 4 thr, OPENBLAS=1): decode **17.8 TPS** vs dense **19.96 TPS** = **−11%**.
+  Prefill also slower: 40.6 vs 43.4 TPS (−7%, predictor W1/W2 overhead in prefill mode).
+  Root cause: x86 not bandwidth-bound → predictor overhead > sparse gather savings.
+- **21B x86 sparse FFN only (cached-slim): REGRESSES decode (−6%).** Prefill WINS **+7%**
+  (sparse neurons skip compute). Decode 18.78 vs 19.96 TPS = −6%.
+- **21B x86 COMBO (sparse FFN + sparse lmhead): nearly neutral decode, best prefill.**
+  `Q4_0_sparse_ffn_lmhead_x86` (`SmallThinkerSparseCachedSlimForCausalLM` + `sparse_lmhead:true`).
+  Decode: **19.79 TPS** vs dense **19.96** = **−1% (within noise)**. Prefill: **47.5 TPS** vs
+  dense **43.4** = **+9%**. The two sparse techniques partially cancel each other's overhead:
+  sparse FFN reduces MoE compute (saves time), sparse lmhead reduces lmhead compute (saves time),
+  net decode overhead ~0. Best x86 choice for prefill-heavy workloads; safe for decode-heavy
+  (−1% rounding error). Bin at `Q4_0_sparse_ffn_lmhead_x86` (12GB). Key: combo ≥ dense on
+  prefill; no accuracy regression (combo generates full 128 tokens = no spurious EOS from FFN).
+
+## Context
+
+Optimizing SmallThinker-21B-A3B decode for Android. The §6.2 sparse **ReGLU FFN** is done
+(x86 21B decode +8%, Android prefill +30–50%, decode ~par) — **out of scope, audit only.**
+The remaining §6.2 technique is the **sparse LM head**. For 21B `lm_head = [vocab 151936 ×
+hidden 2560] ≈ 389M params ≈ 195 MB Q4_0`, recomputed in full every token (~14% of 4B
+decode). Unlike FFN sparsity (experts RAM-resident → no bytes saved), the predictor is
+**bandwidth-saving** (replaces 195 MB dense read with predictor ~19 MB + active rows only),
+so it should help on bandwidth-bound Android decode. Expected ~10% decode if active-fraction
+~20%; measured early, gates 21B/Android.
+
+## Predictor mechanism (verified vs PowerInfer source)
+
+2-layer linear MLP, no activation between layers; ships separately as `model_lm_head.pt`
+(~79 MB, on HF for both 4B and 21B; NOT in base safetensors). **W1**`[hidden×H]`,
+**W2**`[H×vocab]`, H≈256. Decode-only per token:
+`mid=W1ᵀ·q8(h)` → `score=W2ᵀ·q8(mid)` over all vocab → `mask[v]=score[v]>THRESHOLD`
+→ real logit only for masked rows, else suppressed. PowerInfer THRESHOLD=0, no argmax
+guarantee.
+
+## Decisions (locked)
+- Validate **4B first**, then 21B.
+- **Threshold + top-K safety floor** (always keep top-K predictor rows → argmax virtually
+  never dropped; THRESHOLD & K env-tunable). Plus near-free fallback/instrumented mode.
+
+## Phases
+1. **Spike (MAIN RISK):** download+inspect `model_lm_head.pt` (4B), confirm W1/W2 shapes,
+   recover H, check bias/scale; extend `Quick.AI/res/smallthinker/weight_converter.py` to
+   emit W1/W2. Gate: stop if unparseable.
+2. **Converter:** `tools/quantize_stream/quantize_stream.cpp` (+recipe, +Quick.AI mirror &
+   rebuild): W2[H,vocab]→Q4_0 repacked, W1→Q8_0/FP32, tensors `output_profiler_w1/w2`;
+   lm_head → plain row-major Q4_0 (`writeTransposedMatrixPlain`); keep Q4_0 embd/lmhead.
+3. **Layer:** extract `q4_0_row_dot_q8`+`quantize_row_q8_0_local` to a shared header
+   (behavior-preserving); `Applications/CausalLM/layers/lm_head.{h,cpp}` predictor GEMVs +
+   mask (threshold+top-K floor) + sparse per-row logits, `-inf` inactive. Env:
+   `NNTR_SPARSE_LMHEAD`, `NNTR_LMHEAD_THRESHOLD`, `NNTR_LMHEAD_TOPK_FLOOR`,
+   `NNTR_LMHEAD_SPARSITY_LOG`.
+4. **Validate 4B (x86):** A/B dense vs sparse (4 threads, `OPENBLAS_NUM_THREADS=1`, perf
+   governor, 512-tok, both orders); record coherence, dropped-dense-argmax rate, TPS,
+   active-fraction. Go/no-go gate.
+5. **21B + Android:** regen 21B bin; register in `jni/Android.mk`; ndk-build arm64-v8a
+   (NEON `q4_0_row_dot_q8` reused); on-device S25 A/B.
+
+## Risks
+1. `model_lm_head.pt` layout unknown until Phase-1 spike (gated; needs HF access).
+2. Active-fraction may be high → smaller gain (measured Phase 4 before 21B/Android).
+3. Predictor trained vs PowerInfer pipeline; our q8_0 of h/mid may shift scores → tune
+   THRESHOLD; top-K floor protects argmax.
+4. Plain dense lm_head fallback may be slower than repacked → dual-layout fallback.
+
+---
+
 # SmallThinker Sparse ReGLU FFN — Optimization B3 (hybrid repacked gate) + B1 (balanced active work)
 
 ## Status (2026-06-30)

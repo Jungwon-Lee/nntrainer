@@ -147,6 +147,8 @@ protected:
   bool SAVE_KVCACHE;
   bool USE_KVCACHE;
   bool SKIP_PREFILL;
+  bool SPARSE_LMHEAD;          /**< use the sparse lm-head predictor (§6.2) */
+  unsigned int PREDICTOR_UNIT; /**< predictor H (default 128) */
   unsigned int global_token_len;
 
   std::mt19937 rng; /**< Random Number Gen */

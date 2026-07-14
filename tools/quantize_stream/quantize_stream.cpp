@@ -150,6 +150,10 @@ void printUsage(const char *program, const RecipeRegistry &registry) {
             << "  --embd_dtype <type>   Embedding dtype (default: FP32)\n"
             << "  --lmhead_dtype <type> LM head dtype (default: FP32)\n"
             << "  --output_bin <name>   Output .bin filename\n"
+            << "  --sparse_lmhead       Emit §6.2 sparse lm-head (plain head + "
+               "predictor fc1/fc2); requires a bin from weight_converter "
+               "--sparse_lmhead\n"
+            << "  --predictor_hidden <N> Predictor H (default 128)\n"
             << "  --isa <target>        Q4_0 repack format: DEFAULT, X86 "
                "(q4_0x8), ARM (q4_0x4). Default: DEFAULT (x86).\n"
             << "  -h, --help            Show this help\n\n"
@@ -179,6 +183,9 @@ int run(int argc, char **argv) {
   const std::filesystem::path model_dir = argv[1];
   const std::filesystem::path output_dir = argv[2];
   QuantPlan quant_plan;
+  bool sparse_lmhead = false;     // §6.2 sparse lm-head predictor weights
+  size_t predictor_hidden = 128;  // predictor H (fc1 out / fc2 in)
+  std::string predictor_fp32_path; // optional side file (fc1^T then fc2^T fp32)
   std::string output_bin_name_arg;
   ml::train::ISA isa = ml::train::ISA::DEFAULT;
 
@@ -200,6 +207,12 @@ int run(int argc, char **argv) {
       quant_plan.lmhead_dtype = parseDType(argv[++i]);
     } else if (arg == "--output_bin" && i + 1 < argc) {
       output_bin_name_arg = argv[++i];
+    } else if (arg == "--sparse_lmhead") {
+      sparse_lmhead = true;
+    } else if (arg == "--predictor_hidden" && i + 1 < argc) {
+      predictor_hidden = (size_t)std::strtoul(argv[++i], nullptr, 10);
+    } else if (arg == "--predictor_fp32" && i + 1 < argc) {
+      predictor_fp32_path = argv[++i];
     } else if (arg == "--isa" && i + 1 < argc) {
       std::string v = upper(argv[++i]);
       if (v == "ARM")
@@ -274,9 +287,51 @@ int run(int argc, char **argv) {
   }
 
   writer.copyFp32Tensor(plan.hidden, "output_norm");
-  if (plan.tied_embeddings) {
+  if (sparse_lmhead) {
+    // §6.2 sparse lm-head: the FP32 .bin carries an EXPLICIT lm_head tensor at
+    // the end (appended by weight_converter --sparse_lmhead, from lm_head.weight
+    // for untied models or embed_tokens.weight for tied), transposed to
+    // [in=hidden, out=vocab], followed by predictor fc1 [hidden,H] and fc2
+    // [H,vocab]. lm_head is stored PLAIN row-major (per-row addressable for the
+    // sparse gather); fc1/fc2 are repacked (used via dense dot()). Order here
+    // MUST match SparseLmHeadLayer::finalize()'s requestWeight order (weights
+    // bind by order, not name).
+    writer.writeTransposedMatrixPlain(plan.hidden, plan.vocab,
+                                      quant_plan.lmhead_dtype,
+                                      "output_of_causallm");
+    if (!predictor_fp32_path.empty()) {
+      // Predictor read from a small side file (fc1^T [hidden,H] then fc2^T
+      // [H,vocab], fp32) so the (large, untied) main FP32 bin needs no copy.
+      std::ifstream pin(predictor_fp32_path, std::ios::binary);
+      if (!pin.is_open())
+        throw std::runtime_error("Failed to open predictor fp32: " +
+                                 predictor_fp32_path);
+      TensorWriter pwriter(pin, output, isa);
+      pwriter.writeTransposedMatrix(plan.hidden, predictor_hidden,
+                                    quant_plan.lmhead_dtype,
+                                    "output_profiler_w1");
+      pwriter.writeTransposedMatrix(predictor_hidden, plan.vocab,
+                                    quant_plan.lmhead_dtype,
+                                    "output_profiler_w2");
+      pin.peek();
+      if (!pin.eof())
+        throw std::runtime_error("predictor fp32 has trailing unread bytes");
+    } else {
+      writer.writeTransposedMatrix(plan.hidden, predictor_hidden,
+                                   quant_plan.lmhead_dtype,
+                                   "output_profiler_w1");
+      writer.writeTransposedMatrix(predictor_hidden, plan.vocab,
+                                   quant_plan.lmhead_dtype,
+                                   "output_profiler_w2");
+    }
+    std::cout << "  output_of_causallm (PLAIN) + profiler_w1/w2 (H="
+              << predictor_hidden << ") -> "
+              << dtypeName(quant_plan.lmhead_dtype) << "\n";
+  } else if (plan.tied_embeddings) {
     writer.quantizeTiedLmHead(embedding_cache, plan.vocab, plan.hidden,
                               quant_plan.lmhead_dtype, "output_of_causallm");
+    std::cout << "  output_of_causallm -> " << dtypeName(quant_plan.lmhead_dtype)
+              << "\n";
   } else {
     // Untied lm_head: the FP32 .bin stores it transposed to [in=hidden,
     // out=vocab] (like every other projection). It must be transposed back to
@@ -286,9 +341,9 @@ int run(int argc, char **argv) {
     // garbage generation.
     writer.writeTransposedMatrix(plan.hidden, plan.vocab, quant_plan.lmhead_dtype,
                                  "output_of_causallm");
+    std::cout << "  output_of_causallm -> " << dtypeName(quant_plan.lmhead_dtype)
+              << "\n";
   }
-  std::cout << "  output_of_causallm -> " << dtypeName(quant_plan.lmhead_dtype)
-            << "\n";
 
   const auto consumed = input.tellg();
   input.peek();
