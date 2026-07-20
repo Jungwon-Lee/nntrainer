@@ -25,6 +25,8 @@
 #include <acti_func.h>
 #include <algorithm>
 #include <cmath>
+#include <cstring>
+#include <functional>
 #include <node_exporter.h>
 #include <qwen_moe_layer.h>
 #include <stdexcept>
@@ -208,50 +210,46 @@ void MoELayer::forwarding(nntrainer::RunLayerContext &context, bool training) {
     }
   }
 
-  // Adaptive optimization based on workload
-  const int active_experts =
-    std::count_if(expert_assignments.begin(), expert_assignments.end(),
-                  [](const auto &assignments) { return !assignments.empty(); });
-
-  // Calculate total work (sum of token assignments across all experts)
-  int total_work = 0;
-  for (const auto &assignments : expert_assignments) {
-    total_work += assignments.size();
+  std::vector<nntrainer::Tensor> expert_outputs(num_experts);
+  for (size_t expert_idx = 0; expert_idx < num_experts; ++expert_idx) {
+    const size_t assigned_tokens = expert_assignments[expert_idx].size();
+    if (assigned_tokens > 0) {
+      expert_outputs[expert_idx] = nntrainer::Tensor(
+        assigned_tokens, 1, 1, hidden_size, output.getTensorType());
+    }
   }
 
-  // Use parallel processing only when it's beneficial
-  const bool use_parallel = (total_work > 4) && (active_experts > 1);
+  const size_t active_experts =
+    std::count_if(expert_assignments.begin(), expert_assignments.end(),
+                  [](const auto &assignments) { return !assignments.empty(); });
+  size_t total_work = 0;
+  for (const auto &assignments : expert_assignments)
+    total_work += assignments.size();
 
-  if (use_parallel) {
-    // Parallel processing for larger workloads
+  auto compute_expert = [&](size_t expert_idx) {
+    const auto &assignments = expert_assignments[expert_idx];
+    if (assignments.empty())
+      return;
+
+    compute_expert_forward(
+      input, expert_outputs[expert_idx], assignments,
+      context.getWeight(expert_gate_proj_indices[expert_idx]),
+      context.getWeight(expert_up_proj_indices[expert_idx]),
+      context.getWeight(expert_down_proj_indices[expert_idx]), hidden_size);
+  };
+
+  if (total_work > 4 && active_experts > 1) {
     auto &tm = nntrainer::ThreadManager::Global();
-    tm.parallel_for(
-      0, static_cast<size_t>(num_experts), [&](size_t expert_idx) {
-        const auto &assignments = expert_assignments[expert_idx];
-        if (assignments.empty())
-          return;
-
-        // Use optimized expert forward computation without memory copies
-        compute_expert_forward(
-          input, output, assignments,
-          context.getWeight(expert_gate_proj_indices[expert_idx]),
-          context.getWeight(expert_up_proj_indices[expert_idx]),
-          context.getWeight(expert_down_proj_indices[expert_idx]), hidden_size);
-      });
+    tm.parallel_for(0, static_cast<size_t>(num_experts), compute_expert);
   } else {
-    // Sequential processing for smaller workloads
-    for (int expert_idx = 0; expert_idx < static_cast<int>(num_experts);
-         ++expert_idx) {
-      const auto &assignments = expert_assignments[expert_idx];
-      if (assignments.empty())
-        continue;
+    for (size_t expert_idx = 0; expert_idx < num_experts; ++expert_idx)
+      compute_expert(expert_idx);
+  }
 
-      // Use optimized expert forward computation without memory copies
-      compute_expert_forward(
-        input, output, assignments,
-        context.getWeight(expert_gate_proj_indices[expert_idx]),
-        context.getWeight(expert_up_proj_indices[expert_idx]),
-        context.getWeight(expert_down_proj_indices[expert_idx]), hidden_size);
+  for (size_t expert_idx = 0; expert_idx < num_experts; ++expert_idx) {
+    if (!expert_assignments[expert_idx].empty()) {
+      scatter_expert_output(output, expert_outputs[expert_idx],
+                            expert_assignments[expert_idx], hidden_size);
     }
   }
 
@@ -259,78 +257,7 @@ void MoELayer::forwarding(nntrainer::RunLayerContext &context, bool training) {
   output.reshape({batch_size, 1, seq_len, hidden_size});
 }
 
-inline void MoELayer::compute_expert_forward(
-  const nntrainer::Tensor &input, nntrainer::Tensor &output,
-  const std::vector<std::pair<unsigned, float>> &token_assignments,
-  const nntrainer::Tensor &gate_proj, const nntrainer::Tensor &up_proj,
-  const nntrainer::Tensor &down_proj, unsigned int hidden_size) {
-
-  const unsigned intermediate_size = gate_proj.width();
-  const unsigned num_tokens = token_assignments.size();
-
-  if (num_tokens == 0)
-    return;
-
-  // Create tensor dimensions for single token processing
-  nntrainer::TensorDim token_input_dim({1, 1, 1, hidden_size},
-                                       input.getTensorType());
-  nntrainer::TensorDim intermediate_dim({1, 1, 1, intermediate_size},
-                                        input.getTensorType());
-  nntrainer::TensorDim token_output_dim({1, 1, 1, hidden_size},
-                                        input.getTensorType());
-
-  // Create a temporary output tensor for this expert to avoid critical section
-  nntrainer::Tensor expert_output(output.batch(), output.channel(),
-                                  output.height(), output.width(),
-                                  output.getTensorType());
-  expert_output.setZero();
-
-  // Process each token individually to avoid memory copies
-  for (size_t i = 0; i < num_tokens; ++i) {
-    const unsigned token_idx = token_assignments[i].first;
-    const float weight = token_assignments[i].second;
-
-    // Create shared tensor for input token (no memory copy)
-    size_t token_offset = token_idx * hidden_size;
-    nntrainer::Tensor token_input =
-      input.getSharedDataTensor(token_input_dim, token_offset, true);
-
-    // Create intermediate tensors for this token
-    nntrainer::Tensor gate_out(intermediate_dim);
-    nntrainer::Tensor acti_out(intermediate_dim);
-    nntrainer::Tensor up_out(intermediate_dim);
-
-    // Gate projection using optimized dot operation
-    token_input.dot(gate_proj, gate_out);
-
-    // Apply activation (silu)
-    acti_func.run_fn(gate_out, acti_out);
-
-    // Up projection using optimized dot operation
-    token_input.dot(up_proj, up_out);
-
-    // Element-wise multiply: silu(gate_out) * up_out
-    acti_out.multiply_i(up_out);
-
-    // Down projection using optimized dot operation
-    nntrainer::Tensor token_expert_output(token_output_dim);
-    acti_out.dot(down_proj, token_expert_output);
-
-    // Apply weight and accumulate to expert's temporary output
-    token_expert_output.multiply_i(weight);
-    size_t output_offset = token_idx * hidden_size;
-    nntrainer::Tensor token_output =
-      expert_output.getSharedDataTensor(token_output_dim, output_offset, true);
-
-    token_output.add_i(token_expert_output);
-  }
-
-  // Add expert's result to final output (no critical section in sequential
-  // mode)
-  output.add_i(expert_output);
-}
-
-inline void MoELayer::compute_expert_forward_no_critical(
+void MoELayer::compute_expert_forward(
   const nntrainer::Tensor &input, nntrainer::Tensor &expert_output,
   const std::vector<std::pair<unsigned, float>> &token_assignments,
   const nntrainer::Tensor &gate_proj, const nntrainer::Tensor &up_proj,
@@ -342,53 +269,71 @@ inline void MoELayer::compute_expert_forward_no_critical(
   if (num_tokens == 0)
     return;
 
-  // Create tensor dimensions for single token processing
   nntrainer::TensorDim token_input_dim({1, 1, 1, hidden_size},
                                        input.getTensorType());
   nntrainer::TensorDim intermediate_dim({1, 1, 1, intermediate_size},
                                         input.getTensorType());
-  nntrainer::TensorDim token_output_dim({1, 1, 1, hidden_size},
-                                        input.getTensorType());
-
-  // Process each token individually to avoid memory copies
-  for (size_t i = 0; i < num_tokens; ++i) {
-    const unsigned token_idx = token_assignments[i].first;
-    const float weight = token_assignments[i].second;
-
-    // Create shared tensor for input token (no memory copy)
-    size_t token_offset = token_idx * hidden_size;
+  if (num_tokens == 1) {
+    const unsigned token_idx = token_assignments[0].first;
+    const float weight = token_assignments[0].second;
     nntrainer::Tensor token_input =
-      input.getSharedDataTensor(token_input_dim, token_offset, true);
-
-    // Create intermediate tensors for this token
+      input.getSharedDataTensor(token_input_dim, token_idx * hidden_size, true);
     nntrainer::Tensor gate_out(intermediate_dim);
     nntrainer::Tensor acti_out(intermediate_dim);
     nntrainer::Tensor up_out(intermediate_dim);
-
-    // Gate projection using optimized dot operation
     token_input.dot(gate_proj, gate_out);
-
-    // Apply activation (silu)
     acti_func.run_fn(gate_out, acti_out);
-
-    // Up projection using optimized dot operation
     token_input.dot(up_proj, up_out);
-
-    // Element-wise multiply: silu(gate_out) * up_out
     acti_out.multiply_i(up_out);
+    acti_out.dot(down_proj, expert_output);
+    expert_output.multiply_i(weight);
+    return;
+  }
 
-    // Down projection using optimized dot operation
-    nntrainer::Tensor token_expert_output(token_output_dim);
-    acti_out.dot(down_proj, token_expert_output);
+  nntrainer::Tensor packed_input(num_tokens, 1, 1, hidden_size,
+                                 input.getTensorType());
+  float *packed_data = packed_input.getData<float>();
+  const float *input_data = input.getData<float>();
+  for (size_t i = 0; i < num_tokens; ++i) {
+    const unsigned token_idx = token_assignments[i].first;
+    std::memcpy(packed_data + i * hidden_size,
+                input_data + token_idx * hidden_size,
+                sizeof(float) * hidden_size);
+  }
 
-    // Apply weight and accumulate to expert's output (no critical section
-    // needed)
-    token_expert_output.multiply_i(weight);
-    size_t output_offset = token_idx * hidden_size;
-    nntrainer::Tensor token_output =
-      expert_output.getSharedDataTensor(token_output_dim, output_offset, true);
+  nntrainer::TensorDim batched_intermediate_dim(
+    {num_tokens, 1, 1, intermediate_size}, input.getTensorType());
+  nntrainer::Tensor gate_out(batched_intermediate_dim);
+  nntrainer::Tensor acti_out(batched_intermediate_dim);
+  nntrainer::Tensor up_out(batched_intermediate_dim);
 
-    token_output.add_i(token_expert_output);
+  packed_input.dot(gate_proj, gate_out);
+  acti_func.run_fn(gate_out, acti_out);
+  packed_input.dot(up_proj, up_out);
+  acti_out.multiply_i(up_out);
+  acti_out.dot(down_proj, expert_output);
+
+  float *expert_data = expert_output.getData<float>();
+  for (size_t i = 0; i < num_tokens; ++i) {
+    const float weight = token_assignments[i].second;
+    std::transform(expert_data + i * hidden_size,
+                   expert_data + (i + 1) * hidden_size,
+                   expert_data + i * hidden_size,
+                   [weight](float value) { return value * weight; });
+  }
+}
+
+void MoELayer::scatter_expert_output(
+  nntrainer::Tensor &output, const nntrainer::Tensor &expert_output,
+  const std::vector<std::pair<unsigned, float>> &token_assignments,
+  unsigned int hidden_size) const {
+  const float *expert_data = expert_output.getData<float>();
+  float *output_data = output.getData<float>();
+  for (size_t i = 0; i < token_assignments.size(); ++i) {
+    float *output_row = output_data + token_assignments[i].first * hidden_size;
+    std::transform(output_row, output_row + hidden_size,
+                   expert_data + i * hidden_size, output_row,
+                   std::plus<float>());
   }
 }
 
@@ -465,14 +410,14 @@ void MoELayer::incremental_forwarding(nntrainer::RunLayerContext &context,
       }
     }
 
-    // Parallel processing for multiple tokens with many active experts
+    // Compute compact expert outputs in parallel.
     std::vector<nntrainer::Tensor> expert_outputs(num_experts);
     for (int expert_idx = 0; expert_idx < static_cast<int>(num_experts);
          ++expert_idx) {
       if (!expert_assignments[expert_idx].empty()) {
-        expert_outputs[expert_idx] = nntrainer::Tensor(
-          total_tokens, 1, 1, hidden_size, output.getTensorType());
-        expert_outputs[expert_idx].setZero();
+        expert_outputs[expert_idx] =
+          nntrainer::Tensor(expert_assignments[expert_idx].size(), 1, 1,
+                            hidden_size, output.getTensorType());
       }
     }
 
@@ -484,7 +429,7 @@ void MoELayer::incremental_forwarding(nntrainer::RunLayerContext &context,
           if (assignments.empty())
             return;
 
-          compute_expert_forward_no_critical(
+          compute_expert_forward(
             input, expert_outputs[expert_idx], assignments,
             context.getWeight(expert_gate_proj_indices[expert_idx]),
             context.getWeight(expert_up_proj_indices[expert_idx]),
@@ -493,11 +438,12 @@ void MoELayer::incremental_forwarding(nntrainer::RunLayerContext &context,
         });
     }
 
-    // Combine expert outputs
+    // Scatter expert outputs without concurrent writes to token rows.
     for (int expert_idx = 0; expert_idx < static_cast<int>(num_experts);
          ++expert_idx) {
       if (!expert_assignments[expert_idx].empty()) {
-        output.add_i(expert_outputs[expert_idx]);
+        scatter_expert_output(output, expert_outputs[expert_idx],
+                              expert_assignments[expert_idx], hidden_size);
       }
     }
 
