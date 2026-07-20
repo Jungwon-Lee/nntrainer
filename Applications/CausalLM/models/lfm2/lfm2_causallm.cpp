@@ -627,6 +627,7 @@ void Lfm2CausalLM::run_with_embeddings(const void *inputs_embeds,
       model->incremental_inference(BATCH_SIZE, input, label, input_len,
                                    token_generation_idx - 1 + global_token_len,
                                    token_generation_idx + global_token_len);
+    advanceKVCachePosition(1);
 
     id_list = generate(output_interval[0], do_sample);
     generated_ids_.push_back(id_list[0]);
