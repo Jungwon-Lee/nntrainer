@@ -405,23 +405,18 @@ public:
       const T *input = t_in.getData<T>();
       T *output = t_out.getData<T>();
 
-      auto swish_chunk = [=](size_t begin, size_t end) {
-        for (size_t i = begin; i < end; ++i) {
-          const float value = static_cast<float>(input[i]);
-          output[i] = static_cast<T>(value / (1.0f + std::exp(-value)));
-        }
+      auto swish_at = [=](size_t i) {
+        const float value = static_cast<float>(input[i]);
+        output[i] = static_cast<T>(value / (1.0f + std::exp(-value)));
       };
 
       auto &thread_manager = ThreadManager::Global();
       const unsigned int thread_count = thread_manager.getComputeThreadCount();
       if (thread_count <= 1 || size < parallel_threshold) {
-        swish_chunk(0, size);
+        for (size_t i = 0; i < size; ++i)
+          swish_at(i);
       } else {
-        thread_manager.parallel_for(
-          0, static_cast<size_t>(thread_count), [=](size_t thread_index) {
-            swish_chunk(size * thread_index / thread_count,
-                        size * (thread_index + 1) / thread_count);
-          });
+        thread_manager.parallel_for(0, size, swish_at);
       }
       return t_out;
     }
