@@ -18,3 +18,7 @@ executable('Benchmark_ResNet',
            include_directories : [include_directories('.'), fake_datagen_include_dir],
            dependencies : resnet_dependencies,
            link_args: benchmark_ling_args)
+
+executable('Benchmark_Activation',
+           'benchmark_activation.cpp',
+           dependencies : [nntrainer_dep, benchmark_dep])
