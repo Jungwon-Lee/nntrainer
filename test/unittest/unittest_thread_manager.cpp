@@ -92,6 +92,28 @@ TEST(ThreadManager, ParallelForMultipleCalls) {
   }
 }
 
+// ─── ThreadManager Nested Tests ────────────────────────────
+
+TEST(ThreadManager, NestedParallelForExecutesAllElements) {
+  auto &tm = nntrainer::ThreadManager::Global();
+  const size_t OUTER_SIZE = 8;
+  const size_t INNER_SIZE = 16;
+  std::vector<std::atomic<int>> flags(OUTER_SIZE * INNER_SIZE);
+  for (auto &flag : flags)
+    flag.store(0);
+
+  tm.parallel_for(0, OUTER_SIZE, [&](size_t outer) {
+    tm.parallel_for(0, INNER_SIZE, [&](size_t inner) {
+      flags[outer * INNER_SIZE + inner].fetch_add(1);
+    });
+  });
+
+  for (size_t i = 0; i < flags.size(); ++i) {
+    EXPECT_EQ(flags[i].load(), 1)
+      << "Index " << i << " not executed exactly once";
+  }
+}
+
 // ─── ThreadManager Query Tests ──────────────────────────────
 
 TEST(ThreadManager, ThreadCounts) {

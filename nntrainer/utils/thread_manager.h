@@ -150,15 +150,15 @@ public:
    * @param fn callback to run in parallel
    * @details This method parallelizes the following for loop.
    * for(i = begin ; i < end ; i++) { fn(i); }
-   * @warning callback should not contain another parallel_for()
-   * i.e. nested parallel_for is forbidden.
+   * @note A nested parallel_for() executes sequentially on the calling thread
+   * to avoid re-entering the shared thread pool.
    */
   template <typename F> void parallel_for(size_t begin, size_t end, F &&fn) {
     if (begin >= end) {
       return;
     }
 
-    if (end - begin == 1 || compute_workers_.empty()) {
+    if (end - begin == 1 || compute_workers_.empty() || in_parallel_region_) {
       for (size_t i = begin; i < end; i++)
         fn(i);
       return;
@@ -327,6 +327,7 @@ private:
 
   // ─── Config ─────────────────────────────────────────
   static ThreadManagerConfig config_;
+  static thread_local bool in_parallel_region_;
 };
 
 } // namespace nntrainer
