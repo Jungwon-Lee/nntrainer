@@ -1,10 +1,15 @@
-# PR #4095 SiLU / SwiGLU layer benchmark
+# PR #4094 GELU and PR #4095 SiLU / SwiGLU layer benchmarks
 
 This benchmark builds and compares the parent of PR #4095 with the PR commit.
 It calls the actual NNTrainer layers directly:
 
 - SiLU: `nntrainer::ActivationLayer::forwarding()`
 - SwiGLU: `causallm::SwiGLULayer::incremental_forwarding()`
+
+The PR #4094 runners compare `933679c5^` with `933679c5` and call the actual
+FP32 GELU layer through `nntrainer::ActivationLayer::forwarding()`. FP16 GELU
+is not compared because PR #4094 introduces its FP16 implementation, so the
+parent revision is not a valid performance baseline for that data type.
 
 The default workloads are FP32 decode `(1, 1, 1, 11008)` and prefill
 `(1, 1, 128, 11008)`, using 1, 2, 4, 6, 8, and 10 compute threads.
@@ -31,6 +36,14 @@ From the repository root:
 ```bash
 ./benchmarks/pr4095_silu_swiglu/run_comparison.sh
 ```
+
+For PR #4094 GELU:
+
+```bash
+./benchmarks/pr4095_silu_swiglu/run_gelu_comparison.sh
+```
+
+GELU results are written to `benchmark-results/pr4094-gelu/`.
 
 Results are written to `benchmark-results/pr4095-silu-swiglu/`:
 
@@ -95,6 +108,15 @@ From the repository root:
 ```bash
 ./benchmarks/pr4095_silu_swiglu/run_android_comparison.sh
 ```
+
+For PR #4094 GELU:
+
+```bash
+./benchmarks/pr4095_silu_swiglu/run_gelu_android_comparison.sh
+```
+
+Android GELU results are written to
+`benchmark-results/pr4094-gelu-android/`.
 
 Android results are written to
 `benchmark-results/pr4095-silu-swiglu-android/`. The files have the same format

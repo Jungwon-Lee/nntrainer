@@ -26,7 +26,11 @@ def main() -> int:
 
     summary_rows: list[dict[str, str | int | float]] = []
     workloads = sorted({row["workload"] for row in rows})
-    layers = ("SiLU", "SwiGLU")
+    layer_order = {"SiLU": 0, "SwiGLU": 1, "GELU": 2}
+    layers = sorted(
+        {row["layer"] for row in rows},
+        key=lambda layer: (layer_order.get(layer, len(layer_order)), layer),
+    )
     thread_counts = sorted({int(row["threads"]) for row in rows})
 
     for workload in workloads:
@@ -57,7 +61,7 @@ def main() -> int:
 
     summary_md = result_dir / "summary.md"
     with summary_md.open("w", encoding="utf-8") as output_file:
-        output_file.write("# PR #4095 SiLU / SwiGLU layer benchmark\n\n")
+        output_file.write("# ThreadManager activation layer benchmark\n\n")
         output_file.write(
             "Median latency; speedup = before / after; improvement = "
             "1 - after / before.\n\n"

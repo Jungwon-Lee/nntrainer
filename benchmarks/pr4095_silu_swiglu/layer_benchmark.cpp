@@ -52,7 +52,7 @@ std::vector<double> measure(F &&fn, unsigned int warmup,
       fn();
     const auto end = Clock::now();
     const double elapsed_us =
-      std::chrono::duration<double, std::micro>(end - begin).count();
+        std::chrono::duration<double, std::micro>(end - begin).count();
     times.push_back(elapsed_us / iterations);
   }
   return times;
@@ -64,7 +64,7 @@ void printResult(const std::string &layer, const std::vector<double> &times,
   std::sort(sorted.begin(), sorted.end());
   const double median = sorted[sorted.size() / 2];
   const double mean =
-    std::accumulate(times.begin(), times.end(), 0.0) / times.size();
+      std::accumulate(times.begin(), times.end(), 0.0) / times.size();
   const double min = sorted.front();
   const double max = sorted.back();
   std::cout << layer << ',' << std::fixed << std::setprecision(3) << median
@@ -117,6 +117,27 @@ int main(int argc, char **argv) {
   volatile float silu_checksum = silu_context.getOutput(0).getData<float>()[0];
   printResult("SiLU", silu_times, silu_checksum);
 
+  nntrainer::ActivationLayer gelu;
+  gelu.setProperty({"activation=gelu"});
+  nntrainer::InitLayerContext gelu_init({dim}, {true}, false, "gelu");
+  gelu.finalize(gelu_init);
+  std::vector<nntrainer::Var_Grad> gelu_inputs;
+  std::vector<nntrainer::Var_Grad> gelu_outputs;
+  gelu_inputs.emplace_back(dim, nntrainer::Initializer::NONE, false, true,
+                           "gelu_input");
+  gelu_outputs.emplace_back(dim, nntrainer::Initializer::NONE, false, true,
+                            "gelu_output");
+  auto gelu_context = makeContext("gelu", gelu_inputs, gelu_outputs);
+
+  float *gelu_input = gelu_context.getInput(0).getData<float>();
+  for (size_t i = 0; i < dim.getDataLen(); ++i)
+    gelu_input[i] = static_cast<float>(static_cast<int>(i % 101) - 50) / 10.0f;
+
+  const auto gelu_times = measure([&] { gelu.forwarding(gelu_context, false); },
+                                  warmup, iterations, samples);
+  volatile float gelu_checksum = gelu_context.getOutput(0).getData<float>()[0];
+  printResult("GELU", gelu_times, gelu_checksum);
+
   causallm::SwiGLULayer swiglu;
   std::vector<nntrainer::Var_Grad> swiglu_inputs;
   std::vector<nntrainer::Var_Grad> swiglu_outputs;
@@ -136,10 +157,10 @@ int main(int argc, char **argv) {
   }
 
   const auto swiglu_times = measure(
-    [&] { swiglu.incremental_forwarding(swiglu_context, 0, height, false); },
-    warmup, iterations, samples);
+      [&] { swiglu.incremental_forwarding(swiglu_context, 0, height, false); },
+      warmup, iterations, samples);
   volatile float swiglu_checksum =
-    swiglu_context.getOutput(0).getData<float>()[0];
+      swiglu_context.getOutput(0).getData<float>()[0];
   printResult("SwiGLU", swiglu_times, swiglu_checksum);
 
   std::cerr << "effective_threads=" << thread_manager.getComputeThreadCount()

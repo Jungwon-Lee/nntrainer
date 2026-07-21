@@ -7,6 +7,7 @@ SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 BEFORE_REF=${BEFORE_REF:-2c9764aa^}
 AFTER_REF=${AFTER_REF:-2c9764aa}
 THREADS=${THREADS:-"1 2 4 6 8 10"}
+LAYERS=${LAYERS:-"SiLU SwiGLU"}
 WIDTH=${WIDTH:-11008}
 PREFILL_HEIGHT=${PREFILL_HEIGHT:-128}
 PREFILL_ITERATIONS=${PREFILL_ITERATIONS:-50}
@@ -121,14 +122,16 @@ run_one() {
   local raw_file=$6
   local meta_file=$7
   local install_dir="${DEVICE_DIR}/${variant}"
-  local output
+  local layer output
 
   output=$("${ADB[@]}" shell \
     "cd '${install_dir}' && LD_LIBRARY_PATH='${install_dir}' ./layer_benchmark '${thread_count}' '${height}' '${WIDTH}' '${iterations}' '${SAMPLES}' 2>&1")
   output=${output//$'\r'/}
   printf '%s\n' "${output}" | grep '^effective_threads=' >>"${meta_file}"
   while IFS= read -r row; do
-    [[ ${row} =~ ^(SiLU|SwiGLU), ]] || continue
+    [[ ${row} =~ ^(SiLU|SwiGLU|GELU), ]] || continue
+    layer=${row%%,*}
+    [[ " ${LAYERS} " == *" ${layer} "* ]] || continue
     printf '%s,%s,%s,%s\n' \
       "${workload}" "${variant}" "${thread_count}" "${row}" >>"${raw_file}"
   done <<<"${output}"

@@ -7,6 +7,7 @@ SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 BEFORE_REF=${BEFORE_REF:-2c9764aa^}
 AFTER_REF=${AFTER_REF:-2c9764aa}
 THREADS=${THREADS:-"1 2 4 6 8 10"}
+LAYERS=${LAYERS:-"SiLU SwiGLU"}
 WIDTH=${WIDTH:-11008}
 PREFILL_HEIGHT=${PREFILL_HEIGHT:-128}
 PREFILL_ITERATIONS=${PREFILL_ITERATIONS:-50}
@@ -115,13 +116,15 @@ run_workload() {
   local raw_file=$4
   local meta_file=$5
 
-  local thread_count variant
+  local thread_count variant layer
   for thread_count in ${THREADS}; do
     for variant in before after; do
       "${WORK_DIR}/layer_benchmark_${variant}" \
         "${thread_count}" "${height}" "${WIDTH}" "${iterations}" "${SAMPLES}" \
         2>>"${meta_file}" |
         while IFS= read -r row; do
+          layer=${row%%,*}
+          [[ " ${LAYERS} " == *" ${layer} "* ]] || continue
           printf '%s,%s,%s,%s\n' \
             "${workload}" "${variant}" "${thread_count}" "${row}" >>"${raw_file}"
         done
