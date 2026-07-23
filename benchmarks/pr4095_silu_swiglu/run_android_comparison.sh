@@ -119,6 +119,17 @@ build_variant() {
   "${ADB[@]}" shell "chmod 755 '${install_dir}/layer_benchmark'"
 }
 
+cool_down_before_run() {
+  local workload=$1
+  local variant=$2
+  local thread_count=$3
+
+  if [[ ${COOLDOWN_SECONDS} != 0 ]]; then
+    echo "Cooling down for ${COOLDOWN_SECONDS}s before ${workload}/${variant}/${thread_count} threads"
+    sleep "${COOLDOWN_SECONDS}"
+  fi
+}
+
 run_one() {
   local workload=$1
   local variant=$2
@@ -141,11 +152,6 @@ run_one() {
     printf '%s,%s,%s,%s\n' \
       "${workload}" "${variant}" "${thread_count}" "${row}" >>"${raw_file}"
   done <<<"${output}"
-
-  if [[ ${COOLDOWN_SECONDS} != 0 ]]; then
-    echo "Cooling down for ${COOLDOWN_SECONDS}s after ${workload}/${variant}/${thread_count} threads"
-    sleep "${COOLDOWN_SECONDS}"
-  fi
 }
 
 run_workload() {
@@ -158,6 +164,7 @@ run_workload() {
 
   for thread_count in ${THREADS}; do
     for variant in before after; do
+      cool_down_before_run "${workload}" "${variant}" "${thread_count}"
       run_one "${workload}" "${variant}" "${thread_count}" "${height}" \
         "${iterations}" "${raw_file}" "${meta_file}"
     done

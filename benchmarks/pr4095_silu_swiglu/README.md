@@ -127,9 +127,11 @@ Android version, ABI, exact Git revisions, and effective thread count.
 
 The workload variables accepted by the Linux runner are also accepted by the
 Android runner. Android-only variables are `ARM_ARCH`, `ADB_SERIAL`,
-`DEVICE_DIR`, and `COOLDOWN_SECONDS`. The runner waits 10 seconds after every
-device-side benchmark process by default. Set `COOLDOWN_SECONDS=0` to disable
-the wait; decimal values such as `2.5` are accepted.
+`DEVICE_DIR`, and `COOLDOWN_SECONDS`. The runner waits 10 seconds before every
+device-side benchmark process by default, including the first `before` run and
+each following `after` run.
+Set `COOLDOWN_SECONDS=0` to disable the wait; decimal values such as `2.5` are
+accepted.
 
 ```bash
 ADB_SERIAL=R3CT... \
@@ -146,7 +148,7 @@ RESULT_DIR=/tmp/pr4095-android-results \
 For stable Android measurements, close foreground applications, keep the
 device temperature and power mode consistent, and repeat the full run at least
 three times. The runner alternates `before` and `after` for every thread count
-and applies the configured cooldown after each execution to reduce
+and applies the configured cooldown before each execution to reduce
 time-dependent and thermal bias. It does not change device thermal or CPU
 governor settings.
 
