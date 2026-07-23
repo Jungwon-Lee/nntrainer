@@ -12,7 +12,8 @@ WIDTH=${WIDTH:-11008}
 PREFILL_HEIGHT=${PREFILL_HEIGHT:-128}
 PREFILL_ITERATIONS=${PREFILL_ITERATIONS:-50}
 DECODE_ITERATIONS=${DECODE_ITERATIONS:-500}
-SAMPLES=${SAMPLES:-15}
+RUNS=${RUNS:-5}
+SAMPLES=${SAMPLES:-1}
 COOLDOWN_SECONDS=${COOLDOWN_SECONDS:-10}
 ARM_ARCH=${ARM_ARCH:-armv8.2-a}
 ADB_SERIAL=${ADB_SERIAL:-}
@@ -26,6 +27,16 @@ fi
 
 if [[ ! ${COOLDOWN_SECONDS} =~ ^[0-9]+([.][0-9]+)?$ ]]; then
   echo "COOLDOWN_SECONDS must be a non-negative number." >&2
+  exit 1
+fi
+
+if [[ ! ${RUNS} =~ ^[1-9][0-9]*$ ]]; then
+  echo "RUNS must be a positive integer." >&2
+  exit 1
+fi
+
+if [[ ! ${SAMPLES} =~ ^[1-9][0-9]*$ ]]; then
+  echo "SAMPLES must be a positive integer." >&2
   exit 1
 fi
 
@@ -123,9 +134,10 @@ cool_down_before_run() {
   local workload=$1
   local variant=$2
   local thread_count=$3
+  local run_index=$4
 
   if [[ ${COOLDOWN_SECONDS} != 0 ]]; then
-    echo "Cooling down for ${COOLDOWN_SECONDS}s before ${workload}/${variant}/${thread_count} threads"
+    echo "Cooling down for ${COOLDOWN_SECONDS}s before ${workload}/${variant}/${thread_count} threads, run ${run_index}/${RUNS}"
     sleep "${COOLDOWN_SECONDS}"
   fi
 }
@@ -138,9 +150,13 @@ run_one() {
   local iterations=$5
   local raw_file=$6
   local meta_file=$7
+  local run_index=$8
   local install_dir="${DEVICE_DIR}/${variant}"
   local layer output
 
+  printf 'workload=%s version=%s threads=%s run=%s/%s\n' \
+    "${workload}" "${variant}" "${thread_count}" "${run_index}" "${RUNS}" \
+    >>"${meta_file}"
   output=$("${ADB[@]}" shell \
     "cd '${install_dir}' && LD_LIBRARY_PATH='${install_dir}' ./layer_benchmark '${thread_count}' '${height}' '${WIDTH}' '${iterations}' '${SAMPLES}' 2>&1")
   output=${output//$'\r'/}
@@ -149,8 +165,9 @@ run_one() {
     [[ ${row} =~ ^(SiLU|SwiGLU|GELU), ]] || continue
     layer=${row%%,*}
     [[ " ${LAYERS} " == *" ${layer} "* ]] || continue
-    printf '%s,%s,%s,%s\n' \
-      "${workload}" "${variant}" "${thread_count}" "${row}" >>"${raw_file}"
+    printf '%s,%s,%s,%s,%s\n' \
+      "${workload}" "${variant}" "${thread_count}" "${run_index}" "${row}" \
+      >>"${raw_file}"
   done <<<"${output}"
 }
 
@@ -160,13 +177,16 @@ run_workload() {
   local iterations=$3
   local raw_file=$4
   local meta_file=$5
-  local thread_count variant
+  local run_index thread_count variant
 
   for thread_count in ${THREADS}; do
-    for variant in before after; do
-      cool_down_before_run "${workload}" "${variant}" "${thread_count}"
-      run_one "${workload}" "${variant}" "${thread_count}" "${height}" \
-        "${iterations}" "${raw_file}" "${meta_file}"
+    for ((run_index = 1; run_index <= RUNS; ++run_index)); do
+      for variant in before after; do
+        cool_down_before_run "${workload}" "${variant}" "${thread_count}" \
+          "${run_index}"
+        run_one "${workload}" "${variant}" "${thread_count}" "${height}" \
+          "${iterations}" "${raw_file}" "${meta_file}" "${run_index}"
+      done
     done
   done
 }
@@ -181,7 +201,7 @@ snapshot_source "${AFTER_REF}" "${WORK_DIR}/after"
 build_variant before
 build_variant after
 
-printf 'workload,version,threads,layer,median_us,mean_us,min_us,max_us,checksum\n' \
+printf 'workload,version,threads,run,layer,median_us,mean_us,min_us,max_us,checksum\n' \
   >"${RAW_FILE}"
 {
   echo "device_serial=$("${ADB[@]}" get-serialno)"
@@ -191,6 +211,8 @@ printf 'workload,version,threads,layer,median_us,mean_us,min_us,max_us,checksum\
   echo "before_ref=$(git -C "${ROOT_DIR}" rev-parse "${BEFORE_REF}")"
   echo "after_ref=$(git -C "${ROOT_DIR}" rev-parse "${AFTER_REF}")"
   echo "arm_arch=${ARM_ARCH}"
+  echo "runs=${RUNS}"
+  echo "samples_per_run=${SAMPLES}"
   echo "cooldown_seconds=${COOLDOWN_SECONDS}"
 } >"${META_FILE}"
 

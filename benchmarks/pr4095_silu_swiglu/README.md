@@ -74,7 +74,7 @@ BEFORE_REF=2c9764aa^ AFTER_REF=2c9764aa \
   ./benchmarks/pr4095_silu_swiglu/run_comparison.sh
 ```
 
-The script uses 10 warmup calls per layer and reports the median latency per
+The script uses 10 warmup calls per layer and reports the mean latency per
 call. `OPENBLAS_NUM_THREADS` is forced to 1 so that only NNTrainer's
 `ThreadManager` thread count changes.
 
@@ -127,9 +127,14 @@ Android version, ABI, exact Git revisions, and effective thread count.
 
 The workload variables accepted by the Linux runner are also accepted by the
 Android runner. Android-only variables are `ARM_ARCH`, `ADB_SERIAL`,
-`DEVICE_DIR`, and `COOLDOWN_SECONDS`. The runner waits 10 seconds before every
-device-side benchmark process by default, including the first `before` run and
-each following `after` run.
+`DEVICE_DIR`, `RUNS`, and `COOLDOWN_SECONDS`. By default, each before/after
+condition is launched as an independent process five times (`RUNS=5`) and the
+five `mean_us` values are averaged in `summary.csv` and `summary.md`. A
+10-second cooldown is applied before every process, including the first
+`before` run and each following `after` run. `SAMPLES` controls the number of
+timed sample blocks inside one process and defaults to 1 because `RUNS` handles
+the independent repetitions. Android `raw.csv` records the 1-based run number
+for each measurement.
 Set `COOLDOWN_SECONDS=0` to disable the wait; decimal values such as `2.5` are
 accepted.
 
@@ -139,7 +144,8 @@ THREADS="1 2 4 8" \
 ARM_ARCH=armv8.2-a \
 PREFILL_ITERATIONS=100 \
 DECODE_ITERATIONS=1000 \
-SAMPLES=20 \
+RUNS=5 \
+SAMPLES=1 \
 COOLDOWN_SECONDS=15 \
 RESULT_DIR=/tmp/pr4095-android-results \
 ./benchmarks/pr4095_silu_swiglu/run_android_comparison.sh
@@ -154,7 +160,7 @@ governor settings.
 
 ## Result interpretation
 
-`summary.md` reports `speedup = before median / after median`. Values greater
+`summary.md` reports `speedup = before mean / after mean`. Values greater
 than `1.0x` indicate that PR #4095 is faster; values below `1.0x` indicate a
 regression. Compare results only within the same host or Android device and
 workload shape.

@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Summarize PR #4095 layer benchmark CSV results."""
+"""Summarize ThreadManager activation layer benchmark CSV results."""
 
 from __future__ import annotations
 
 import csv
 import pathlib
+import statistics
 import sys
 
 
@@ -19,10 +20,15 @@ def main() -> int:
     with raw_path.open(newline="", encoding="utf-8") as raw_file:
         rows = list(csv.DictReader(raw_file))
 
-    indexed = {
-        (row["workload"], row["layer"], int(row["threads"]), row["version"]): row
-        for row in rows
-    }
+    grouped: dict[tuple[str, str, int, str], list[dict[str, str]]] = {}
+    for row in rows:
+        key = (
+            row["workload"],
+            row["layer"],
+            int(row["threads"]),
+            row["version"],
+        )
+        grouped.setdefault(key, []).append(row)
 
     summary_rows: list[dict[str, str | int | float]] = []
     workloads = sorted({row["workload"] for row in rows})
@@ -36,17 +42,25 @@ def main() -> int:
     for workload in workloads:
         for layer in layers:
             for threads in thread_counts:
-                before = indexed[(workload, layer, threads, "before")]
-                after = indexed[(workload, layer, threads, "after")]
-                before_us = float(before["median_us"])
-                after_us = float(after["median_us"])
+                before = grouped[(workload, layer, threads, "before")]
+                after = grouped[(workload, layer, threads, "after")]
+                if len(before) != len(after):
+                    raise ValueError(
+                        f"unpaired runs for {workload}/{layer}/{threads}: "
+                        f"before={len(before)}, after={len(after)}"
+                    )
+                before_us = statistics.fmean(
+                    float(row["mean_us"]) for row in before
+                )
+                after_us = statistics.fmean(float(row["mean_us"]) for row in after)
                 summary_rows.append(
                     {
                         "workload": workload,
                         "layer": layer,
                         "threads": threads,
-                        "before_us": before_us,
-                        "after_us": after_us,
+                        "runs": len(before),
+                        "before_mean_us": before_us,
+                        "after_mean_us": after_us,
                         "speedup": before_us / after_us,
                         "improvement_pct": (1.0 - after_us / before_us) * 100.0,
                     }
@@ -63,22 +77,24 @@ def main() -> int:
     with summary_md.open("w", encoding="utf-8") as output_file:
         output_file.write("# ThreadManager activation layer benchmark\n\n")
         output_file.write(
-            "Median latency; speedup = before / after; improvement = "
-            "1 - after / before.\n\n"
+            "Mean latency across independent runs; speedup = before / after; "
+            "improvement = 1 - after / before.\n\n"
         )
         for workload in workloads:
             for layer in layers:
                 output_file.write(f"## {workload} — {layer}\n\n")
                 output_file.write(
-                    "| Threads | Before (us) | After (us) | Speedup | Improvement |\n"
+                    "| Threads | Runs | Before mean (us) | After mean (us) | "
+                    "Speedup | Improvement |\n"
                 )
-                output_file.write("|---:|---:|---:|---:|---:|\n")
+                output_file.write("|---:|---:|---:|---:|---:|---:|\n")
                 for row in summary_rows:
                     if row["workload"] != workload or row["layer"] != layer:
                         continue
                     output_file.write(
-                        f"| {row['threads']} | {row['before_us']:.3f} | "
-                        f"{row['after_us']:.3f} | {row['speedup']:.2f}x | "
+                        f"| {row['threads']} | {row['runs']} | "
+                        f"{row['before_mean_us']:.3f} | "
+                        f"{row['after_mean_us']:.3f} | {row['speedup']:.2f}x | "
                         f"{row['improvement_pct']:.1f}% |\n"
                     )
                 output_file.write("\n")
