@@ -42,18 +42,14 @@ static std::mutex g_registry_mutex;
 static std::unordered_map<int, SmallThinkerCachedSlimMoELayer *> g_prefetch_registry;
 
 // ── Number of background prefetch threads. 0 = disabled (synchronous path). ──
-// Default 0: on x86 warm cache, background mmap() during attention causes
-// mmap_lock contention with BLAS page-fault handlers → 3x regression.
-// Set NNTR_MOE_PREFETCH_THREADS=2 explicitly on Android (cold cache) where
-// madvise(WILLNEED) triggers real I/O that is worth hiding behind attention.
+// madvise(WILLNEED) triggers kernel asynchronous readahead on all platforms,
+// overlapping expert page-in with attention compute. Override with
+// NNTR_MOE_PREFETCH_THREADS=0 to disable.
 static const int g_prefetch_threads = []() -> int {
   const char *env = std::getenv("NNTR_MOE_PREFETCH_THREADS");
-#ifdef __ANDROID__
   return env ? std::stoi(env) : 2;
-#else
-  return env ? std::stoi(env) : 0;
-#endif
 }();
+
 
 static nntrainer::TaskExecutor &get_prefetch_executor() {
   static nntrainer::TaskExecutor executor(

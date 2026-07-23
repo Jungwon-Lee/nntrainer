@@ -1667,10 +1667,8 @@ void Tensor::activate() {
        "read-time";
 
   mapped_ptr = mmap(NULL, len, PROT_READ, MAP_PRIVATE, this->fd, off);
-#ifdef __ANDROID__
   if (mapped_ptr != MAP_FAILED)
     madvise(mapped_ptr, len, MADV_WILLNEED);
-#endif
   NNTR_THROW_IF(mapped_ptr == MAP_FAILED, std::runtime_error)
     << "[activate] mmap failed for virtual tensor '" << getName()
     << "': " << strerror(errno);

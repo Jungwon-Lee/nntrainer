@@ -45,9 +45,9 @@ public:
  *        background activate() tasks for the predicted expert set, then passes
  *        the input through unchanged as its output.
  *
- *        This shifts expert page-in (mmap + madvise WILLNEED on Android) to
- *        overlap with attention, hiding memory-I/O latency on RAM-constrained
- *        edge devices.
+ *        This shifts expert page-in (mmap + madvise WILLNEED) to overlap with
+ *        attention, hiding memory-I/O latency on RAM-constrained devices.
+
  *
  *        On the first token (cold start) the gate Tensor pointer is not yet
  *        populated, so the layer is a no-op that pass — no correctness effect.
