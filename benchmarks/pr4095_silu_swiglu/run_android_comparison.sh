@@ -13,6 +13,7 @@ PREFILL_HEIGHT=${PREFILL_HEIGHT:-128}
 PREFILL_ITERATIONS=${PREFILL_ITERATIONS:-50}
 DECODE_ITERATIONS=${DECODE_ITERATIONS:-500}
 SAMPLES=${SAMPLES:-15}
+COOLDOWN_SECONDS=${COOLDOWN_SECONDS:-10}
 ARM_ARCH=${ARM_ARCH:-armv8.2-a}
 ADB_SERIAL=${ADB_SERIAL:-}
 DEVICE_DIR=${DEVICE_DIR:-/data/local/tmp/nntr-pr4095-benchmark}
@@ -20,6 +21,11 @@ RESULT_DIR=${RESULT_DIR:-"${ROOT_DIR}/benchmark-results/pr4095-silu-swiglu-andro
 
 if [[ $(uname -s) != Linux ]]; then
   echo "The NNTrainer Android packaging script requires a Linux host." >&2
+  exit 1
+fi
+
+if [[ ! ${COOLDOWN_SECONDS} =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+  echo "COOLDOWN_SECONDS must be a non-negative number." >&2
   exit 1
 fi
 
@@ -135,6 +141,11 @@ run_one() {
     printf '%s,%s,%s,%s\n' \
       "${workload}" "${variant}" "${thread_count}" "${row}" >>"${raw_file}"
   done <<<"${output}"
+
+  if [[ ${COOLDOWN_SECONDS} != 0 ]]; then
+    echo "Cooling down for ${COOLDOWN_SECONDS}s after ${workload}/${variant}/${thread_count} threads"
+    sleep "${COOLDOWN_SECONDS}"
+  fi
 }
 
 run_workload() {
@@ -173,6 +184,7 @@ printf 'workload,version,threads,layer,median_us,mean_us,min_us,max_us,checksum\
   echo "before_ref=$(git -C "${ROOT_DIR}" rev-parse "${BEFORE_REF}")"
   echo "after_ref=$(git -C "${ROOT_DIR}" rev-parse "${AFTER_REF}")"
   echo "arm_arch=${ARM_ARCH}"
+  echo "cooldown_seconds=${COOLDOWN_SECONDS}"
 } >"${META_FILE}"
 
 echo "Running Android decode benchmark"
