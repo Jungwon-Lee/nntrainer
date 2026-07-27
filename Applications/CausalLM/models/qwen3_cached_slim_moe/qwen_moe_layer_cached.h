@@ -152,8 +152,9 @@ private:
    * @brief expert forward computation without memory copies
    * @param input Input tensor (reshaped to [total_tokens, 1, 1, hidden_size])
    * @param output Output tensor to accumulate results
-   * @param token_assignments Vector of (token_index, weight) pairs for this
+   * @param token_assignments Contiguous (token_index, weight) pairs for this
    * expert
+   * @param num_tokens Number of assignments in the contiguous view
    * @param gate_proj Gate projection weight tensor
    * @param up_proj Up projection weight tensor
    * @param down_proj Down projection weight tensor
@@ -165,10 +166,10 @@ private:
    */
   inline void compute_expert_forward(
     const nntrainer::Tensor &input, nntrainer::Tensor &output,
-    const std::vector<std::pair<unsigned, float>> &token_assignments,
-    const nntrainer::Tensor &gate_proj, const nntrainer::Tensor &up_proj,
-    const nntrainer::Tensor &down_proj, unsigned int hidden_size,
-    nntrainer::Tensor &token_input_workspace,
+    const std::pair<unsigned, float> *token_assignments,
+    unsigned int num_tokens, const nntrainer::Tensor &gate_proj,
+    const nntrainer::Tensor &up_proj, const nntrainer::Tensor &down_proj,
+    unsigned int hidden_size, nntrainer::Tensor &token_input_workspace,
     nntrainer::Tensor &gate_out_workspace,
     nntrainer::Tensor &acti_out_workspace, nntrainer::Tensor &up_out_workspace);
 };

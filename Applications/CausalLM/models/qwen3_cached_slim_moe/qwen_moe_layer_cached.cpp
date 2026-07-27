@@ -161,7 +161,7 @@ void CachedSlimMoELayer::forwarding(nntrainer::RunLayerContext &context,
 
 inline void CachedSlimMoELayer::compute_expert_forward(
   const nntrainer::Tensor &input, nntrainer::Tensor &output,
-  const std::vector<std::pair<unsigned, float>> &token_assignments,
+  const std::pair<unsigned, float> *token_assignments, unsigned int num_tokens,
   const nntrainer::Tensor &gate_proj, const nntrainer::Tensor &up_proj,
   const nntrainer::Tensor &down_proj, unsigned int hidden_size,
   nntrainer::Tensor &token_input_workspace,
@@ -169,7 +169,6 @@ inline void CachedSlimMoELayer::compute_expert_forward(
   nntrainer::Tensor &up_out_workspace) {
 
   const unsigned intermediate_size = gate_proj.width();
-  const unsigned num_tokens = token_assignments.size();
 
   if (num_tokens == 0)
     return;
@@ -319,8 +318,6 @@ void CachedSlimMoELayer::incremental_forwarding(
     profiler.record(MoEProfiler::Phase::ROUTER, router_start);
 
     const auto dispatch_start = profiler.start();
-    std::vector<std::vector<std::pair<unsigned, float>>> expert_assignments(
-      num_experts);
     std::deque<int> extra_top_k;
     for (int i = static_cast<int>(total_tokens) - 1; i >= 0; --i) {
       const size_t candidate_offset = static_cast<size_t>(i) * candidate_count;
@@ -328,13 +325,28 @@ void CachedSlimMoELayer::incremental_forwarding(
         extra_top_k.push_back(candidate_indices_data[candidate_offset + k]);
     }
 
+    std::vector<size_t> expert_offsets(num_experts + 1, 0);
+    for (unsigned int i = 0; i < total_tokens; ++i) {
+      const size_t candidate_offset = static_cast<size_t>(i) * candidate_count;
+      for (unsigned int k = 0; k < topk; ++k) {
+        const unsigned int expert_idx =
+          candidate_indices_data[candidate_offset + k];
+        ++expert_offsets[expert_idx + 1];
+      }
+    }
+    for (unsigned int expert_idx = 0; expert_idx < num_experts; ++expert_idx)
+      expert_offsets[expert_idx + 1] += expert_offsets[expert_idx];
+
+    std::vector<std::pair<unsigned, float>> expert_assignments(
+      expert_offsets.back());
+    std::vector<size_t> write_offsets(expert_offsets);
     for (unsigned int i = 0; i < total_tokens; ++i) {
       const size_t candidate_offset = static_cast<size_t>(i) * candidate_count;
       for (unsigned int k = 0; k < topk; ++k) {
         const unsigned int expert_idx =
           candidate_indices_data[candidate_offset + k];
         const float weight = candidate_values_data[candidate_offset + k];
-        expert_assignments[expert_idx].emplace_back(i, weight);
+        expert_assignments[write_offsets[expert_idx]++] = {i, weight};
       }
     }
 
@@ -344,13 +356,14 @@ void CachedSlimMoELayer::incremental_forwarding(
 
     for (int expert_idx = 0; expert_idx < static_cast<int>(num_experts);
          ++expert_idx) {
-      const auto &assignments = expert_assignments[expert_idx];
-      if (assignments.empty())
+      const size_t assignment_count =
+        expert_offsets[expert_idx + 1] - expert_offsets[expert_idx];
+      if (assignment_count == 0)
         continue;
 
       target_idx_vector.push_back(expert_idx);
       max_assignment_count = std::max(
-        max_assignment_count, static_cast<unsigned int>(assignments.size()));
+        max_assignment_count, static_cast<unsigned int>(assignment_count));
     }
     nntrainer::Tensor expert_output_workspace(
       max_assignment_count, 1, 1, hidden_size, output.getTensorType());
@@ -377,11 +390,13 @@ void CachedSlimMoELayer::incremental_forwarding(
     // deadlocks because ThreadManager::parallelize() uses a non-recursive
     // execution_mutex_.
     for (int expert_idx : target_idx_vector) {
-      const auto &assignments = expert_assignments[expert_idx];
+      const size_t assignment_offset = expert_offsets[expert_idx];
+      const unsigned int assignment_count = static_cast<unsigned int>(
+        expert_offsets[expert_idx + 1] - assignment_offset);
+      const auto *assignments = expert_assignments.data() + assignment_offset;
       nntrainer::Tensor expert_output =
         expert_output_workspace.getSharedDataTensor(
-          {static_cast<unsigned int>(assignments.size()), 1, 1, hidden_size}, 0,
-          true);
+          {assignment_count, 1, 1, hidden_size}, 0, true);
       const auto expert_start = profiler.start();
       if (need_load[expert_idx]) {
         const auto mmap_activate_start = profiler.start();
@@ -399,7 +414,7 @@ void CachedSlimMoELayer::incremental_forwarding(
       }
 
       compute_expert_forward(
-        input, expert_output, assignments,
+        input, expert_output, assignments, assignment_count,
         context.getWeight(expert_gate_proj_indices[expert_idx]),
         context.getWeight(expert_up_proj_indices[expert_idx]),
         context.getWeight(expert_down_proj_indices[expert_idx]), hidden_size,
@@ -408,7 +423,7 @@ void CachedSlimMoELayer::incremental_forwarding(
       profiler.record(MoEProfiler::Phase::EXPERT, expert_start);
 
       const auto reduce_start = profiler.start();
-      for (size_t i = 0; i < assignments.size(); ++i) {
+      for (unsigned int i = 0; i < assignment_count; ++i) {
         nntrainer::Tensor token_output = output.getSharedDataTensor(
           token_step_dim, assignments[i].first * hidden_size, true);
         nntrainer::Tensor expert_token_output =
