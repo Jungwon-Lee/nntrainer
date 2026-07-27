@@ -25,7 +25,6 @@
 #include <acti_func.h>
 #include <algorithm>
 #include <cmath>
-#include <deque>
 #include <node_exporter.h>
 #include <qwen_moe_layer_cached.h>
 #include <stdexcept>
@@ -318,11 +317,22 @@ void CachedSlimMoELayer::incremental_forwarding(
     profiler.record(MoEProfiler::Phase::ROUTER, router_start);
 
     const auto dispatch_start = profiler.start();
-    std::deque<int> extra_top_k;
+    std::vector<int> extra_top_k;
+    extra_top_k.reserve(
+      std::min(static_cast<size_t>(num_experts),
+               static_cast<size_t>(total_tokens) * candidate_count));
+    std::vector<uint8_t> candidate_seen(num_experts, 0);
     for (int i = static_cast<int>(total_tokens) - 1; i >= 0; --i) {
       const size_t candidate_offset = static_cast<size_t>(i) * candidate_count;
-      for (unsigned int k = 0; k < candidate_count; ++k)
-        extra_top_k.push_back(candidate_indices_data[candidate_offset + k]);
+      for (unsigned int k = 0; k < candidate_count; ++k) {
+        const unsigned int expert_idx =
+          candidate_indices_data[candidate_offset + k];
+        if (candidate_seen[expert_idx])
+          continue;
+
+        candidate_seen[expert_idx] = 1;
+        extra_top_k.push_back(expert_idx);
+      }
     }
 
     std::vector<size_t> expert_offsets(num_experts + 1, 0);
@@ -434,12 +444,15 @@ void CachedSlimMoELayer::incremental_forwarding(
       profiler.record(MoEProfiler::Phase::REDUCE, reduce_start);
     }
 
-    for (int i = extra_top_k.size() - 1; i >= 0; i--) {
-      if (iteration_map.find(extra_top_k[i]) != iteration_map.end()) {
-        loaded_expert_deque.erase(iteration_map[extra_top_k[i]]);
-        loaded_expert_deque.push_back(extra_top_k[i]);
-        iteration_map[extra_top_k[i]] = --loaded_expert_deque.end();
-      }
+    for (auto candidate = extra_top_k.rbegin(); candidate != extra_top_k.rend();
+         ++candidate) {
+      const auto cache_entry = iteration_map.find(*candidate);
+      if (cache_entry == iteration_map.end())
+        continue;
+
+      loaded_expert_deque.erase(cache_entry->second);
+      loaded_expert_deque.push_back(*candidate);
+      cache_entry->second = --loaded_expert_deque.end();
     }
 
     // Evict experts
