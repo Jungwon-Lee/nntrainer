@@ -1478,14 +1478,29 @@ std::pair<Tensor, Tensor> Tensor::topK(unsigned int k) const {
   Tensor indices(indices_dim);
   indices.allocate();
 
-  // Prepare output buffer
-  void *output_data = output.getData<void>();
-  uint32_t *indices_data = indices.getData<uint32_t>();
-
-  // Call TopK implementation
-  itensor_->topK(k, output_data, indices_data);
+  topK(k, output, indices);
 
   return {output, indices};
+}
+
+void Tensor::topK(unsigned int k, Tensor &output, Tensor &indices) const {
+  NNTR_THROW_IF(k == 0 || k > width(), std::invalid_argument)
+    << "k must be between 1 and width dimension size (" << width() << ")";
+  NNTR_THROW_IF(output.getDataType() != getDataType() ||
+                  indices.getDataType() != Tdatatype::UINT32,
+                std::invalid_argument)
+    << "topK output types must match input values and UINT32 indices";
+  NNTR_THROW_IF(
+    output.batch() != batch() || output.channel() != channel() ||
+      output.height() != height() || output.width() != k ||
+      output.getFormat() != getFormat() || indices.batch() != batch() ||
+      indices.channel() != channel() || indices.height() != height() ||
+      indices.width() != k || indices.getFormat() != getFormat() ||
+      !output.getContiguous() || !indices.getContiguous(),
+    std::invalid_argument)
+    << "topK output dimensions do not match input dimensions and k";
+
+  itensor_->topK(k, output.getData<void>(), indices.getData<uint32_t>());
 }
 
 float Tensor::max_abs() const {

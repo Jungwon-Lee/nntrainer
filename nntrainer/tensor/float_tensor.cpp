@@ -9,6 +9,7 @@
  * @bug		No known bugs except for NYI items
  */
 
+#include <array>
 #include <iomanip>
 #include <iostream>
 #include <numeric>
@@ -1235,13 +1236,58 @@ void FloatTensor::topK(unsigned int k, void *output_data,
       const unsigned int width_stride =
         format == Tformat::NHWC ? input_strides[2] : 1;
       const float *B = static_cast<const float *>(getData()) + offset;
-      std::vector<size_t> local_idx(width);
-      std::iota(local_idx.begin(), local_idx.end(), 0);
-      std::partial_sort(local_idx.begin(), local_idx.begin() + k,
-                        local_idx.end(),
-                        [&B, width_stride](size_t i1, size_t i2) {
-                          return B[i1 * width_stride] > B[i2 * width_stride];
-                        });
+      const auto better = [&B, width_stride](size_t lhs, size_t rhs) {
+        const float lhs_value = B[lhs * width_stride];
+        const float rhs_value = B[rhs * width_stride];
+        return lhs_value > rhs_value || (lhs_value == rhs_value && lhs < rhs);
+      };
+
+      constexpr unsigned int SMALL_TOPK_MAX = 16;
+      std::array<size_t, SMALL_TOPK_MAX> small_indices;
+      std::vector<size_t> large_indices;
+      size_t *top_indices;
+
+      if (k <= SMALL_TOPK_MAX) {
+        std::iota(small_indices.begin(), small_indices.begin() + k, 0);
+
+        const auto sift_down = [&](size_t root) {
+          while (true) {
+            const size_t left = root * 2 + 1;
+            if (left >= k)
+              break;
+
+            size_t worse_child = left;
+            const size_t right = left + 1;
+            if (right < k && better(small_indices[left], small_indices[right]))
+              worse_child = right;
+
+            if (!better(small_indices[root], small_indices[worse_child]))
+              break;
+
+            std::swap(small_indices[root], small_indices[worse_child]);
+            root = worse_child;
+          }
+        };
+
+        for (size_t parent = k / 2; parent > 0; --parent)
+          sift_down(parent - 1);
+
+        for (size_t i = k; i < width; ++i) {
+          if (!better(i, small_indices[0]))
+            continue;
+
+          small_indices[0] = i;
+          sift_down(0);
+        }
+        std::sort(small_indices.begin(), small_indices.begin() + k, better);
+        top_indices = small_indices.data();
+      } else {
+        large_indices.resize(width);
+        std::iota(large_indices.begin(), large_indices.end(), 0);
+        std::partial_sort(large_indices.begin(), large_indices.begin() + k,
+                          large_indices.end(), better);
+        top_indices = large_indices.data();
+      }
 
       // write top-k values and their indices to output
       for (unsigned int i = 0; i < k; ++i) {
@@ -1255,8 +1301,8 @@ void FloatTensor::topK(unsigned int k, void *output_data,
           output_idx = b * output_strides[0] + h * output_strides[1] +
                        i * output_strides[2] + c;
         }
-        output_buffer[output_idx] = B[local_idx[i]];
-        indices_data[output_idx] = static_cast<uint32_t>(local_idx[i]);
+        output_buffer[output_idx] = B[top_indices[i] * width_stride];
+        indices_data[output_idx] = static_cast<uint32_t>(top_indices[i]);
       }
     });
 }

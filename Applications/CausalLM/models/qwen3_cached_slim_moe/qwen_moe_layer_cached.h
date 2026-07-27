@@ -128,6 +128,7 @@ public:
 private:
   unsigned int num_experts;      /**< number of experts */
   unsigned int topk;             /**< number of experts per token, i.e., topk */
+  unsigned int candidate_count;  /**< router candidates retained for cache */
   nntrainer::ActiFunc acti_func; /**< activation function for the expert */
   std::tuple<props::NumExperts, props::NumExpertsPerToken,
              nntrainer::props::Unit, props::MoEActivation>
@@ -148,6 +149,8 @@ private:
 
   // Intermediate tensor indices
   unsigned int router_logits_idx;
+  unsigned int router_candidate_values_idx;
+  unsigned int router_candidate_indices_idx;
   unsigned int decode_expert_output_idx;
   unsigned int decode_gate_output_idx;
   unsigned int decode_activation_output_idx;

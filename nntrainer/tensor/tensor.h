@@ -1726,6 +1726,15 @@ public:
   std::pair<Tensor, Tensor> topK(unsigned int k) const;
 
   /**
+   * @brief Return top K values and indices along the width axis into
+   * preallocated tensors
+   * @param[in] k Number of values to select
+   * @param[out] output Preallocated values tensor
+   * @param[out] indices Preallocated UINT32 indices tensor
+   */
+  void topK(unsigned int k, Tensor &output, Tensor &indices) const;
+
+  /**
    * @brief     return max of the absolute values of the tensor
    * @retval    maximum absolute value
    */

@@ -59,6 +59,7 @@ CachedSlimMoELayer::CachedSlimMoELayer() :
   LayerImpl(),
   num_experts(0),
   topk(0),
+  candidate_count(0),
   moe_props(props::NumExperts(), props::NumExpertsPerToken(),
             nntrainer::props::Unit(), props::MoEActivation()),
   expert_gate_proj_indices({}),
@@ -70,6 +71,8 @@ CachedSlimMoELayer::CachedSlimMoELayer() :
   cache_capacity(0),
   gate_idx(std::numeric_limits<unsigned>::max()),
   router_logits_idx(std::numeric_limits<unsigned>::max()),
+  router_candidate_values_idx(std::numeric_limits<unsigned>::max()),
+  router_candidate_indices_idx(std::numeric_limits<unsigned>::max()),
   decode_expert_output_idx(std::numeric_limits<unsigned>::max()),
   decode_gate_output_idx(std::numeric_limits<unsigned>::max()),
   decode_activation_output_idx(std::numeric_limits<unsigned>::max()),
@@ -101,6 +104,7 @@ void CachedSlimMoELayer::finalize(nntrainer::InitLayerContext &context) {
   // 3. Get MoE properties
   num_experts = std::get<props::NumExperts>(moe_props).get();
   topk = std::get<props::NumExpertsPerToken>(moe_props).get();
+  candidate_count = std::min(num_experts, topk + 5U);
   const unsigned int intermediate_size =
     std::get<nntrainer::props::Unit>(moe_props).get();
   const unsigned int hidden_size = in_dim.width(); // Feature dimension
@@ -180,6 +184,17 @@ void CachedSlimMoELayer::finalize(nntrainer::InitLayerContext &context) {
   // Router logits :  [batch * seq, num_experts]
   router_logits_idx =
     context.requestTensor({total_tokens, 1, 1, num_experts}, "router_logits",
+                          nntrainer::Initializer::NONE, false,
+                          nntrainer::TensorLifespan::FORWARD_FUNC_LIFESPAN);
+  router_candidate_values_idx = context.requestTensor(
+    {total_tokens, 1, 1, candidate_count}, "router_candidate_values",
+    nntrainer::Initializer::NONE, false,
+    nntrainer::TensorLifespan::FORWARD_FUNC_LIFESPAN);
+  nntrainer::TensorDim candidate_indices_dim(
+    total_tokens, 1, 1, candidate_count, nntrainer::Tformat::NCHW,
+    nntrainer::Tdatatype::UINT32);
+  router_candidate_indices_idx =
+    context.requestTensor(candidate_indices_dim, "router_candidate_indices",
                           nntrainer::Initializer::NONE, false,
                           nntrainer::TensorLifespan::FORWARD_FUNC_LIFESPAN);
 
@@ -295,6 +310,10 @@ void CachedSlimMoELayer::incremental_forwarding(
   const unsigned int profile_token_count = input_.batch() * (to - from);
 
   nntrainer::Tensor &router_logits_ = context.getTensor(router_logits_idx);
+  nntrainer::Tensor &candidate_values_ =
+    context.getTensor(router_candidate_values_idx);
+  nntrainer::Tensor &candidate_indices_ =
+    context.getTensor(router_candidate_indices_idx);
 
   nntrainer::TensorDim input_step_dim = input_.getDim();
   nntrainer::TensorDim output_step_dim = output_.getDim();
@@ -335,10 +354,15 @@ void CachedSlimMoELayer::incremental_forwarding(
 
     // Softmax preserves the logit ordering. Select cache candidates once from
     // the raw logits, then normalize only the experts used for routing.
-    const unsigned int candidate_count = std::min(num_experts, topk + 5U);
-    auto candidate_result = router_logits.topK(candidate_count);
-    auto candidate_values = std::get<0>(candidate_result);
-    auto candidate_indices = std::get<1>(candidate_result);
+    nntrainer::TensorDim candidate_values_dim = candidate_values_.getDim();
+    nntrainer::TensorDim candidate_indices_dim = candidate_indices_.getDim();
+    candidate_values_dim.batch(total_tokens);
+    candidate_indices_dim.batch(total_tokens);
+    auto candidate_values =
+      candidate_values_.getSharedDataTensor(candidate_values_dim, 0, true);
+    auto candidate_indices =
+      candidate_indices_.getSharedDataTensor(candidate_indices_dim, 0, true);
+    router_logits.topK(candidate_count, candidate_values, candidate_indices);
     float *candidate_values_data = candidate_values.getData<float>();
     const uint32_t *candidate_indices_data =
       candidate_indices.getData<uint32_t>();
