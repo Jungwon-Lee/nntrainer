@@ -61,6 +61,26 @@ Can list arguments accept comma-separated values:
 
 The script runs benchmarks for all combinations of the specified parameters (Cartesian product).
 
+### Qwen MoE Phase Profiling
+
+Build nntrainer with `-Denable-profile=true`, then set
+`NNTR_MOE_PROFILE=N` when running a Qwen MoE model. The layer prints one
+aggregated report for every `N` invocations:
+
+```bash
+NNTR_MOE_PROFILE=100 ./nntr_causallm <arguments>
+```
+
+The report contains router, dispatch/gather, mmap activation/deactivation,
+expert wall, gate/up projection, activation, down projection, and reduction
+times. `total_wall_us` is elapsed wall time. Fields ending in `_work_us`
+include work accumulated by expert worker threads and can therefore exceed
+wall time.
+
+`mmap_work_us` measures mapping and unmapping calls. Lazy page-fault I/O that
+occurs while reading a mapped weight is charged to the corresponding
+projection phase, so use major-fault and storage-I/O counters alongside this
+report when investigating cold-cache behavior.
 
 ### Examples
 

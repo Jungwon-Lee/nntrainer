@@ -24,18 +24,12 @@
 
 #include <acti_func.h>
 #include <algorithm>
-#include <atomic>
 #include <cmath>
 #include <deque>
 #include <node_exporter.h>
 #include <qwen_moe_layer_cached.h>
 #include <stdexcept>
 #include <thread_manager.h>
-
-#include <chrono>
-using std::chrono::duration_cast;
-using std::chrono::high_resolution_clock;
-using std::chrono::nanoseconds;
 
 namespace causallm {
 
@@ -57,6 +51,7 @@ CachedSlimMoELayer::CachedSlimMoELayer() :
   expert_mask_idx(std::numeric_limits<unsigned>::max()) {}
 
 void CachedSlimMoELayer::finalize(nntrainer::InitLayerContext &context) {
+  profiler.setName(context.getName());
 
   // 1. Validate input/output dimensions
   NNTR_THROW_IF(context.getNumInputs() != 1, std::invalid_argument)
@@ -205,6 +200,7 @@ inline void CachedSlimMoELayer::compute_expert_forward(
   unsigned token_idx = token_assignments[0].first;
   float weight = token_assignments[0].second;
 
+  const auto gather_start = profiler.start();
   if (num_tokens > 1) {
     /** if prefill, copy data to make a batch */
     {
@@ -226,13 +222,17 @@ inline void CachedSlimMoELayer::compute_expert_forward(
     token_input =
       input.getSharedDataTensor(token_input_dim, token_offset, true);
   }
+  profiler.record(MoEProfiler::Phase::DISPATCH, gather_start);
 
   // Gate projection using optimized dot operation
+  const auto gate_up_start = profiler.start();
   token_input.dot(gate_proj, gate_out);
 
   // Up projection using optimized dot operation
   token_input.dot(up_proj, up_out);
+  profiler.record(MoEProfiler::Phase::GATE_UP, gate_up_start);
 
+  const auto activation_start = profiler.start();
   if (num_tokens == 1) {
     // Apply activation (silu)
     acti_func.run_fn(gate_out, acti_out);
@@ -247,10 +247,14 @@ inline void CachedSlimMoELayer::compute_expert_forward(
                         up_out.getData<float>() + offset);
     });
   }
+  profiler.record(MoEProfiler::Phase::ACTIVATION, activation_start);
 
+  const auto down_start = profiler.start();
   acti_out.dot(down_proj, token_expert_output);
+  profiler.record(MoEProfiler::Phase::DOWN, down_start);
 
   // accumulate to output
+  const auto reduce_start = profiler.start();
   for (size_t i = 0; i < num_tokens; ++i) {
     token_idx = token_assignments[i].first;
     weight = token_assignments[i].second;
@@ -262,18 +266,17 @@ inline void CachedSlimMoELayer::compute_expert_forward(
     target.multiply_i(weight);
     token_output.add(target, token_output);
   }
+  profiler.record(MoEProfiler::Phase::REDUCE, reduce_start);
 }
 
 void CachedSlimMoELayer::incremental_forwarding(
   nntrainer::RunLayerContext &context, unsigned int from, unsigned int to,
   bool training) {
 
-#ifdef DEBUG
-  auto t1 = high_resolution_clock::now();
-#endif
-
+  const auto total_start = profiler.start();
   nntrainer::Tensor &input_ = context.getInput(SINGLE_INOUT_IDX);
   nntrainer::Tensor &output_ = context.getOutput(SINGLE_INOUT_IDX);
+  const unsigned int profile_token_count = input_.batch() * (to - from);
 
   nntrainer::Tensor &router_logits_ = context.getTensor(router_logits_idx);
 
@@ -310,6 +313,7 @@ void CachedSlimMoELayer::incremental_forwarding(
     output.setZero();
 
     // routing
+    const auto router_start = profiler.start();
     nntrainer::Tensor &gate_weights = context.getWeight(gate_idx);
     input.dot(gate_weights, router_logits);
     router_logits.apply(nntrainer::ActiFunc::softmax<float>, router_logits);
@@ -336,7 +340,9 @@ void CachedSlimMoELayer::incremental_forwarding(
 
     // norm_topk_prob
     topk_values.divide_i(topk_values.sum(3));
+    profiler.record(MoEProfiler::Phase::ROUTER, router_start);
 
+    const auto dispatch_start = profiler.start();
     const uint32_t *indices_data = topk_indices.getData<uint32_t>();
     std::vector<std::vector<std::pair<unsigned, float>>> expert_assignments(
       num_experts);
@@ -371,17 +377,9 @@ void CachedSlimMoELayer::incremental_forwarding(
 
       target_idx_vector.push_back(expert_idx);
     }
+    profiler.record(MoEProfiler::Phase::DISPATCH, dispatch_start);
 
-    int hit_count = 0;
-    int miss_count = 0;
-
-#ifdef DEBUG
-    auto t1_miss = high_resolution_clock::now();
-    auto t2_miss = t1_miss;
-    auto t1_hit = high_resolution_clock::now();
-    auto t2_hit = t1_hit;
-#endif
-
+    const auto expert_start = profiler.start();
     // Serial outer loop: the expert GEMV/GEMM parallelizes internally via
     // ThreadManager (dot() calls parallel_for), and nesting parallel_for
     // deadlocks because ThreadManager::parallelize() uses a non-recursive
@@ -389,21 +387,17 @@ void CachedSlimMoELayer::incremental_forwarding(
     for (int expert_idx : target_idx_vector) {
       const auto &assignments = expert_assignments[expert_idx];
       if (need_load[expert_idx]) {
-
-#ifdef DEBUG
-        t1_miss = high_resolution_clock::now();
-#endif
-
+        const auto mmap_activate_start = profiler.start();
         context.getWeight(expert_gate_proj_indices[expert_idx]).activate();
         context.getWeight(expert_up_proj_indices[expert_idx]).activate();
         context.getWeight(expert_down_proj_indices[expert_idx]).activate();
+        profiler.record(MoEProfiler::Phase::MMAP, mmap_activate_start);
 
         {
           std::lock_guard<std::mutex> lock(cache_mutex);
           loaded_expert_deque.push_back(expert_idx);
           iteration_map[expert_idx] = --loaded_expert_deque.end();
           need_load[expert_idx] = false;
-          miss_count += 1;
         }
 
         compute_expert_forward(
@@ -411,30 +405,15 @@ void CachedSlimMoELayer::incremental_forwarding(
           context.getWeight(expert_gate_proj_indices[expert_idx]),
           context.getWeight(expert_up_proj_indices[expert_idx]),
           context.getWeight(expert_down_proj_indices[expert_idx]), hidden_size);
-#ifdef DEBUG
-        t2_miss = high_resolution_clock::now();
-#endif
       } else {
-
-#ifdef DEBUG
-        t1_hit = high_resolution_clock::now();
-#endif
-        {
-          std::lock_guard<std::mutex> lock(cache_mutex);
-          hit_count += 1;
-        }
-
         compute_expert_forward(
           input, expert_outputs[expert_idx], assignments,
           context.getWeight(expert_gate_proj_indices[expert_idx]),
           context.getWeight(expert_up_proj_indices[expert_idx]),
           context.getWeight(expert_down_proj_indices[expert_idx]), hidden_size);
-
-#ifdef DEBUG
-        t2_hit = high_resolution_clock::now();
-#endif
       }
     }
+    profiler.record(MoEProfiler::Phase::EXPERT, expert_start);
 
     for (int i = extra_top_k.size() - 1; i >= 0; i--) {
       if (iteration_map.find(extra_top_k[i]) != iteration_map.end()) {
@@ -443,10 +422,6 @@ void CachedSlimMoELayer::incremental_forwarding(
         iteration_map[extra_top_k[i]] = --loaded_expert_deque.end();
       }
     }
-
-#ifdef DEBUG
-    auto t1_evict = high_resolution_clock::now();
-#endif
 
     // Evict experts
     /// @todo apply multi thread loop
@@ -460,16 +435,15 @@ void CachedSlimMoELayer::incremental_forwarding(
         need_load[target_idx] = true;
       }
 
+      const auto mmap_deactivate_start = profiler.start();
       context.getWeight(expert_gate_proj_indices[target_idx]).deactivate();
       context.getWeight(expert_up_proj_indices[target_idx]).deactivate();
       context.getWeight(expert_down_proj_indices[target_idx]).deactivate();
+      profiler.record(MoEProfiler::Phase::MMAP, mmap_deactivate_start);
     }
 
-#ifdef DEBUG
-    auto t2_evict = high_resolution_clock::now();
-#endif
-
     // Combine expert outputs
+    const auto reduce_start = profiler.start();
     int init = 0;
     for (int expert_idx : target_idx_vector) {
       if (!init) {
@@ -479,30 +453,13 @@ void CachedSlimMoELayer::incremental_forwarding(
         output.add_i(expert_outputs[expert_idx]);
       }
     }
+    profiler.record(MoEProfiler::Phase::REDUCE, reduce_start);
 
     // reshape output: [B*S,1,1,H] -> [B,1,S,H]
     output.reshape({batch_size, 1, seq_len, hidden_size});
-
-#ifdef DEBUG
-    auto t2 = high_resolution_clock::now();
-    auto dt = duration_cast<nanoseconds>(t2 - t1);
-    auto dt_miss = duration_cast<nanoseconds>(t2_miss - t1_miss);
-    auto dt_hit = duration_cast<nanoseconds>(t2_hit - t1_hit);
-    auto dt_evict = duration_cast<nanoseconds>(t2_evict - t1_evict);
-    std::cout << context.getName() << " \t| " << dt.count() << " ns "
-              << "\t| " << dt.count() / 1'000 << " us "
-              << "\t| " << dt.count() / 1'000'000 << " ms "
-              << "\t| "
-              << "hit ratio: " << hit_count / 8.0 << "\t | "
-              << " miss ratio: " << miss_count / 8.0 << "\t | "
-              << "hit_compute: " << dt_hit.count() / 1'000'000 << " ms "
-              << "\t| "
-              << "miss_compute: " << dt_miss.count() / 1'000'000 << " ms "
-              << "\t| "
-              << "evict_time: " << dt_evict.count() / 1'000'000 << " ms "
-              << "\t| " << std::endl;
-#endif
   }
+  profiler.record(MoEProfiler::Phase::TOTAL, total_start);
+  profiler.finish(profile_token_count);
 }
 
 void CachedSlimMoELayer::setProperty(const std::vector<std::string> &values) {

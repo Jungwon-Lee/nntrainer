@@ -33,6 +33,7 @@
 #include <causallm_common_properties.h>
 #include <common_properties.h>
 #include <layer_impl.h>
+#include <moe_profiler.h>
 
 namespace causallm {
 
@@ -132,6 +133,7 @@ private:
   // Intermediate tensor indices
   unsigned int router_logits_idx;
   unsigned int expert_mask_idx;
+  MoEProfiler profiler;
   /**
    * @brief expert forward computation without memory copies
    * @param input Input tensor (reshaped to [total_tokens, 1, 1, hidden_size])
@@ -152,7 +154,7 @@ private:
   /**
    * @brief expert forward computation without critical section
    * @param input Input tensor (reshaped to [total_tokens, 1, 1, hidden_size])
-   * @param expert_output Expert-specific output tensor
+   * @param expert_output Compact expert output in assignment order
    * @param token_assignments Vector of (token_index, weight) pairs for this
    * expert
    * @param gate_proj Gate projection weight tensor
