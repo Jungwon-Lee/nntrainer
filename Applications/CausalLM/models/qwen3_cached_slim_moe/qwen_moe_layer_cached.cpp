@@ -234,10 +234,8 @@ inline void CachedSlimMoELayer::compute_expert_forward(
   token_input.dot(up_proj, up_out);
 
   if (num_tokens == 1) {
-    // Apply activation (silu)
-    acti_func.run_fn(gate_out, acti_out);
-    // Element-wise multiply: silu(gate_out) * up_out
-    acti_out.multiply_i(up_out);
+    nntrainer::swiglu(acti_out.width(), acti_out.getData<float>(),
+                      gate_out.getData<float>(), up_out.getData<float>());
   } else {
     auto &tm = nntrainer::ThreadManager::Global();
     tm.parallel_for(0, static_cast<size_t>(num_tokens), [&](size_t i) {
