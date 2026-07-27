@@ -147,7 +147,6 @@ private:
 
   // Intermediate tensor indices
   unsigned int router_logits_idx;
-  unsigned int expert_mask_idx;
   MoEProfiler profiler;
   /**
    * @brief expert forward computation without memory copies

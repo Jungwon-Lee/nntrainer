@@ -47,8 +47,7 @@ CachedSlimMoELayer::CachedSlimMoELayer() :
   loaded_expert_deque({}),
   need_load({}),
   gate_idx(std::numeric_limits<unsigned>::max()),
-  router_logits_idx(std::numeric_limits<unsigned>::max()),
-  expert_mask_idx(std::numeric_limits<unsigned>::max()) {}
+  router_logits_idx(std::numeric_limits<unsigned>::max()) {}
 
 void CachedSlimMoELayer::finalize(nntrainer::InitLayerContext &context) {
   profiler.setName(context.getName());
@@ -154,12 +153,6 @@ void CachedSlimMoELayer::finalize(nntrainer::InitLayerContext &context) {
   router_logits_idx =
     context.requestTensor({total_tokens, 1, 1, num_experts}, "router_logits",
                           nntrainer::Initializer::NONE, false,
-                          nntrainer::TensorLifespan::FORWARD_FUNC_LIFESPAN);
-
-  // Expert mask: [num_experts, batch*seq]
-  expert_mask_idx =
-    context.requestTensor({num_experts, 1, topk, total_tokens}, "expert_mask",
-                          nntrainer::Initializer::ZEROS, false,
                           nntrainer::TensorLifespan::FORWARD_FUNC_LIFESPAN);
 }
 
