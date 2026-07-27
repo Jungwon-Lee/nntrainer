@@ -183,8 +183,6 @@ inline void CachedSlimMoELayer::compute_expert_forward(
                                        input.getTensorType());
   nntrainer::TensorDim intermediate_dim({1, 1, num_tokens, intermediate_size},
                                         input.getTensorType());
-  nntrainer::TensorDim out_step_dim({1, 1, 1, hidden_size},
-                                    input.getTensorType());
   // Create intermediate tensors for this token
   nntrainer::Tensor gate_out(intermediate_dim);
   nntrainer::Tensor acti_out(intermediate_dim);
@@ -244,15 +242,6 @@ inline void CachedSlimMoELayer::compute_expert_forward(
   const auto down_start = profiler.start();
   acti_out.dot(down_proj, output);
   profiler.record(MoEProfiler::Phase::DOWN, down_start);
-
-  // Apply routing weights to the compact expert output.
-  const auto reduce_start = profiler.start();
-  for (size_t i = 0; i < num_tokens; ++i) {
-    nntrainer::Tensor expert_token_output =
-      output.getSharedDataTensor(out_step_dim, i * hidden_size, true);
-    expert_token_output.multiply_i(token_assignments[i].second);
-  }
-  profiler.record(MoEProfiler::Phase::REDUCE, reduce_start);
 }
 
 void CachedSlimMoELayer::incremental_forwarding(
@@ -442,7 +431,7 @@ void CachedSlimMoELayer::incremental_forwarding(
         nntrainer::Tensor expert_token_output =
           expert_outputs[expert_idx].getSharedDataTensor(token_step_dim,
                                                          i * hidden_size, true);
-        token_output.add_i(expert_token_output);
+        token_output.add_i(expert_token_output, assignments[i].second);
       }
     }
     profiler.record(MoEProfiler::Phase::REDUCE, reduce_start);
