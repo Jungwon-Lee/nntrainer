@@ -332,9 +332,9 @@ void CachedSlimMoELayer::incremental_forwarding(
       }
     }
 
-    std::vector<nntrainer::Tensor> expert_outputs(num_experts);
     std::vector<int> target_idx_vector;
     target_idx_vector.reserve(num_experts);
+    unsigned int max_assignment_count = 0;
 
     for (int expert_idx = 0; expert_idx < static_cast<int>(num_experts);
          ++expert_idx) {
@@ -343,19 +343,26 @@ void CachedSlimMoELayer::incremental_forwarding(
         continue;
 
       target_idx_vector.push_back(expert_idx);
-      expert_outputs[expert_idx] =
-        nntrainer::Tensor(static_cast<unsigned int>(assignments.size()), 1, 1,
-                          hidden_size, output.getTensorType());
+      max_assignment_count = std::max(
+        max_assignment_count, static_cast<unsigned int>(assignments.size()));
     }
+    nntrainer::Tensor expert_output_workspace(
+      max_assignment_count, 1, 1, hidden_size, output.getTensorType());
     profiler.record(MoEProfiler::Phase::DISPATCH, dispatch_start);
 
-    const auto expert_start = profiler.start();
+    nntrainer::TensorDim token_step_dim({1, 1, 1, hidden_size},
+                                        output.getTensorType());
     // Serial outer loop: the expert GEMV/GEMM parallelizes internally via
     // ThreadManager (dot() calls parallel_for), and nesting parallel_for
     // deadlocks because ThreadManager::parallelize() uses a non-recursive
     // execution_mutex_.
     for (int expert_idx : target_idx_vector) {
       const auto &assignments = expert_assignments[expert_idx];
+      nntrainer::Tensor expert_output =
+        expert_output_workspace.getSharedDataTensor(
+          {static_cast<unsigned int>(assignments.size()), 1, 1, hidden_size}, 0,
+          true);
+      const auto expert_start = profiler.start();
       if (need_load[expert_idx]) {
         const auto mmap_activate_start = profiler.start();
         context.getWeight(expert_gate_proj_indices[expert_idx]).activate();
@@ -369,21 +376,26 @@ void CachedSlimMoELayer::incremental_forwarding(
           iteration_map[expert_idx] = --loaded_expert_deque.end();
           need_load[expert_idx] = false;
         }
-
-        compute_expert_forward(
-          input, expert_outputs[expert_idx], assignments,
-          context.getWeight(expert_gate_proj_indices[expert_idx]),
-          context.getWeight(expert_up_proj_indices[expert_idx]),
-          context.getWeight(expert_down_proj_indices[expert_idx]), hidden_size);
-      } else {
-        compute_expert_forward(
-          input, expert_outputs[expert_idx], assignments,
-          context.getWeight(expert_gate_proj_indices[expert_idx]),
-          context.getWeight(expert_up_proj_indices[expert_idx]),
-          context.getWeight(expert_down_proj_indices[expert_idx]), hidden_size);
       }
+
+      compute_expert_forward(
+        input, expert_output, assignments,
+        context.getWeight(expert_gate_proj_indices[expert_idx]),
+        context.getWeight(expert_up_proj_indices[expert_idx]),
+        context.getWeight(expert_down_proj_indices[expert_idx]), hidden_size);
+      profiler.record(MoEProfiler::Phase::EXPERT, expert_start);
+
+      const auto reduce_start = profiler.start();
+      for (size_t i = 0; i < assignments.size(); ++i) {
+        nntrainer::Tensor token_output = output.getSharedDataTensor(
+          token_step_dim, assignments[i].first * hidden_size, true);
+        nntrainer::Tensor expert_token_output =
+          expert_output.getSharedDataTensor(token_step_dim, i * hidden_size,
+                                            true);
+        token_output.add_i(expert_token_output, assignments[i].second);
+      }
+      profiler.record(MoEProfiler::Phase::REDUCE, reduce_start);
     }
-    profiler.record(MoEProfiler::Phase::EXPERT, expert_start);
 
     for (int i = extra_top_k.size() - 1; i >= 0; i--) {
       if (iteration_map.find(extra_top_k[i]) != iteration_map.end()) {
@@ -411,23 +423,6 @@ void CachedSlimMoELayer::incremental_forwarding(
       context.getWeight(expert_down_proj_indices[target_idx]).deactivate();
       profiler.record(MoEProfiler::Phase::MMAP, mmap_deactivate_start);
     }
-
-    // Combine expert outputs
-    const auto reduce_start = profiler.start();
-    nntrainer::TensorDim token_step_dim({1, 1, 1, hidden_size},
-                                        output.getTensorType());
-    for (int expert_idx : target_idx_vector) {
-      const auto &assignments = expert_assignments[expert_idx];
-      for (size_t i = 0; i < assignments.size(); ++i) {
-        nntrainer::Tensor token_output = output.getSharedDataTensor(
-          token_step_dim, assignments[i].first * hidden_size, true);
-        nntrainer::Tensor expert_token_output =
-          expert_outputs[expert_idx].getSharedDataTensor(token_step_dim,
-                                                         i * hidden_size, true);
-        token_output.add_i(expert_token_output, assignments[i].second);
-      }
-    }
-    profiler.record(MoEProfiler::Phase::REDUCE, reduce_start);
 
     // reshape output: [B*S,1,1,H] -> [B,1,S,H]
     output.reshape({batch_size, 1, seq_len, hidden_size});
