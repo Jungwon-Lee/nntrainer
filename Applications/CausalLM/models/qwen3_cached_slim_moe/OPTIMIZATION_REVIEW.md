@@ -28,6 +28,7 @@
 | 우선순위 | 최적화 후보 | 주요 효과 | 구현 위험 |
 |---|---|---|---|
 | P0 | Router softmax 및 topK 통합 | Router 연산과 임시 할당 감소 | 낮음 |
+| P0 | Small-K topK와 output buffer 재사용 | Decode router 할당 및 선택 비용 감소 | 낮음 |
 | P0 | extra-topK stride 수정 | Expert cache 정책 정확성 개선 | 낮음 |
 | P0 | Decode token input의 불필요한 할당 제거 | Decode allocator 비용 감소 | 낮음 |
 | P0 | SIMD SwiGLU 사용 | Activation 연산 및 memory pass 감소 | 낮음 |
@@ -56,9 +57,13 @@
 - [x] Expert assignment 연속 메모리화 (`2f844c18`)
 - [x] Cache candidate deduplication (`93724b04`)
 - [x] Dense-ID 기반 cache metadata 적용 (`71699d3a`)
+- [x] Cache capacity 설정, cache counter 및 mmap prefetch pipeline
+  (`6a091668`)
+- [x] Batch-1 decode workspace의 memory-planner 재사용 (`44d4fdb5`)
+- [x] ARM Q4_0 Gate/Up multi-weight GEMV (`a91496c7`)
+- [x] Small-K router topK 및 candidate output 재사용 (`af4b99e2`)
 - [ ] Allocation-free intrusive LRU 적용
-- [ ] Cache capacity와 mmap prefetch 개선
-- [ ] Gate/Up multi-weight Q4_0 GEMV
+- [ ] Cache capacity의 expert-byte budget 및 global budget 적용
 
 아래 절에서 "현재"라고 표현한 코드는 최초 검토 시점의 구현을
 의미한다. 위 진행 현황에서 완료로 표시된 항목은 작업 브랜치에서 이미
@@ -105,6 +110,12 @@ softmax(logit_i) / sum(softmax(selected_logits))
 현재 `FloatTensor::topK()`는 각 row마다 expert 수 크기의
 `std::vector<size_t>`를 생성하고 `std::partial_sort()`를 수행한다.
 따라서 동일 logits에 topK를 두 번 실행하는 비용은 피하는 것이 좋다.
+
+작업 브랜치에서는 K가 16 이하일 때 stack 기반 worst-root heap을
+사용한다. Qwen3의 기본 candidate 수인 `topk + 5`가 이 경로에
+해당한다. 또한 candidate value/index tensor를 memory planner에
+등록하여 batch-1 decode에서 `topK()` output을 매번 할당하지 않는다.
+동일 logit은 낮은 expert index를 우선하므로 결과 순서가 결정적이다.
 
 ### 3.1 extra-topK stride 오류
 
@@ -256,6 +267,12 @@ Prefill에서는 expert마다 배정 토큰 수가 다르므로 최대 assignmen
 맞춘 workspace를 만들거나, 필요할 때만 확장하고 이후 재사용하는
 방식이 적절하다.
 
+Batch-1 decode의 Gate, Up, activation, down output은
+`FORWARD_FUNC_LIFESPAN` tensor로 등록했다. 따라서 토큰마다 data buffer를
+할당하지 않고 memory planner가 layer 실행 순서에 따라 재사용할 수
+있다. Expert당 여러 토큰이 배정되는 prefill만 동적 크기 workspace로
+fallback하므로 큰 prompt buffer가 decode 동안 유지되지 않는다.
+
 기대 효과:
 
 - `expert_outputs[num_experts]` 제거
@@ -374,24 +391,26 @@ Lock 제거는 layer instance가 여러 실행 context에서 동시에 호출될
 
 ## 11. Cache capacity와 eviction 정책
 
-현재 cache capacity는 expert 32개로 고정되어 있다.
+기본 cache capacity는 expert 32개이며, 실행 시 다음 환경변수로 조절할
+수 있다.
 
-```cpp
-while (loaded_expert_deque.size() > 32) {
-  // Evict.
-}
+```bash
+NNTR_MOE_CACHE_EXPERTS=48
 ```
 
-문제점:
+값은 `num_experts` 이하로 clamp되며 0을 지정하면 invocation이 끝날 때
+모든 expert mapping을 해제한다. 모델과 디바이스별 hit/RSS trade-off를
+측정하면서 조절할 수 있지만, 아직 expert byte 크기나 여러 layer의
+global budget을 자동으로 반영하지는 않는다.
 
-- 디바이스 RAM과 관계없이 동일한 수를 유지한다.
+남은 문제점:
+
 - Expert 크기나 quantization dtype을 반영하지 않는다.
-- 모든 MoE layer가 독립적으로 32개를 유지한다.
+- 모든 MoE layer가 독립적으로 동일한 설정값을 사용한다.
 - 새 expert를 activate한 후 eviction하므로 순간적인 peak가 증가한다.
 
-권장 방식:
+후속 권장 방식:
 
-- Layer property 또는 runtime option으로 capacity 노출
 - Expert 개수가 아니라 byte budget으로 결정
 - 현재 invocation에서 사용할 expert는 eviction 대상에서 제외
 - 새 expert를 activate하기 전에 불필요한 resident expert를 먼저 evict
@@ -399,30 +418,33 @@ while (loaded_expert_deque.size() > 32) {
 
 Cache tuning에 필요한 profiler counter:
 
-- Cache hit
-- Cache miss
-- Eviction
+- Cache hit, miss, eviction: 적용 완료
 - Expert별 reuse distance
 - Activate/deactivate 시간
 - Major/minor page fault
 - Storage read bytes
+
+`PROFILE` 빌드에서 `NNTR_MOE_PROFILE=N`을 설정하면 N번의 layer 호출마다
+`cache_hits`, `cache_misses`, `cache_evictions`가 phase 시간과 함께
+출력된다.
 
 mmap이 유지된 상태와 실제 physical page resident 상태는 다르다.
 따라서 mapping hit만으로 flash I/O가 없었다고 판단하면 안 된다.
 
 ## 12. mmap prefetch pipeline
 
-현재 cache miss 경로는 다음 순서다.
+최초 cache miss 경로는 다음 순서였다.
 
 ```text
 Gate/Up/Down activate
 즉시 expert compute
 ```
 
-Android의 `Tensor::activate()`는 `MADV_WILLNEED`를 사용하지만 activate
-직후 weight를 읽으면 prefetch가 완료될 시간이 부족할 수 있다.
+POSIX의 `Tensor::activate()`는 지원되는 플랫폼에서 `MADV_WILLNEED`를
+사용하지만 activate 직후 weight를 읽으면 prefetch가 완료될 시간이
+부족할 수 있다.
 
-다음과 같은 두 단계 실행을 검토할 수 있다.
+작업 브랜치에는 다음 두 단계 실행을 적용했다.
 
 1. 현재 invocation에서 필요한 miss expert를 모두 확인한다.
 2. Miss expert의 Gate/Up/Down을 먼저 activate하고 prefetch를 요청한다.
@@ -453,10 +475,11 @@ token_input * gate_weight
 token_input * up_weight
 ```
 
-nntrainer에는 여러 weight/output을 받는 `Tensor::dot()` 인터페이스가
-있지만 CPU Q4_0 경로는 대부분 개별 GEMV 호출로 내려간다.
+nntrainer의 여러 weight/output을 받는 `Tensor::dot()` 인터페이스를
+CachedSlim Gate/Up에 연결했다. ARM CPU Q4_0의 batch-1 경로는 두
+projection을 하나의 multi-weight GEMV로 전달한다.
 
-Q4_0 multi-weight GEMV backend를 추가하면 다음을 재사용할 수 있다.
+적용된 Q4_0 multi-weight GEMV는 다음을 재사용한다.
 
 - Input quantization 또는 packing
 - Input cache line
@@ -466,15 +489,16 @@ Q4_0 multi-weight GEMV backend를 추가하면 다음을 재사용할 수 있다
 Prefill의 `M > 1`뿐 아니라 decode의 `M == 1`을 위한 batch-weight GEMV
 kernel이 중요하다.
 
-구현 범위:
+현재 구현 범위:
 
-- Q4_0 CPU backend capability 추가
-- ARM NEON, SVE 및 x86 경로별 kernel 검토
+- ARM CPU의 Q4_0 batch-1 capability 추가
 - Gate/Up 두 weight를 한 호출로 전달
-- 기존 단일-weight fallback 유지
+- 기본 OMP backend를 weight/output-column chunk 단위로 병렬화
+- 지원하지 않는 x86 및 다른 dtype은 기존 단일-weight fallback 유지
 
-이 항목은 backend 전체에 영향을 주므로 application-level 최적화와
-분리된 커밋 및 benchmark가 필요하다.
+별도 GEMV 두 번과 multi-weight 결과가 동일한지 검증했으며, 실제
+tokens/s 효과는 대상 ARM 디바이스에서 확인해야 한다. x86 전용
+multi-weight kernel과 prefill용 CPU batch GEMM은 아직 후속 범위다.
 
 ## 14. Batch 차원 통합
 
@@ -507,7 +531,7 @@ server 또는 multi-request batching에서는 유효하다.
 
 - 한 invocation 동안 thread-local 또는 stack accumulator 사용
 - `finish()`에서 한 번만 atomic/global counter에 반영
-- Cache hit/miss/eviction counter 추가
+- Cache hit/miss/eviction counter 추가: 적용 완료
 - Expert별 assignment 수 histogram 추가
 - `num_tokens == 1`과 prefill 결과를 분리
 
