@@ -208,51 +208,22 @@ void MoELayer::forwarding(nntrainer::RunLayerContext &context, bool training) {
     }
   }
 
-  // Adaptive optimization based on workload
-  const int active_experts =
-    std::count_if(expert_assignments.begin(), expert_assignments.end(),
-                  [](const auto &assignments) { return !assignments.empty(); });
+  // Serial outer loop: the expert GEMV/GEMM parallelizes internally via
+  // ThreadManager (dot() calls parallel_for), and nesting parallel_for
+  // deadlocks because ThreadManager::parallelize() uses a non-recursive
+  // execution_mutex_.
+  for (int expert_idx = 0; expert_idx < static_cast<int>(num_experts);
+       ++expert_idx) {
+    const auto &assignments = expert_assignments[expert_idx];
+    if (assignments.empty())
+      continue;
 
-  // Calculate total work (sum of token assignments across all experts)
-  int total_work = 0;
-  for (const auto &assignments : expert_assignments) {
-    total_work += assignments.size();
-  }
-
-  // Use parallel processing only when it's beneficial
-  const bool use_parallel = (total_work > 4) && (active_experts > 1);
-
-  if (use_parallel) {
-    // Parallel processing for larger workloads
-    auto &tm = nntrainer::ThreadManager::Global();
-    tm.parallel_for(
-      0, static_cast<size_t>(num_experts), [&](size_t expert_idx) {
-        const auto &assignments = expert_assignments[expert_idx];
-        if (assignments.empty())
-          return;
-
-        // Use optimized expert forward computation without memory copies
-        compute_expert_forward(
-          input, output, assignments,
-          context.getWeight(expert_gate_proj_indices[expert_idx]),
-          context.getWeight(expert_up_proj_indices[expert_idx]),
-          context.getWeight(expert_down_proj_indices[expert_idx]), hidden_size);
-      });
-  } else {
-    // Sequential processing for smaller workloads
-    for (int expert_idx = 0; expert_idx < static_cast<int>(num_experts);
-         ++expert_idx) {
-      const auto &assignments = expert_assignments[expert_idx];
-      if (assignments.empty())
-        continue;
-
-      // Use optimized expert forward computation without memory copies
-      compute_expert_forward(
-        input, output, assignments,
-        context.getWeight(expert_gate_proj_indices[expert_idx]),
-        context.getWeight(expert_up_proj_indices[expert_idx]),
-        context.getWeight(expert_down_proj_indices[expert_idx]), hidden_size);
-    }
+    // Use optimized expert forward computation without memory copies
+    compute_expert_forward(
+      input, output, assignments,
+      context.getWeight(expert_gate_proj_indices[expert_idx]),
+      context.getWeight(expert_up_proj_indices[expert_idx]),
+      context.getWeight(expert_down_proj_indices[expert_idx]), hidden_size);
   }
 
   // reshape output: [B*S,1,1,H] -> [B,1,S,H]
@@ -465,7 +436,7 @@ void MoELayer::incremental_forwarding(nntrainer::RunLayerContext &context,
       }
     }
 
-    // Parallel processing for multiple tokens with many active experts
+    // Allocate per-expert output tensors
     std::vector<nntrainer::Tensor> expert_outputs(num_experts);
     for (int expert_idx = 0; expert_idx < static_cast<int>(num_experts);
          ++expert_idx) {
@@ -476,21 +447,17 @@ void MoELayer::incremental_forwarding(nntrainer::RunLayerContext &context,
       }
     }
 
-    {
-      auto &tm = nntrainer::ThreadManager::Global();
-      tm.parallel_for(
-        0, static_cast<size_t>(num_experts), [&](size_t expert_idx) {
-          const auto &assignments = expert_assignments[expert_idx];
-          if (assignments.empty())
-            return;
+    for (int expert_idx = 0; expert_idx < static_cast<int>(num_experts);
+         ++expert_idx) {
+      const auto &assignments = expert_assignments[expert_idx];
+      if (assignments.empty())
+        continue;
 
-          compute_expert_forward_no_critical(
-            input, expert_outputs[expert_idx], assignments,
-            context.getWeight(expert_gate_proj_indices[expert_idx]),
-            context.getWeight(expert_up_proj_indices[expert_idx]),
-            context.getWeight(expert_down_proj_indices[expert_idx]),
-            hidden_size);
-        });
+      compute_expert_forward_no_critical(
+        input, expert_outputs[expert_idx], assignments,
+        context.getWeight(expert_gate_proj_indices[expert_idx]),
+        context.getWeight(expert_up_proj_indices[expert_idx]),
+        context.getWeight(expert_down_proj_indices[expert_idx]), hidden_size);
     }
 
     // Combine expert outputs

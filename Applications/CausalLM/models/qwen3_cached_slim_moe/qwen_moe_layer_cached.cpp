@@ -382,62 +382,58 @@ void CachedSlimMoELayer::incremental_forwarding(
     auto t2_hit = t1_hit;
 #endif
 
-    /// @todo revisit multi thread design
-    {
-      auto &tm = nntrainer::ThreadManager::Global();
-      tm.parallel_for(
-        0, static_cast<size_t>(target_idx_vector.size()), [&](size_t ti) {
-          int expert_idx = target_idx_vector[ti];
-          const auto &assignments = expert_assignments[expert_idx];
-          if (need_load[expert_idx]) {
+    // Serial outer loop: the expert GEMV/GEMM parallelizes internally via
+    // ThreadManager (dot() calls parallel_for), and nesting parallel_for
+    // deadlocks because ThreadManager::parallelize() uses a non-recursive
+    // execution_mutex_.
+    for (int expert_idx : target_idx_vector) {
+      const auto &assignments = expert_assignments[expert_idx];
+      if (need_load[expert_idx]) {
 
 #ifdef DEBUG
-            t1_miss = high_resolution_clock::now();
+        t1_miss = high_resolution_clock::now();
 #endif
 
-            context.getWeight(expert_gate_proj_indices[expert_idx]).activate();
-            context.getWeight(expert_up_proj_indices[expert_idx]).activate();
-            context.getWeight(expert_down_proj_indices[expert_idx]).activate();
+        context.getWeight(expert_gate_proj_indices[expert_idx]).activate();
+        context.getWeight(expert_up_proj_indices[expert_idx]).activate();
+        context.getWeight(expert_down_proj_indices[expert_idx]).activate();
 
-            {
-              std::lock_guard<std::mutex> lock(cache_mutex);
-              loaded_expert_deque.push_back(expert_idx);
-              iteration_map[expert_idx] = --loaded_expert_deque.end();
-              need_load[expert_idx] = false;
-              miss_count += 1;
-            }
+        {
+          std::lock_guard<std::mutex> lock(cache_mutex);
+          loaded_expert_deque.push_back(expert_idx);
+          iteration_map[expert_idx] = --loaded_expert_deque.end();
+          need_load[expert_idx] = false;
+          miss_count += 1;
+        }
 
-            compute_expert_forward(
-              input, expert_outputs[expert_idx], assignments,
-              context.getWeight(expert_gate_proj_indices[expert_idx]),
-              context.getWeight(expert_up_proj_indices[expert_idx]),
-              context.getWeight(expert_down_proj_indices[expert_idx]),
-              hidden_size);
+        compute_expert_forward(
+          input, expert_outputs[expert_idx], assignments,
+          context.getWeight(expert_gate_proj_indices[expert_idx]),
+          context.getWeight(expert_up_proj_indices[expert_idx]),
+          context.getWeight(expert_down_proj_indices[expert_idx]), hidden_size);
 #ifdef DEBUG
-            t2_miss = high_resolution_clock::now();
+        t2_miss = high_resolution_clock::now();
 #endif
-          } else {
-
-#ifdef DEBUG
-            t1_hit = high_resolution_clock::now();
-#endif
-            {
-              std::lock_guard<std::mutex> lock(cache_mutex);
-              hit_count += 1;
-            }
-
-            compute_expert_forward(
-              input, expert_outputs[expert_idx], assignments,
-              context.getWeight(expert_gate_proj_indices[expert_idx]),
-              context.getWeight(expert_up_proj_indices[expert_idx]),
-              context.getWeight(expert_down_proj_indices[expert_idx]),
-              hidden_size);
+      } else {
 
 #ifdef DEBUG
-            t2_hit = high_resolution_clock::now();
+        t1_hit = high_resolution_clock::now();
 #endif
-          }
-        });
+        {
+          std::lock_guard<std::mutex> lock(cache_mutex);
+          hit_count += 1;
+        }
+
+        compute_expert_forward(
+          input, expert_outputs[expert_idx], assignments,
+          context.getWeight(expert_gate_proj_indices[expert_idx]),
+          context.getWeight(expert_up_proj_indices[expert_idx]),
+          context.getWeight(expert_down_proj_indices[expert_idx]), hidden_size);
+
+#ifdef DEBUG
+        t2_hit = high_resolution_clock::now();
+#endif
+      }
     }
 
     for (int i = extra_top_k.size() - 1; i >= 0; i--) {

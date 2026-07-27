@@ -454,37 +454,37 @@ void SlimMoELayer::incremental_forwarding(nntrainer::RunLayerContext &context,
       }
     }
 
-    {
-      auto &tm = nntrainer::ThreadManager::Global();
-      tm.parallel_for(
-        0, static_cast<size_t>(num_experts), [&](size_t expert_idx) {
-          const auto &assignments = expert_assignments[expert_idx];
-          if (assignments.empty())
-            return;
+    // Serial outer loop: the expert GEMV/GEMM parallelizes internally via
+    // ThreadManager (dot() calls parallel_for), and nesting parallel_for
+    // deadlocks because ThreadManager::parallelize() uses a non-recursive
+    // execution_mutex_.
+    for (int expert_idx = 0; expert_idx < static_cast<int>(num_experts);
+         ++expert_idx) {
+      const auto &assignments = expert_assignments[expert_idx];
+      if (assignments.empty())
+        continue;
 
-          ///@note Please note that expert_gate_proj is virtual tensor,
-          ///      which is not allocated so far. It will be allocated when it
-          ///      is used. `activate(read=true)` will allocate its memory and
-          ///      will read from the original weight. activate is true by
-          ///      default. i.e., mmap
-          context.getWeight(expert_gate_proj_indices[expert_idx]).activate();
-          context.getWeight(expert_up_proj_indices[expert_idx]).activate();
-          context.getWeight(expert_down_proj_indices[expert_idx]).activate();
+      ///@note Please note that expert_gate_proj is virtual tensor,
+      ///      which is not allocated so far. It will be allocated when it
+      ///      is used. `activate(read=true)` will allocate its memory and
+      ///      will read from the original weight. activate is true by
+      ///      default. i.e., mmap
+      context.getWeight(expert_gate_proj_indices[expert_idx]).activate();
+      context.getWeight(expert_up_proj_indices[expert_idx]).activate();
+      context.getWeight(expert_down_proj_indices[expert_idx]).activate();
 
-          compute_expert_forward_no_critical(
-            input, expert_outputs[expert_idx], assignments,
-            context.getWeight(expert_gate_proj_indices[expert_idx]),
-            context.getWeight(expert_up_proj_indices[expert_idx]),
-            context.getWeight(expert_down_proj_indices[expert_idx]),
-            hidden_size);
+      compute_expert_forward_no_critical(
+        input, expert_outputs[expert_idx], assignments,
+        context.getWeight(expert_gate_proj_indices[expert_idx]),
+        context.getWeight(expert_up_proj_indices[expert_idx]),
+        context.getWeight(expert_down_proj_indices[expert_idx]), hidden_size);
 
-          ////@note Please note that the virtual tensor is deactivated after
-          /// usage /      This will allocate and load data from the storage
-          /// on-the-fly /      i.e., unmap
-          context.getWeight(expert_gate_proj_indices[expert_idx]).deactivate();
-          context.getWeight(expert_up_proj_indices[expert_idx]).deactivate();
-          context.getWeight(expert_down_proj_indices[expert_idx]).deactivate();
-        });
+      ////@note Please note that the virtual tensor is deactivated after
+      /// usage This will allocate and load data from the storage on-the-fly
+      /// i.e., unmap
+      context.getWeight(expert_gate_proj_indices[expert_idx]).deactivate();
+      context.getWeight(expert_up_proj_indices[expert_idx]).deactivate();
+      context.getWeight(expert_down_proj_indices[expert_idx]).deactivate();
     }
 
     // Combine expert outputs
