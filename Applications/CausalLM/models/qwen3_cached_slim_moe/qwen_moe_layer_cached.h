@@ -148,6 +148,10 @@ private:
 
   // Intermediate tensor indices
   unsigned int router_logits_idx;
+  unsigned int decode_expert_output_idx;
+  unsigned int decode_gate_output_idx;
+  unsigned int decode_activation_output_idx;
+  unsigned int decode_up_output_idx;
   MoEProfiler profiler;
   /**
    * @brief expert forward computation without memory copies
@@ -160,7 +164,8 @@ private:
    * @param up_proj Up projection weight tensor
    * @param down_proj Down projection weight tensor
    * @param hidden_size Hidden dimension size
-   * @param token_input_workspace Reusable gathered-token buffer
+   * @param token_input_workspace Reusable gathered-token buffer, or nullptr
+   * for a single token
    * @param gate_out_workspace Reusable gate projection buffer
    * @param acti_out_workspace Reusable activation buffer
    * @param up_out_workspace Reusable up projection buffer
@@ -170,7 +175,7 @@ private:
     const std::pair<unsigned, float> *token_assignments,
     unsigned int num_tokens, const nntrainer::Tensor &gate_proj,
     const nntrainer::Tensor &up_proj, const nntrainer::Tensor &down_proj,
-    unsigned int hidden_size, nntrainer::Tensor &token_input_workspace,
+    unsigned int hidden_size, nntrainer::Tensor *token_input_workspace,
     nntrainer::Tensor &gate_out_workspace,
     nntrainer::Tensor &acti_out_workspace, nntrainer::Tensor &up_out_workspace);
 };

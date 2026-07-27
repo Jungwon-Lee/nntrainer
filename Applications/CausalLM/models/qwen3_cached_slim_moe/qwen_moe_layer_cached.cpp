@@ -28,6 +28,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <node_exporter.h>
+#include <optional>
 #include <qwen_moe_layer_cached.h>
 #include <stdexcept>
 #include <thread_manager.h>
@@ -68,7 +69,11 @@ CachedSlimMoELayer::CachedSlimMoELayer() :
   need_load({}),
   cache_capacity(0),
   gate_idx(std::numeric_limits<unsigned>::max()),
-  router_logits_idx(std::numeric_limits<unsigned>::max()) {}
+  router_logits_idx(std::numeric_limits<unsigned>::max()),
+  decode_expert_output_idx(std::numeric_limits<unsigned>::max()),
+  decode_gate_output_idx(std::numeric_limits<unsigned>::max()),
+  decode_activation_output_idx(std::numeric_limits<unsigned>::max()),
+  decode_up_output_idx(std::numeric_limits<unsigned>::max()) {}
 
 void CachedSlimMoELayer::finalize(nntrainer::InitLayerContext &context) {
   profiler.setName(context.getName());
@@ -177,6 +182,23 @@ void CachedSlimMoELayer::finalize(nntrainer::InitLayerContext &context) {
     context.requestTensor({total_tokens, 1, 1, num_experts}, "router_logits",
                           nntrainer::Initializer::NONE, false,
                           nntrainer::TensorLifespan::FORWARD_FUNC_LIFESPAN);
+
+  decode_expert_output_idx =
+    context.requestTensor({1, 1, 1, hidden_size}, "decode_expert_output",
+                          nntrainer::Initializer::NONE, false,
+                          nntrainer::TensorLifespan::FORWARD_FUNC_LIFESPAN);
+  decode_gate_output_idx =
+    context.requestTensor({1, 1, 1, intermediate_size}, "decode_gate_output",
+                          nntrainer::Initializer::NONE, false,
+                          nntrainer::TensorLifespan::FORWARD_FUNC_LIFESPAN);
+  decode_activation_output_idx = context.requestTensor(
+    {1, 1, 1, intermediate_size}, "decode_activation_output",
+    nntrainer::Initializer::NONE, false,
+    nntrainer::TensorLifespan::FORWARD_FUNC_LIFESPAN);
+  decode_up_output_idx =
+    context.requestTensor({1, 1, 1, intermediate_size}, "decode_up_output",
+                          nntrainer::Initializer::NONE, false,
+                          nntrainer::TensorLifespan::FORWARD_FUNC_LIFESPAN);
 }
 
 void CachedSlimMoELayer::forwarding(nntrainer::RunLayerContext &context,
@@ -187,7 +209,7 @@ inline void CachedSlimMoELayer::compute_expert_forward(
   const std::pair<unsigned, float> *token_assignments, unsigned int num_tokens,
   const nntrainer::Tensor &gate_proj, const nntrainer::Tensor &up_proj,
   const nntrainer::Tensor &down_proj, unsigned int hidden_size,
-  nntrainer::Tensor &token_input_workspace,
+  nntrainer::Tensor *token_input_workspace,
   nntrainer::Tensor &gate_out_workspace, nntrainer::Tensor &acti_out_workspace,
   nntrainer::Tensor &up_out_workspace) {
 
@@ -215,7 +237,7 @@ inline void CachedSlimMoELayer::compute_expert_forward(
   if (num_tokens > 1) {
     /** if prefill, copy data to make a batch */
     token_input =
-      token_input_workspace.getSharedDataTensor(token_input_dim, 0, true);
+      token_input_workspace->getSharedDataTensor(token_input_dim, 0, true);
     {
       auto &tm = nntrainer::ThreadManager::Global();
       tm.parallel_for(0, static_cast<size_t>(num_tokens), [&](size_t i) {
@@ -399,22 +421,43 @@ void CachedSlimMoELayer::incremental_forwarding(
       max_assignment_count = std::max(
         max_assignment_count, static_cast<unsigned int>(assignment_count));
     }
-    nntrainer::Tensor expert_output_workspace(
-      max_assignment_count, 1, 1, hidden_size, output.getTensorType());
     const unsigned int intermediate_size =
       context.getWeight(expert_gate_proj_indices[target_idx_vector.front()])
         .width();
-    nntrainer::Tensor token_input_workspace;
+
+    nntrainer::Tensor *expert_output_workspace =
+      &context.getTensor(decode_expert_output_idx);
+    nntrainer::Tensor *gate_out_workspace =
+      &context.getTensor(decode_gate_output_idx);
+    nntrainer::Tensor *acti_out_workspace =
+      &context.getTensor(decode_activation_output_idx);
+    nntrainer::Tensor *up_out_workspace =
+      &context.getTensor(decode_up_output_idx);
+    nntrainer::Tensor *token_input_workspace = nullptr;
+
+    std::optional<nntrainer::Tensor> prefill_expert_output_workspace;
+    std::optional<nntrainer::Tensor> prefill_token_input_workspace;
+    std::optional<nntrainer::Tensor> prefill_gate_out_workspace;
+    std::optional<nntrainer::Tensor> prefill_acti_out_workspace;
+    std::optional<nntrainer::Tensor> prefill_up_out_workspace;
     if (max_assignment_count > 1) {
-      token_input_workspace = nntrainer::Tensor(
-        1, 1, max_assignment_count, hidden_size, input.getTensorType());
+      prefill_expert_output_workspace.emplace(
+        max_assignment_count, 1, 1, hidden_size, output.getTensorType());
+      prefill_token_input_workspace.emplace(1, 1, max_assignment_count,
+                                            hidden_size, input.getTensorType());
+      prefill_gate_out_workspace.emplace(
+        1, 1, max_assignment_count, intermediate_size, input.getTensorType());
+      prefill_acti_out_workspace.emplace(
+        1, 1, max_assignment_count, intermediate_size, input.getTensorType());
+      prefill_up_out_workspace.emplace(
+        1, 1, max_assignment_count, intermediate_size, input.getTensorType());
+
+      expert_output_workspace = &*prefill_expert_output_workspace;
+      token_input_workspace = &*prefill_token_input_workspace;
+      gate_out_workspace = &*prefill_gate_out_workspace;
+      acti_out_workspace = &*prefill_acti_out_workspace;
+      up_out_workspace = &*prefill_up_out_workspace;
     }
-    nntrainer::Tensor gate_out_workspace(
-      1, 1, max_assignment_count, intermediate_size, input.getTensorType());
-    nntrainer::Tensor acti_out_workspace(
-      1, 1, max_assignment_count, intermediate_size, input.getTensorType());
-    nntrainer::Tensor up_out_workspace(
-      1, 1, max_assignment_count, intermediate_size, input.getTensorType());
     profiler.record(MoEProfiler::Phase::DISPATCH, dispatch_start);
 
     nntrainer::TensorDim token_step_dim({1, 1, 1, hidden_size},
@@ -457,7 +500,7 @@ void CachedSlimMoELayer::incremental_forwarding(
           expert_offsets[expert_idx + 1] - assignment_offset);
         const auto *assignments = expert_assignments.data() + assignment_offset;
         nntrainer::Tensor expert_output =
-          expert_output_workspace.getSharedDataTensor(
+          expert_output_workspace->getSharedDataTensor(
             {assignment_count, 1, 1, hidden_size}, 0, true);
         const auto expert_start = profiler.start();
         compute_expert_forward(
@@ -465,8 +508,8 @@ void CachedSlimMoELayer::incremental_forwarding(
           context.getWeight(expert_gate_proj_indices[expert_idx]),
           context.getWeight(expert_up_proj_indices[expert_idx]),
           context.getWeight(expert_down_proj_indices[expert_idx]), hidden_size,
-          token_input_workspace, gate_out_workspace, acti_out_workspace,
-          up_out_workspace);
+          token_input_workspace, *gate_out_workspace, *acti_out_workspace,
+          *up_out_workspace);
         profiler.record(MoEProfiler::Phase::EXPERT, expert_start);
 
         const auto reduce_start = profiler.start();
