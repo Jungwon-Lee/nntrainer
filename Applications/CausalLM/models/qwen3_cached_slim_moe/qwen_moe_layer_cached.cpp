@@ -303,41 +303,50 @@ void CachedSlimMoELayer::incremental_forwarding(
     const auto router_start = profiler.start();
     nntrainer::Tensor &gate_weights = context.getWeight(gate_idx);
     input.dot(gate_weights, router_logits);
-    router_logits.apply(nntrainer::ActiFunc::softmax<float>, router_logits);
 
-    // get extra topK
-    auto extra_topk_result = router_logits.topK(topk + 5);
-    auto extra_topk_values = std::get<0>(extra_topk_result);
-    auto extra_topk_indices = std::get<1>(extra_topk_result);
-    std::deque<int> extra_top_k = {};
-    extra_topk_values.divide_i(extra_topk_values.sum(3));
-    const uint32_t *extra_indices_data = extra_topk_indices.getData<uint32_t>();
+    // Softmax preserves the logit ordering. Select cache candidates once from
+    // the raw logits, then normalize only the experts used for routing.
+    const unsigned int candidate_count = std::min(num_experts, topk + 5U);
+    auto candidate_result = router_logits.topK(candidate_count);
+    auto candidate_values = std::get<0>(candidate_result);
+    auto candidate_indices = std::get<1>(candidate_result);
+    float *candidate_values_data = candidate_values.getData<float>();
+    const uint32_t *candidate_indices_data =
+      candidate_indices.getData<uint32_t>();
 
-    // get extra topk
-    for (int i = static_cast<int>(total_tokens) - 1; i >= 0; --i) {
-      for (int k = 0; k < static_cast<int>(topk + 5); ++k) {
-        unsigned expert_idx = extra_indices_data[i * topk + k];
-        extra_top_k.push_back(expert_idx);
+    for (unsigned int i = 0; i < total_tokens; ++i) {
+      const size_t candidate_offset = static_cast<size_t>(i) * candidate_count;
+      const float max_logit = candidate_values_data[candidate_offset];
+      float weight_sum = 0.0f;
+      for (unsigned int k = 0; k < topk; ++k) {
+        const float weight =
+          std::exp(candidate_values_data[candidate_offset + k] - max_logit);
+        candidate_values_data[candidate_offset + k] = weight;
+        weight_sum += weight;
       }
+
+      const float inverse_weight_sum = 1.0f / weight_sum;
+      for (unsigned int k = 0; k < topk; ++k)
+        candidate_values_data[candidate_offset + k] *= inverse_weight_sum;
     }
-
-    auto topk_result = router_logits.topK(topk);
-    auto topk_values = std::get<0>(topk_result);
-    auto topk_indices = std::get<1>(topk_result);
-
-    // norm_topk_prob
-    topk_values.divide_i(topk_values.sum(3));
     profiler.record(MoEProfiler::Phase::ROUTER, router_start);
 
     const auto dispatch_start = profiler.start();
-    const uint32_t *indices_data = topk_indices.getData<uint32_t>();
     std::vector<std::vector<std::pair<unsigned, float>>> expert_assignments(
       num_experts);
-    // Set expert mask
-    for (int i = 0; i < static_cast<int>(total_tokens); ++i) {
-      for (int k = 0; k < static_cast<int>(topk); ++k) {
-        unsigned expert_idx = indices_data[i * topk + k];
-        float weight = topk_values.getValue<float>(i, 0, 0, k);
+    std::deque<int> extra_top_k;
+    for (int i = static_cast<int>(total_tokens) - 1; i >= 0; --i) {
+      const size_t candidate_offset = static_cast<size_t>(i) * candidate_count;
+      for (unsigned int k = 0; k < candidate_count; ++k)
+        extra_top_k.push_back(candidate_indices_data[candidate_offset + k]);
+    }
+
+    for (unsigned int i = 0; i < total_tokens; ++i) {
+      const size_t candidate_offset = static_cast<size_t>(i) * candidate_count;
+      for (unsigned int k = 0; k < topk; ++k) {
+        const unsigned int expert_idx =
+          candidate_indices_data[candidate_offset + k];
+        const float weight = candidate_values_data[candidate_offset + k];
         expert_assignments[expert_idx].emplace_back(i, weight);
       }
     }
