@@ -1676,7 +1676,7 @@ void Tensor::activate() {
        "read-time";
 
   mapped_ptr = mmap(NULL, len, PROT_READ, MAP_PRIVATE, this->fd, off);
-#ifdef __ANDROID__
+#if defined(MADV_WILLNEED)
   if (mapped_ptr != MAP_FAILED)
     madvise(mapped_ptr, len, MADV_WILLNEED);
 #endif

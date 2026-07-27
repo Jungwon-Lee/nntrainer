@@ -142,6 +142,7 @@ private:
   std::vector<std::list<int>::iterator> cache_positions;
   std::vector<uint8_t> need_load;
   std::mutex cache_mutex;
+  unsigned int cache_capacity;
 
   unsigned int gate_idx;
 

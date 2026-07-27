@@ -10,13 +10,13 @@
 #define __CAUSALLM_MOE_PROFILER_H__
 
 #include <chrono>
+#include <cstdint>
 #include <string>
 #include <utility>
 
 #ifdef PROFILE
 #include <array>
 #include <atomic>
-#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <mutex>
@@ -51,7 +51,8 @@ public:
   using TimePoint = Clock::time_point;
 
 #ifdef PROFILE
-  MoEProfiler() : calls(0), tokens(0) {
+  MoEProfiler() :
+    calls(0), tokens(0), cache_hits(0), cache_misses(0), cache_evictions(0) {
     for (auto &duration : durations)
       duration.store(0, std::memory_order_relaxed);
   }
@@ -59,7 +60,10 @@ public:
   MoEProfiler(MoEProfiler &&rhs) noexcept :
     name(std::move(rhs.name)),
     calls(rhs.calls.load(std::memory_order_relaxed)),
-    tokens(rhs.tokens.load(std::memory_order_relaxed)) {
+    tokens(rhs.tokens.load(std::memory_order_relaxed)),
+    cache_hits(rhs.cache_hits.load(std::memory_order_relaxed)),
+    cache_misses(rhs.cache_misses.load(std::memory_order_relaxed)),
+    cache_evictions(rhs.cache_evictions.load(std::memory_order_relaxed)) {
     for (size_t i = 0; i < durations.size(); ++i)
       durations[i].store(rhs.durations[i].load(std::memory_order_relaxed),
                          std::memory_order_relaxed);
@@ -74,6 +78,12 @@ public:
                 std::memory_order_relaxed);
     tokens.store(rhs.tokens.load(std::memory_order_relaxed),
                  std::memory_order_relaxed);
+    cache_hits.store(rhs.cache_hits.load(std::memory_order_relaxed),
+                     std::memory_order_relaxed);
+    cache_misses.store(rhs.cache_misses.load(std::memory_order_relaxed),
+                       std::memory_order_relaxed);
+    cache_evictions.store(rhs.cache_evictions.load(std::memory_order_relaxed),
+                          std::memory_order_relaxed);
     for (size_t i = 0; i < durations.size(); ++i)
       durations[i].store(rhs.durations[i].load(std::memory_order_relaxed),
                          std::memory_order_relaxed);
@@ -97,6 +107,15 @@ public:
       static_cast<uint64_t>(elapsed), std::memory_order_relaxed);
   }
 
+  void recordCache(uint64_t hits, uint64_t misses, uint64_t evictions = 0) {
+    if (!enabled())
+      return;
+
+    cache_hits.fetch_add(hits, std::memory_order_relaxed);
+    cache_misses.fetch_add(misses, std::memory_order_relaxed);
+    cache_evictions.fetch_add(evictions, std::memory_order_relaxed);
+  }
+
   void finish(unsigned int token_count) {
     const unsigned int interval = reportInterval();
     if (interval == 0)
@@ -115,6 +134,12 @@ public:
 
     const uint64_t reported_tokens =
       tokens.exchange(0, std::memory_order_relaxed);
+    const uint64_t reported_cache_hits =
+      cache_hits.exchange(0, std::memory_order_relaxed);
+    const uint64_t reported_cache_misses =
+      cache_misses.exchange(0, std::memory_order_relaxed);
+    const uint64_t reported_cache_evictions =
+      cache_evictions.exchange(0, std::memory_order_relaxed);
     const auto us = [&snapshot](Phase phase) {
       return snapshot[static_cast<size_t>(phase)] / 1000ULL;
     };
@@ -124,7 +149,8 @@ public:
       "[MoEProfile] %s calls=%u tokens=%llu total_wall_us=%llu "
       "router_work_us=%llu dispatch_work_us=%llu mmap_work_us=%llu "
       "expert_wall_us=%llu gate_up_work_us=%llu activation_work_us=%llu "
-      "down_work_us=%llu reduce_work_us=%llu\n",
+      "down_work_us=%llu reduce_work_us=%llu cache_hits=%llu "
+      "cache_misses=%llu cache_evictions=%llu\n",
       name.c_str(), interval, static_cast<unsigned long long>(reported_tokens),
       static_cast<unsigned long long>(us(Phase::TOTAL)),
       static_cast<unsigned long long>(us(Phase::ROUTER)),
@@ -134,7 +160,10 @@ public:
       static_cast<unsigned long long>(us(Phase::GATE_UP)),
       static_cast<unsigned long long>(us(Phase::ACTIVATION)),
       static_cast<unsigned long long>(us(Phase::DOWN)),
-      static_cast<unsigned long long>(us(Phase::REDUCE)));
+      static_cast<unsigned long long>(us(Phase::REDUCE)),
+      static_cast<unsigned long long>(reported_cache_hits),
+      static_cast<unsigned long long>(reported_cache_misses),
+      static_cast<unsigned long long>(reported_cache_evictions));
   }
 #else
   MoEProfiler() = default;
@@ -148,6 +177,8 @@ public:
   TimePoint start() const { return TimePoint(); }
 
   void record(Phase, TimePoint) {}
+
+  void recordCache(uint64_t, uint64_t, uint64_t = 0) {}
 
   void finish(unsigned int) {}
 #endif
@@ -174,6 +205,9 @@ private:
     durations;
   std::atomic<uint64_t> calls;
   std::atomic<uint64_t> tokens;
+  std::atomic<uint64_t> cache_hits;
+  std::atomic<uint64_t> cache_misses;
+  std::atomic<uint64_t> cache_evictions;
   std::mutex report_mutex;
 #endif
 };

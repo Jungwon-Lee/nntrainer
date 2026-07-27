@@ -24,7 +24,9 @@
 
 #include <acti_func.h>
 #include <algorithm>
+#include <cerrno>
 #include <cmath>
+#include <cstdlib>
 #include <node_exporter.h>
 #include <qwen_moe_layer_cached.h>
 #include <stdexcept>
@@ -33,6 +35,24 @@
 namespace causallm {
 
 static constexpr size_t SINGLE_INOUT_IDX = 0;
+static constexpr unsigned int DEFAULT_EXPERT_CACHE_CAPACITY = 32;
+
+static unsigned int getExpertCacheCapacity(unsigned int num_experts) {
+  const char *value = std::getenv("NNTR_MOE_CACHE_EXPERTS");
+  if (value == nullptr)
+    return std::min(num_experts, DEFAULT_EXPERT_CACHE_CAPACITY);
+
+  if (*value == '\0' || *value == '-')
+    return std::min(num_experts, DEFAULT_EXPERT_CACHE_CAPACITY);
+
+  errno = 0;
+  char *end = nullptr;
+  const unsigned long parsed = std::strtoul(value, &end, 10);
+  if (errno == ERANGE || end == value || *end != '\0')
+    return std::min(num_experts, DEFAULT_EXPERT_CACHE_CAPACITY);
+
+  return std::min(static_cast<unsigned long>(num_experts), parsed);
+}
 
 CachedSlimMoELayer::CachedSlimMoELayer() :
   LayerImpl(),
@@ -46,6 +66,7 @@ CachedSlimMoELayer::CachedSlimMoELayer() :
   loaded_expert_deque({}),
   cache_positions({}),
   need_load({}),
+  cache_capacity(0),
   gate_idx(std::numeric_limits<unsigned>::max()),
   router_logits_idx(std::numeric_limits<unsigned>::max()) {}
 
@@ -144,6 +165,7 @@ void CachedSlimMoELayer::finalize(nntrainer::InitLayerContext &context) {
   }
   cache_positions.resize(num_experts);
   need_load.assign(num_experts, 1);
+  cache_capacity = getExpertCacheCapacity(num_experts);
 
   // 6. Request intermediate tensors
   const unsigned batch_size = in_dim.batch();
@@ -397,53 +419,67 @@ void CachedSlimMoELayer::incremental_forwarding(
 
     nntrainer::TensorDim token_step_dim({1, 1, 1, hidden_size},
                                         output.getTensorType());
+    uint64_t cache_miss_count = 0;
+    const auto mmap_activate_start = profiler.start();
+    for (int expert_idx : target_idx_vector) {
+      const bool cache_miss = need_load[expert_idx];
+      candidate_seen[expert_idx] = cache_miss;
+      if (!cache_miss)
+        continue;
+
+      context.getWeight(expert_gate_proj_indices[expert_idx]).activate();
+      context.getWeight(expert_up_proj_indices[expert_idx]).activate();
+      context.getWeight(expert_down_proj_indices[expert_idx]).activate();
+
+      std::lock_guard<std::mutex> lock(cache_mutex);
+      loaded_expert_deque.push_back(expert_idx);
+      cache_positions[expert_idx] = --loaded_expert_deque.end();
+      need_load[expert_idx] = 0;
+      ++cache_miss_count;
+    }
+    profiler.record(MoEProfiler::Phase::MMAP, mmap_activate_start);
+    profiler.recordCache(target_idx_vector.size() - cache_miss_count,
+                         cache_miss_count);
+
     // Serial outer loop: the expert GEMV/GEMM parallelizes internally via
     // ThreadManager (dot() calls parallel_for), and nesting parallel_for
     // deadlocks because ThreadManager::parallelize() uses a non-recursive
     // execution_mutex_.
-    for (int expert_idx : target_idx_vector) {
-      const size_t assignment_offset = expert_offsets[expert_idx];
-      const unsigned int assignment_count = static_cast<unsigned int>(
-        expert_offsets[expert_idx + 1] - assignment_offset);
-      const auto *assignments = expert_assignments.data() + assignment_offset;
-      nntrainer::Tensor expert_output =
-        expert_output_workspace.getSharedDataTensor(
-          {assignment_count, 1, 1, hidden_size}, 0, true);
-      const auto expert_start = profiler.start();
-      if (need_load[expert_idx]) {
-        const auto mmap_activate_start = profiler.start();
-        context.getWeight(expert_gate_proj_indices[expert_idx]).activate();
-        context.getWeight(expert_up_proj_indices[expert_idx]).activate();
-        context.getWeight(expert_down_proj_indices[expert_idx]).activate();
-        profiler.record(MoEProfiler::Phase::MMAP, mmap_activate_start);
+    // Resident experts run in pass 0 so their compute overlaps asynchronous
+    // page-in requested for all cache misses above.
+    for (uint8_t miss_pass = 0; miss_pass < 2; ++miss_pass) {
+      for (int expert_idx : target_idx_vector) {
+        if (candidate_seen[expert_idx] != miss_pass)
+          continue;
 
-        {
-          std::lock_guard<std::mutex> lock(cache_mutex);
-          loaded_expert_deque.push_back(expert_idx);
-          cache_positions[expert_idx] = --loaded_expert_deque.end();
-          need_load[expert_idx] = 0;
+        const size_t assignment_offset = expert_offsets[expert_idx];
+        const unsigned int assignment_count = static_cast<unsigned int>(
+          expert_offsets[expert_idx + 1] - assignment_offset);
+        const auto *assignments = expert_assignments.data() + assignment_offset;
+        nntrainer::Tensor expert_output =
+          expert_output_workspace.getSharedDataTensor(
+            {assignment_count, 1, 1, hidden_size}, 0, true);
+        const auto expert_start = profiler.start();
+        compute_expert_forward(
+          input, expert_output, assignments, assignment_count,
+          context.getWeight(expert_gate_proj_indices[expert_idx]),
+          context.getWeight(expert_up_proj_indices[expert_idx]),
+          context.getWeight(expert_down_proj_indices[expert_idx]), hidden_size,
+          token_input_workspace, gate_out_workspace, acti_out_workspace,
+          up_out_workspace);
+        profiler.record(MoEProfiler::Phase::EXPERT, expert_start);
+
+        const auto reduce_start = profiler.start();
+        for (unsigned int i = 0; i < assignment_count; ++i) {
+          nntrainer::Tensor token_output = output.getSharedDataTensor(
+            token_step_dim, assignments[i].first * hidden_size, true);
+          nntrainer::Tensor expert_token_output =
+            expert_output.getSharedDataTensor(token_step_dim, i * hidden_size,
+                                              true);
+          token_output.add_i(expert_token_output, assignments[i].second);
         }
+        profiler.record(MoEProfiler::Phase::REDUCE, reduce_start);
       }
-
-      compute_expert_forward(
-        input, expert_output, assignments, assignment_count,
-        context.getWeight(expert_gate_proj_indices[expert_idx]),
-        context.getWeight(expert_up_proj_indices[expert_idx]),
-        context.getWeight(expert_down_proj_indices[expert_idx]), hidden_size,
-        token_input_workspace, gate_out_workspace, acti_out_workspace,
-        up_out_workspace);
-      profiler.record(MoEProfiler::Phase::EXPERT, expert_start);
-
-      const auto reduce_start = profiler.start();
-      for (unsigned int i = 0; i < assignment_count; ++i) {
-        nntrainer::Tensor token_output = output.getSharedDataTensor(
-          token_step_dim, assignments[i].first * hidden_size, true);
-        nntrainer::Tensor expert_token_output =
-          expert_output.getSharedDataTensor(token_step_dim, i * hidden_size,
-                                            true);
-        token_output.add_i(expert_token_output, assignments[i].second);
-      }
-      profiler.record(MoEProfiler::Phase::REDUCE, reduce_start);
     }
 
     for (auto candidate = extra_top_k.rbegin(); candidate != extra_top_k.rend();
@@ -458,7 +494,8 @@ void CachedSlimMoELayer::incremental_forwarding(
 
     // Evict experts
     /// @todo apply multi thread loop
-    while (loaded_expert_deque.size() > 32) {
+    uint64_t eviction_count = 0;
+    while (loaded_expert_deque.size() > cache_capacity) {
       int target_idx;
       {
         std::lock_guard<std::mutex> lock(cache_mutex);
@@ -472,7 +509,9 @@ void CachedSlimMoELayer::incremental_forwarding(
       context.getWeight(expert_up_proj_indices[target_idx]).deactivate();
       context.getWeight(expert_down_proj_indices[target_idx]).deactivate();
       profiler.record(MoEProfiler::Phase::MMAP, mmap_deactivate_start);
+      ++eviction_count;
     }
+    profiler.recordCache(0, 0, eviction_count);
 
     // reshape output: [B*S,1,1,H] -> [B,1,S,H]
     output.reshape({batch_size, 1, seq_len, hidden_size});
