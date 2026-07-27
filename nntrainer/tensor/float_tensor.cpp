@@ -768,8 +768,9 @@ Tensor &FloatTensor::dot(Tensor const &input, Tensor &output, bool trans,
   return output;
 }
 
-void FloatTensor::dot(std::vector<Tensor *> input, std::vector<Tensor *> output,
-                      bool trans, bool trans_in, float beta) const {
+void FloatTensor::dot(const std::vector<Tensor *> &input,
+                      const std::vector<Tensor *> &output, bool trans,
+                      bool trans_in, float beta) const {
   float *data = (float *)getData();
   unsigned int M = getDim().height();
   unsigned int K = getDim().width();
@@ -795,7 +796,9 @@ void FloatTensor::dot(std::vector<Tensor *> input, std::vector<Tensor *> output,
 
   auto *o = getOps();
   if (input_dtype == Tdatatype::Q4_0) {
-    if (o->supports_gemm_q4_0_batch_fp32() && M > 1) {
+    if (M == 1 && o->supports_gemv_q4_0_batch_fp32()) {
+      o->gemv_q4_0_batch_fp32(mdatas, data, rdatas, Ns, K);
+    } else if (o->supports_gemm_q4_0_batch_fp32() && M > 1) {
       o->gemm_q4_0_batch_fp32(mdatas, data, rdatas, M, Ns, K);
     } else {
       for (unsigned int i = 0; i < input.size(); ++i) {

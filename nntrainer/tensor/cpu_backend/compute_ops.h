@@ -198,10 +198,15 @@ public:
                                     const unsigned int incY);
 
   // ===========================================================================
-  // Accelerator-only (GPU/NPU) ops — query supports_* before calling.
-  // CPU subclasses leave both the impl (default-throw) and predicate
-  // (default false) untouched. Accelerator subclasses override both.
+  // Optional batch/accelerator ops — query supports_* before calling.
   // ===========================================================================
+  virtual bool supports_gemv_q4_0_batch_fp32() const { return false; }
+  virtual void gemv_q4_0_batch_fp32(const std::vector<void *> &weights,
+                                    float *input,
+                                    const std::vector<float *> &outputs,
+                                    const std::vector<unsigned int> &Ns,
+                                    unsigned int K);
+
   virtual bool supports_gemm_q4_0_batch_fp32() const { return false; }
   virtual void gemm_q4_0_batch_fp32(std::vector<void *> matAdata,
                                     float *matBdata,

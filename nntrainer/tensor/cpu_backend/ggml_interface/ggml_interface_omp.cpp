@@ -142,13 +142,11 @@ void __ggml_q4_0_4x8_q8_0_GEMM(const unsigned int M, const unsigned int N,
 }
 
 template <>
-void __ggml_q4_0_4x8_q8_0_GEMM(const unsigned int M,
-                               std::vector<unsigned int> Ns,
-                               const unsigned int K, const float *A,
-                               const unsigned int lda, std::vector<void *> Bs,
-                               std::vector<unsigned int> ldbs,
-                               std::vector<float *> Cs,
-                               std::vector<unsigned int> ldcs) {
+void __ggml_q4_0_4x8_q8_0_GEMM(
+  const unsigned int M, const std::vector<unsigned int> &Ns,
+  const unsigned int K, const float *A, const unsigned int lda,
+  const std::vector<void *> &Bs, const std::vector<unsigned int> &ldbs,
+  const std::vector<float *> &Cs, const std::vector<unsigned int> &ldcs) {
   int NB_COLS = 4;
   int B_step = sizeof(block_q4_0) * (K / QK4_0);
   int blocks_per_4_rows = (K + QK8_0 - 1) / QK8_0;
@@ -182,25 +180,29 @@ void __ggml_q4_0_4x8_q8_0_GEMM(const unsigned int M,
                                 QA.data(), M, M_step_end - M_step_start);
       }
     } else {
-      // Single-threaded (n_threads=1 in original)
-      for (unsigned int num_w = 0; num_w < Ns.size(); ++num_w) {
-        unsigned int N = Ns[num_w];
-        float *C = Cs[num_w];
-        void *B = Bs[num_w];
-        unsigned int M_step_start = 0;
-        unsigned int M_step_end = N;
+      constexpr unsigned int chunk_size = 16;
+      size_t total_chunks = 0;
+      for (unsigned int N : Ns)
+        total_chunks += (N + chunk_size - 1) / chunk_size;
 
-        M_step_start = (M_step_start % NB_COLS)
-                         ? M_step_start + NB_COLS - (M_step_start % NB_COLS)
-                         : M_step_start;
-        M_step_end = (M_step_end % NB_COLS)
-                       ? M_step_end + NB_COLS - (M_step_end % NB_COLS)
-                       : M_step_end;
+      tm.parallel_for(0, total_chunks, [&](size_t task_idx) {
+        unsigned int num_w = 0;
+        for (; num_w < Ns.size(); ++num_w) {
+          const size_t weight_chunks =
+            (Ns[num_w] + chunk_size - 1) / chunk_size;
+          if (task_idx < weight_chunks)
+            break;
+          task_idx -= weight_chunks;
+        }
 
-        nntr_gemv_q4_0_4x8_q8_0(K, (float *)(C + M_step_start), N,
-                                (void *)((char *)B + M_step_start * B_step),
-                                QA.data(), M, M_step_end - M_step_start);
-      }
+        const unsigned int N = Ns[num_w];
+        const unsigned int start = task_idx * chunk_size;
+        const unsigned int end =
+          std::min(start + chunk_size, static_cast<unsigned int>(N));
+        nntr_gemv_q4_0_4x8_q8_0(K, Cs[num_w] + start, N,
+                                static_cast<char *>(Bs[num_w]) + start * B_step,
+                                QA.data(), M, end - start);
+      });
     }
   } else {
     unsigned int qa_4_rows_size = sizeof(block_q8_0x4) * blocks_per_4_rows;

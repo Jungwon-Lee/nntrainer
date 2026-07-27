@@ -1018,8 +1018,9 @@ void Tensor::standardization_i() {
   this->divide_i(std_dev_by_batch);
 }
 
-void Tensor::dot(std::vector<Tensor *> input, std::vector<Tensor *> output,
-                 bool trans, bool trans_in, float beta) const {
+void Tensor::dot(const std::vector<Tensor *> &input,
+                 const std::vector<Tensor *> &output, bool trans, bool trans_in,
+                 float beta) const {
   NNTR_THROW_IF(!getContiguous(), std::invalid_argument)
     << getName() << " is not contiguous. Cannot dot product.";
 

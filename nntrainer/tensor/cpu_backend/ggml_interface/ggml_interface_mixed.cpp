@@ -138,13 +138,11 @@ void __ggml_q4_0_4x8_q8_0_GEMM(const unsigned int M, const unsigned int N,
 }
 
 template <>
-void __ggml_q4_0_4x8_q8_0_GEMM(const unsigned int M,
-                               std::vector<unsigned int> Ns,
-                               const unsigned int K, const float *A,
-                               const unsigned int lda, std::vector<void *> Bs,
-                               std::vector<unsigned int> ldbs,
-                               std::vector<float *> Cs,
-                               std::vector<unsigned int> ldcs) {
+void __ggml_q4_0_4x8_q8_0_GEMM(
+  const unsigned int M, const std::vector<unsigned int> &Ns,
+  const unsigned int K, const float *A, const unsigned int lda,
+  const std::vector<void *> &Bs, const std::vector<unsigned int> &ldbs,
+  const std::vector<float *> &Cs, const std::vector<unsigned int> &ldcs) {
   auto &tm = ThreadManager::Global();
   unsigned int thread_num = tm.getComputeThreadCount();
 

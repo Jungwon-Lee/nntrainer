@@ -173,8 +173,8 @@ private:
   inline void compute_expert_forward(
     const nntrainer::Tensor &input, nntrainer::Tensor &output,
     const std::pair<unsigned, float> *token_assignments,
-    unsigned int num_tokens, const nntrainer::Tensor &gate_proj,
-    const nntrainer::Tensor &up_proj, const nntrainer::Tensor &down_proj,
+    unsigned int num_tokens, nntrainer::Tensor &gate_proj,
+    nntrainer::Tensor &up_proj, const nntrainer::Tensor &down_proj,
     unsigned int hidden_size, nntrainer::Tensor *token_input_workspace,
     nntrainer::Tensor &gate_out_workspace,
     nntrainer::Tensor &acti_out_workspace, nntrainer::Tensor &up_out_workspace);

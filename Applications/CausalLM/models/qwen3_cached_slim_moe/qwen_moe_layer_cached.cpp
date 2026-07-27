@@ -207,7 +207,7 @@ void CachedSlimMoELayer::forwarding(nntrainer::RunLayerContext &context,
 inline void CachedSlimMoELayer::compute_expert_forward(
   const nntrainer::Tensor &input, nntrainer::Tensor &output,
   const std::pair<unsigned, float> *token_assignments, unsigned int num_tokens,
-  const nntrainer::Tensor &gate_proj, const nntrainer::Tensor &up_proj,
+  nntrainer::Tensor &gate_proj, nntrainer::Tensor &up_proj,
   const nntrainer::Tensor &down_proj, unsigned int hidden_size,
   nntrainer::Tensor *token_input_workspace,
   nntrainer::Tensor &gate_out_workspace, nntrainer::Tensor &acti_out_workspace,
@@ -259,12 +259,10 @@ inline void CachedSlimMoELayer::compute_expert_forward(
   }
   profiler.record(MoEProfiler::Phase::DISPATCH, gather_start);
 
-  // Gate projection using optimized dot operation
+  // Gate and Up share the same activation. The ARM Q4_0 CPU backend quantizes
+  // it once and dispatches both weights through a single thread pass.
   const auto gate_up_start = profiler.start();
-  token_input.dot(gate_proj, gate_out);
-
-  // Up projection using optimized dot operation
-  token_input.dot(up_proj, up_out);
+  token_input.dot({&gate_proj, &up_proj}, {&gate_out, &up_out});
   profiler.record(MoEProfiler::Phase::GATE_UP, gate_up_start);
 
   const auto activation_start = profiler.start();

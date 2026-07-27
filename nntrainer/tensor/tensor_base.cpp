@@ -584,8 +584,9 @@ Tensor &TensorBase::dot(Tensor const &input, Tensor &output, bool trans,
     getStringDataType());
 }
 
-void TensorBase::dot(std::vector<Tensor *> input, std::vector<Tensor *> output,
-                     bool trans, bool trans_in, float beta) const {
+void TensorBase::dot(const std::vector<Tensor *> &input,
+                     const std::vector<Tensor *> &output, bool trans,
+                     bool trans_in, float beta) const {
   throw std::invalid_argument("Tensor::dot(std::vector<Tensor*>) is currently "
                               "not supported in tensor data type " +
                               getStringDataType());

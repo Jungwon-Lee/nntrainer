@@ -234,7 +234,13 @@ void ComputeOps::scopy_int8_to_fp32_s(unsigned int, const int8_t *,
   NI(scopy_int8_to_fp32_s);
 }
 
-// Accelerator-only ops — default just throws; supports_*() lets caller skip.
+// Optional batch/accelerator ops — supports_*() lets callers skip.
+void ComputeOps::gemv_q4_0_batch_fp32(const std::vector<void *> &, float *,
+                                      const std::vector<float *> &,
+                                      const std::vector<unsigned int> &,
+                                      unsigned int) {
+  NI(gemv_q4_0_batch_fp32);
+}
 void ComputeOps::gemm_q4_0_batch_fp32(std::vector<void *>, float *,
                                       std::vector<float *>, unsigned int,
                                       std::vector<unsigned int>, unsigned int) {

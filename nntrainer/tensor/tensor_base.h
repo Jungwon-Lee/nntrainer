@@ -502,8 +502,9 @@ public:
    * @param[in] beta beta
    * @retval    Calculated Tensor
    */
-  virtual void dot(std::vector<Tensor *> input, std::vector<Tensor *> output,
-                   bool trans, bool trans_in, float beta) const;
+  virtual void dot(const std::vector<Tensor *> &input,
+                   const std::vector<Tensor *> &output, bool trans,
+                   bool trans_in, float beta) const;
 
   /**
    * @copydoc Tensor::dropout_mask(float dropout)

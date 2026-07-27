@@ -175,6 +175,18 @@ public:
     nntrainer::gemm_q6_K(M, N, K, A, lda, B, ldb, C, ldc);
   }
 
+#if defined(__aarch64__) || defined(__ARM_ARCH_7A__) ||                        \
+  defined(__ANDROID__) || defined(__arm__) || defined(_M_ARM) ||               \
+  defined(_M_ARM64)
+  bool supports_gemv_q4_0_batch_fp32() const override { return true; }
+  void gemv_q4_0_batch_fp32(const std::vector<void *> &weights, float *input,
+                            const std::vector<float *> &outputs,
+                            const std::vector<unsigned int> &Ns,
+                            unsigned int K) override {
+    nntrainer::gemm_q4_0(1, Ns, K, input, K, weights, Ns, outputs, Ns);
+  }
+#endif
+
   // Quantization / Utility
   void unpack_q4_0(const void *in, void *out, size_t ds, unsigned int M,
                    unsigned int N) override {
