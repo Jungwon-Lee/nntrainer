@@ -163,7 +163,10 @@ inline void CachedSlimMoELayer::compute_expert_forward(
   const nntrainer::Tensor &input, nntrainer::Tensor &output,
   const std::vector<std::pair<unsigned, float>> &token_assignments,
   const nntrainer::Tensor &gate_proj, const nntrainer::Tensor &up_proj,
-  const nntrainer::Tensor &down_proj, unsigned int hidden_size) {
+  const nntrainer::Tensor &down_proj, unsigned int hidden_size,
+  nntrainer::Tensor &token_input_workspace,
+  nntrainer::Tensor &gate_out_workspace, nntrainer::Tensor &acti_out_workspace,
+  nntrainer::Tensor &up_out_workspace) {
 
   const unsigned intermediate_size = gate_proj.width();
   const unsigned num_tokens = token_assignments.size();
@@ -176,10 +179,12 @@ inline void CachedSlimMoELayer::compute_expert_forward(
                                        input.getTensorType());
   nntrainer::TensorDim intermediate_dim({1, 1, num_tokens, intermediate_size},
                                         input.getTensorType());
-  // Create intermediate tensors for this token
-  nntrainer::Tensor gate_out(intermediate_dim);
-  nntrainer::Tensor acti_out(intermediate_dim);
-  nntrainer::Tensor up_out(intermediate_dim);
+  nntrainer::Tensor gate_out =
+    gate_out_workspace.getSharedDataTensor(intermediate_dim, 0, true);
+  nntrainer::Tensor acti_out =
+    acti_out_workspace.getSharedDataTensor(intermediate_dim, 0, true);
+  nntrainer::Tensor up_out =
+    up_out_workspace.getSharedDataTensor(intermediate_dim, 0, true);
   nntrainer::Tensor token_input;
 
   const unsigned token_idx = token_assignments[0].first;
@@ -187,7 +192,8 @@ inline void CachedSlimMoELayer::compute_expert_forward(
   const auto gather_start = profiler.start();
   if (num_tokens > 1) {
     /** if prefill, copy data to make a batch */
-    token_input = nntrainer::Tensor(token_input_dim);
+    token_input =
+      token_input_workspace.getSharedDataTensor(token_input_dim, 0, true);
     {
       auto &tm = nntrainer::ThreadManager::Global();
       tm.parallel_for(0, static_cast<size_t>(num_tokens), [&](size_t i) {
@@ -348,6 +354,20 @@ void CachedSlimMoELayer::incremental_forwarding(
     }
     nntrainer::Tensor expert_output_workspace(
       max_assignment_count, 1, 1, hidden_size, output.getTensorType());
+    const unsigned int intermediate_size =
+      context.getWeight(expert_gate_proj_indices[target_idx_vector.front()])
+        .width();
+    nntrainer::Tensor token_input_workspace;
+    if (max_assignment_count > 1) {
+      token_input_workspace = nntrainer::Tensor(
+        1, 1, max_assignment_count, hidden_size, input.getTensorType());
+    }
+    nntrainer::Tensor gate_out_workspace(
+      1, 1, max_assignment_count, intermediate_size, input.getTensorType());
+    nntrainer::Tensor acti_out_workspace(
+      1, 1, max_assignment_count, intermediate_size, input.getTensorType());
+    nntrainer::Tensor up_out_workspace(
+      1, 1, max_assignment_count, intermediate_size, input.getTensorType());
     profiler.record(MoEProfiler::Phase::DISPATCH, dispatch_start);
 
     nntrainer::TensorDim token_step_dim({1, 1, 1, hidden_size},
@@ -382,7 +402,9 @@ void CachedSlimMoELayer::incremental_forwarding(
         input, expert_output, assignments,
         context.getWeight(expert_gate_proj_indices[expert_idx]),
         context.getWeight(expert_up_proj_indices[expert_idx]),
-        context.getWeight(expert_down_proj_indices[expert_idx]), hidden_size);
+        context.getWeight(expert_down_proj_indices[expert_idx]), hidden_size,
+        token_input_workspace, gate_out_workspace, acti_out_workspace,
+        up_out_workspace);
       profiler.record(MoEProfiler::Phase::EXPERT, expert_start);
 
       const auto reduce_start = profiler.start();

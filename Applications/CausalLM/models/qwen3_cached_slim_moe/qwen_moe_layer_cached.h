@@ -158,12 +158,19 @@ private:
    * @param up_proj Up projection weight tensor
    * @param down_proj Down projection weight tensor
    * @param hidden_size Hidden dimension size
+   * @param token_input_workspace Reusable gathered-token buffer
+   * @param gate_out_workspace Reusable gate projection buffer
+   * @param acti_out_workspace Reusable activation buffer
+   * @param up_out_workspace Reusable up projection buffer
    */
   inline void compute_expert_forward(
     const nntrainer::Tensor &input, nntrainer::Tensor &output,
     const std::vector<std::pair<unsigned, float>> &token_assignments,
     const nntrainer::Tensor &gate_proj, const nntrainer::Tensor &up_proj,
-    const nntrainer::Tensor &down_proj, unsigned int hidden_size);
+    const nntrainer::Tensor &down_proj, unsigned int hidden_size,
+    nntrainer::Tensor &token_input_workspace,
+    nntrainer::Tensor &gate_out_workspace,
+    nntrainer::Tensor &acti_out_workspace, nntrainer::Tensor &up_out_workspace);
 };
 } // namespace causallm
 
