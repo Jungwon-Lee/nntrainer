@@ -32,6 +32,7 @@
 #include <acti_func.h>
 #include <causallm_common_properties.h>
 #include <common_properties.h>
+#include <cstdint>
 #include <layer_impl.h>
 #include <list>
 #include <moe_profiler.h>
@@ -138,9 +139,8 @@ private:
   std::vector<unsigned int> expert_down_proj_indices;
 
   std::list<int> loaded_expert_deque;
-  std::unordered_map<int, std::list<int>::iterator> iteration_map;
-  std::unordered_map<int, double> expert_predict_scores;
-  std::vector<bool> need_load;
+  std::vector<std::list<int>::iterator> cache_positions;
+  std::vector<uint8_t> need_load;
   std::mutex cache_mutex;
 
   unsigned int gate_idx;

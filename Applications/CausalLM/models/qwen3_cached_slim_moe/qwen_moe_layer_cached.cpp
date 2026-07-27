@@ -44,6 +44,7 @@ CachedSlimMoELayer::CachedSlimMoELayer() :
   expert_up_proj_indices({}),
   expert_down_proj_indices({}),
   loaded_expert_deque({}),
+  cache_positions({}),
   need_load({}),
   gate_idx(std::numeric_limits<unsigned>::max()),
   router_logits_idx(std::numeric_limits<unsigned>::max()) {}
@@ -140,8 +141,9 @@ void CachedSlimMoELayer::finalize(nntrainer::InitLayerContext &context) {
       expert_down_dim, weight_initializer, weight_regularizer,
       weight_regularizer_constant, weight_decay,
       "expert_down_" + std::to_string(i), false, true));
-    need_load.push_back(true);
   }
+  cache_positions.resize(num_experts);
+  need_load.assign(num_experts, 1);
 
   // 6. Request intermediate tensors
   const unsigned batch_size = in_dim.batch();
@@ -418,8 +420,8 @@ void CachedSlimMoELayer::incremental_forwarding(
         {
           std::lock_guard<std::mutex> lock(cache_mutex);
           loaded_expert_deque.push_back(expert_idx);
-          iteration_map[expert_idx] = --loaded_expert_deque.end();
-          need_load[expert_idx] = false;
+          cache_positions[expert_idx] = --loaded_expert_deque.end();
+          need_load[expert_idx] = 0;
         }
       }
 
@@ -446,13 +448,12 @@ void CachedSlimMoELayer::incremental_forwarding(
 
     for (auto candidate = extra_top_k.rbegin(); candidate != extra_top_k.rend();
          ++candidate) {
-      const auto cache_entry = iteration_map.find(*candidate);
-      if (cache_entry == iteration_map.end())
+      if (need_load[*candidate])
         continue;
 
-      loaded_expert_deque.erase(cache_entry->second);
+      loaded_expert_deque.erase(cache_positions[*candidate]);
       loaded_expert_deque.push_back(*candidate);
-      cache_entry->second = --loaded_expert_deque.end();
+      cache_positions[*candidate] = --loaded_expert_deque.end();
     }
 
     // Evict experts
@@ -463,8 +464,7 @@ void CachedSlimMoELayer::incremental_forwarding(
         std::lock_guard<std::mutex> lock(cache_mutex);
         target_idx = loaded_expert_deque.front();
         loaded_expert_deque.pop_front();
-        iteration_map.erase(target_idx);
-        need_load[target_idx] = true;
+        need_load[target_idx] = 1;
       }
 
       const auto mmap_deactivate_start = profiler.start();
