@@ -9,6 +9,7 @@
  * @bug		No known bugs except for NYI items
  */
 
+#include <cstdlib>
 #include <numeric>
 
 #include <thread_manager.h>
@@ -71,6 +72,17 @@ MMapRange calculateMMapRange(size_t file_offset, size_t data_length) {
 
   return {aligned_offset, data_offset, data_length + data_offset};
 }
+
+#if defined(__linux__) || defined(__ANDROID__)
+bool weightPrefetchEnabled() {
+  static const bool enabled = []() {
+    const char *value = std::getenv("NNTR_WEIGHT_PREFETCH");
+    return value == nullptr || value[0] != '0' || value[1] != '\0';
+  }();
+
+  return enabled;
+}
+#endif
 
 } // namespace
 #endif
@@ -1714,7 +1726,9 @@ void Tensor::activate() {
 #if defined(__linux__) || defined(__ANDROID__)
   // This is a best-effort request. The kernel may start reading the mapped
   // pages asynchronously while other experts are being computed.
-  (void)madvise(mapping, mmap_range.length, MADV_WILLNEED);
+  if (weightPrefetchEnabled()) {
+    (void)madvise(mapping, mmap_range.length, MADV_WILLNEED);
+  }
 #endif
 
   try {

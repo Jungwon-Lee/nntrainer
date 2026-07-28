@@ -20,6 +20,8 @@
   - [x] Cached-Slim miss activation before hit and miss compute
   - [x] Original expert-output accumulation order retained
   - [x] Prefetch, hit compute, miss compute, and eviction debug timers
+  - [x] Runtime baseline/prefetch A/B switch
+  - [x] Android benchmark page-fault, latency percentile, and RSS collection
   - [ ] Android cold/warm-cache performance validation
   - [ ] Linux x86-64 performance validation
 
@@ -270,6 +272,27 @@ Measurements must include both a cold-process run and a warm-cache run. A
 prefetch change is acceptable when it improves cold miss latency without a
 material warm-cache regression or excessive PSS/read amplification.
 
+`NNTR_WEIGHT_PREFETCH=0` selects the original sequential map-compute path and
+disables `MADV_WILLNEED`. The default value, or an explicit value of `1`,
+selects active prefetch. The value is captured once per process so benchmark
+trials must start a new CausalLM process.
+
+The Android benchmark tool can sweep both modes with the same binary:
+
+```bash
+python3 Applications/CausalLM/benchmarks/benchmark_android.py \
+  -m /data/local/tmp/nntrainer/causallm/models/qwen3-cached-slim-moe \
+  -p 32 -n 128 -r 10 -t 4 \
+  --weight-prefetch baseline,prefetch \
+  --resource-metrics
+```
+
+Resource metrics use
+[`toybox time -v`](https://landley.net/toybox/help.html#time). A warm page-cache
+run should include `--warmup-trials 1`. A true cold-page-cache run needs a
+rooted test device or a fresh boot; the cache state must be reset identically
+before each mode to avoid order bias.
+
 ## Commit structure
 
 1. `[tensor] Support runtime page size for virtual tensor mmap`
@@ -282,6 +305,9 @@ material warm-cache regression or excessive PSS/read amplification.
    - Compute hits before misses
    - Preserve output order and add rollback
    - Add cumulative phase metrics
+3. `[CausalLM] Add Android A/B benchmark for MoE prefetch`
+   - Add a runtime baseline switch
+   - Report duration p50/p95, page faults, filesystem inputs, and peak RSS
 
 ## Acceptance criteria
 
@@ -301,6 +327,10 @@ material warm-cache regression or excessive PSS/read amplification.
 - Virtual tensor lifecycle test source compiled
 - Qwen3 Slim and Cached-Slim implementation files compiled with transformer
   support and the repository's `-Werror` flags
+- Baseline and prefetch branches compiled; Cached-Slim debug profiling also
+  compiled
+- Android benchmark Python syntax, command construction, metric parsing, and
+  percentile calculation checks passed with mocked ADB output
 - Full macOS unit-test linking is currently blocked by the existing
   unconditional `malloc.h` use in `nntrainer/tensor/swap_device.cpp`
 - Android validation is pending because no Android NDK or connected device is

@@ -23,10 +23,15 @@ import argparse
 import json
 import tempfile
 import os
+import shlex
 import shutil
 from itertools import product
 from tabulate import tabulate
-from transformers import AutoTokenizer
+
+try:
+    from transformers import AutoTokenizer
+except ImportError:
+    AutoTokenizer = None
 
 from device_utils import (
     get_thermal_temp, 
@@ -35,12 +40,50 @@ from device_utils import (
     get_model_size,
 ) 
 
+PREFETCH_ENV_VALUES = {
+    "baseline": "0",
+    "prefetch": "1",
+}
+
+
+def parse_resource_metrics(output):
+    """Parse resource metrics emitted by toybox/GNU time -v."""
+    patterns = {
+        "minor_faults": r"Minor(?: \(.*?\))? page faults:\s*(\d+)",
+        "major_faults": r"Major(?: \(.*?\))? page faults:\s*(\d+)",
+        "max_rss_kb": (
+            r"Max(?:imum)? resident set size(?: \(kbytes\))?:\s*(\d+)"
+        ),
+        "file_inputs": r"File system inputs:\s*(\d+)",
+    }
+
+    metrics = {}
+    for name, pattern in patterns.items():
+        match = re.search(pattern, output, re.IGNORECASE)
+        metrics[name] = int(match.group(1)) if match else None
+    return metrics
+
+
+def validate_resource_metrics_support():
+    """Fail early when the device cannot provide verbose time metrics."""
+    result = subprocess.run(
+        ["adb", "shell", "toybox time -v /system/bin/true"],
+        capture_output=True, text=True
+    )
+    output = result.stdout + result.stderr
+    if result.returncode != 0 or parse_resource_metrics(output)["max_rss_kb"] is None:
+        raise RuntimeError(
+            "The connected device does not support 'toybox time -v'. "
+            "Run without --resource-metrics or install a compatible time tool."
+        )
+
+
 def generate_sample_input(target_tokens, local_tokenizer_path=None):
     """
     Generate sample input that matches target token count.
     If transformers is available, use exact tokenizer. Otherwise, use heuristic.
     """
-    if local_tokenizer_path:
+    if local_tokenizer_path and AutoTokenizer is not None:
         # Load tokenizer from local path
         tokenizer = AutoTokenizer.from_pretrained(os.path.dirname(local_tokenizer_path))
 
@@ -143,7 +186,7 @@ def backup_and_modify_config(model_path, n_prompt, n_gen, batch_size=1):
             generated_input = generate_sample_input(self.n_prompt, local_tokenizer_path)
             config["sample_input"] = generated_input
             
-            if local_tokenizer_path:
+            if local_tokenizer_path and AutoTokenizer is not None:
                 print(f"Generated sample_input ({self.n_prompt} token length, using tokenizer)")
             else:
                 print(f"Generated sample_input ({self.n_prompt} token length, heuristic)")
@@ -199,20 +242,29 @@ def backup_and_modify_config(model_path, n_prompt, n_gen, batch_size=1):
     return ConfigModifier(model_path, n_prompt, n_gen, batch_size)
 
 
-def run_single_trial(model_path, omp_threads=None):
+def run_single_trial(model_path, omp_threads=None, prefetch_mode="prefetch",
+                     resource_metrics=False):
     """Run a single benchmark trial and collect metrics."""
-    # Build command to run nntrainer C++ binary
-    # Set OMP_NUM_THREADS as environment variable for the shell command
+    if prefetch_mode not in PREFETCH_ENV_VALUES:
+        raise ValueError(f"Unsupported prefetch mode: {prefetch_mode}")
+
+    env_values = [
+        f"NNTR_WEIGHT_PREFETCH={PREFETCH_ENV_VALUES[prefetch_mode]}"
+    ]
     if omp_threads:
-        cmd = [
-            "adb", "shell",
-            f"cd /data/local/tmp/nntrainer/causallm && OMP_NUM_THREADS={omp_threads} ./run_causallm.sh '{model_path}'"
-        ]
-    else:
-        cmd = [
-            "adb", "shell",
-            f"cd /data/local/tmp/nntrainer/causallm && ./run_causallm.sh '{model_path}'"
-        ]
+        env_values.append(f"OMP_NUM_THREADS={omp_threads}")
+
+    run_command = (
+        f"env {' '.join(env_values)} ./run_causallm.sh "
+        f"{shlex.quote(model_path)}"
+    )
+    if resource_metrics:
+        run_command = f"toybox time -v {run_command}"
+
+    cmd = [
+        "adb", "shell",
+        f"cd /data/local/tmp/nntrainer/causallm && {run_command}"
+    ]
     
     # Capture output
     result = subprocess.run(cmd, capture_output=True, text=True)
@@ -220,20 +272,30 @@ def run_single_trial(model_path, omp_threads=None):
     output = result.stdout + result.stderr
     print(output)
     
-    # Parse TPS from output
-    prefill_match = re.search(r"prefill:.*,\s+([\d\.]+)\s+TPS", output)
+    prefill_match = re.search(
+        r"prefill:\s+\d+\s+tokens,\s+([\d.]+)\s+ms,\s+([\d.]+)\s+TPS",
+        output
+    )
+    gen_match = re.search(
+        r"generation:\s+\d+\s+tokens,\s+([\d.]+)\s+ms,\s+([\d.]+)\s+TPS",
+        output
+    )
+
+    prefill_ms = float(prefill_match.group(1)) if prefill_match else 0.0
+    prefill_tps = float(prefill_match.group(2)) if prefill_match else 0.0
+    gen_ms = float(gen_match.group(1)) if gen_match else 0.0
+    gen_tps = float(gen_match.group(2)) if gen_match else 0.0
     
-    # Parse generation TPS if available
-    gen_match = re.search(r"generation:.*,\s+([\d\.]+)\s+TPS", output)
-    
-    prefill_tps = float(prefill_match.group(2) if prefill_match and len(prefill_match.groups()) > 1 else prefill_match.group(1)) if prefill_match else 0.0
-    gen_tps = float(gen_match.group(1)) if gen_match else 0.0
-    
-    return {
+    trial_result = {
+        "prefetch_mode": prefetch_mode,
+        "prefill_ms": prefill_ms,
         "prefill_tps": prefill_tps,
+        "gen_ms": gen_ms,
         "gen_tps": gen_tps,
         "error": result.stderr if result.returncode != 0 else ""
     }
+    trial_result.update(parse_resource_metrics(output))
+    return trial_result
 
 
 def calculate_statistics(values):
@@ -290,19 +352,42 @@ def validate_model_path(model_path):
 def output_results_table(all_results, model_name, model_size, model_type, dtype, device):
     """Output all benchmark results in a pretty table format."""
     # Prepare table data
-    headers = ["Threads", "Prompt", "Gen", "Prefill TPS", "Gen TPS"]
+    headers = [
+        "Mode", "Threads", "Prompt", "Gen", "Prefill TPS", "Gen TPS",
+        "Prefill ms p50/p95", "Gen ms p50/p95", "Minor faults",
+        "Major faults", "File inputs", "Max RSS (KB)"
+    ]
     table_data = []
     
     for result in all_results:
         prefill_str = f"{result['prefill_mean']:.2f} ± {result['prefill_std']:.2f}" if result['prefill_mean'] > 0 else "N/A"
         gen_str = f"{result['gen_mean']:.2f} ± {result['gen_std']:.2f}" if result['gen_mean'] > 0 else "N/A"
+        minor_faults_str = format_optional_stat(
+            result["minor_faults_mean"], result["minor_faults_std"]
+        )
+        major_faults_str = format_optional_stat(
+            result["major_faults_mean"], result["major_faults_std"]
+        )
+        max_rss_str = format_optional_stat(
+            result["max_rss_mean"], result["max_rss_std"]
+        )
+        file_inputs_str = format_optional_stat(
+            result["file_inputs_mean"], result["file_inputs_std"]
+        )
         
         table_data.append([
+            result["prefetch_mode"],
             result['n_threads'],
             result['n_prompt'],
             result['n_gen'],
             prefill_str,
-            gen_str
+            gen_str,
+            f"{result['prefill_p50_ms']:.0f}/{result['prefill_p95_ms']:.0f}",
+            f"{result['gen_p50_ms']:.0f}/{result['gen_p95_ms']:.0f}",
+            minor_faults_str,
+            major_faults_str,
+            file_inputs_str,
+            max_rss_str,
         ])
     
     print("\n" + "=" * 90)
@@ -321,6 +406,47 @@ def parse_list_arg(arg_string):
     return [int(x.strip()) for x in arg_string.split(',')]
 
 
+def parse_prefetch_modes(arg_string):
+    """Parse and validate comma-separated weight prefetch modes."""
+    modes = [mode.strip() for mode in arg_string.split(",") if mode.strip()]
+    unsupported = [mode for mode in modes if mode not in PREFETCH_ENV_VALUES]
+    if unsupported:
+        raise ValueError(
+            "Unsupported prefetch mode(s): "
+            f"{', '.join(unsupported)}. Use baseline or prefetch."
+        )
+    if not modes:
+        raise ValueError("At least one prefetch mode must be selected")
+    return modes
+
+
+def calculate_optional_statistics(results, key):
+    """Calculate statistics while ignoring unavailable resource metrics."""
+    values = [result[key] for result in results if result[key] is not None]
+    if not values:
+        return None, None
+    return calculate_statistics(values)
+
+
+def percentile(values, quantile):
+    """Calculate an interpolated percentile without an external dependency."""
+    if not values:
+        return 0.0
+    ordered = sorted(values)
+    position = (len(ordered) - 1) * quantile
+    lower = int(position)
+    upper = min(lower + 1, len(ordered) - 1)
+    fraction = position - lower
+    return ordered[lower] + (ordered[upper] - ordered[lower]) * fraction
+
+
+def format_optional_stat(mean, std):
+    """Format an optional mean and standard deviation."""
+    if mean is None:
+        return "N/A"
+    return f"{mean:.0f} ± {std:.0f}"
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="nntrainer benchmark with configuration sweeping for nntrainer CausalLM models"
@@ -337,6 +463,15 @@ def main():
                         help="Number of OMP threads, comma-separated (default: 4)")
     parser.add_argument("-b", "--batch-size", type=int, default=1,
                         help="Batch size (default: 1)")
+    parser.add_argument("--weight-prefetch", type=str, default="prefetch",
+                        help="Weight loading mode(s), comma-separated: "
+                             "baseline,prefetch (default: prefetch)")
+    parser.add_argument("--resource-metrics", action="store_true",
+                        help="Collect page faults and peak RSS with "
+                             "'toybox time -v'")
+    parser.add_argument("--warmup-trials", type=int, default=0,
+                        help="Unmeasured warmup trials per configuration "
+                             "(default: 0)")
     parser.add_argument("--device-info", type=str, default=None,
                         help="Device info (auto-detect if not specified)")
     parser.add_argument("--cool-to", type=float, default=35.0,
@@ -352,12 +487,18 @@ def main():
     n_prompts = parse_list_arg(args.n_prompt)
     n_gens = parse_list_arg(args.n_gen)
     n_threads_list = parse_list_arg(args.n_threads)
+    prefetch_modes = parse_prefetch_modes(args.weight_prefetch)
     
     for n_threads in n_threads_list:
         assert n_threads > 0, "Error: Thread counts must be positive integers"
+    assert args.n_trials > 0, "Error: Trial count must be positive"
+    assert args.warmup_trials >= 0, "Error: Warmup trial count cannot be negative"
+
+    if args.resource_metrics:
+        validate_resource_metrics_support()
     
     # Generate all configurations
-    configs = list(product(n_prompts, n_gens, n_threads_list))
+    configs = list(product(n_prompts, n_gens, n_threads_list, prefetch_modes))
     
     # Extract model name from path
     model_path = validate_model_path(args.model)
@@ -369,7 +510,10 @@ def main():
     print(f"n_prompt values: {n_prompts}")
     print(f"n_gen values: {n_gens}")
     print(f"n_threads values: {n_threads_list}")
+    print(f"weight prefetch modes: {prefetch_modes}")
     print(f"n_trials per config: {args.n_trials}")
+    print(f"warmup trials per config: {args.warmup_trials}")
+    print(f"resource metrics: {args.resource_metrics}")
     print(f"batch_size: {args.batch_size}")
     print(f"Total configurations: {len(configs)}")
     print("-" * 50)
@@ -409,8 +553,12 @@ def main():
     # Run benchmarks for all configurations
     all_results = []
     
-    for idx, (n_prompt, n_gen, n_threads) in enumerate(configs, 1):
-        print(f"\n[{idx}/{len(configs)}] Config: n_prompt={n_prompt}, n_gen={n_gen}, n_threads={n_threads}")
+    for idx, (n_prompt, n_gen, n_threads, prefetch_mode) in enumerate(configs, 1):
+        print(
+            f"\n[{idx}/{len(configs)}] Config: n_prompt={n_prompt}, "
+            f"n_gen={n_gen}, n_threads={n_threads}, "
+            f"weight_prefetch={prefetch_mode}"
+        )
         print("-" * 50)
         
         # Wait for cooling before starting next configuration (for fair comparison)
@@ -426,27 +574,68 @@ def main():
             # Manually enter context to ensure proper cleanup on interrupt
             config_modifier.__enter__()
             
+            for i in range(args.warmup_trials):
+                print(f"  Warmup trial {i + 1}/{args.warmup_trials}")
+                run_single_trial(
+                    model_path, n_threads, prefetch_mode,
+                    args.resource_metrics
+                )
+
             results = []
             for i in range(args.n_trials):
-                res = run_single_trial(model_path, n_threads)
+                res = run_single_trial(
+                    model_path, n_threads, prefetch_mode,
+                    args.resource_metrics
+                )
                 results.append(res)
                 time.sleep(1)  # Brief pause between trials
             
             # Calculate statistics
             prefills = [r["prefill_tps"] for r in results if r["prefill_tps"] > 0]
             gens = [r["gen_tps"] for r in results if r["gen_tps"] > 0]
+            prefill_durations = [
+                r["prefill_ms"] for r in results if r["prefill_ms"] > 0
+            ]
+            gen_durations = [
+                r["gen_ms"] for r in results if r["gen_ms"] > 0
+            ]
             
             prefill_mean, prefill_std = calculate_statistics(prefills)
             gen_mean, gen_std = calculate_statistics(gens)
+            minor_faults_mean, minor_faults_std = (
+                calculate_optional_statistics(results, "minor_faults")
+            )
+            major_faults_mean, major_faults_std = (
+                calculate_optional_statistics(results, "major_faults")
+            )
+            max_rss_mean, max_rss_std = calculate_optional_statistics(
+                results, "max_rss_kb"
+            )
+            file_inputs_mean, file_inputs_std = calculate_optional_statistics(
+                results, "file_inputs"
+            )
             
             all_results.append({
+                'prefetch_mode': prefetch_mode,
                 'n_prompt': n_prompt,
                 'n_gen': n_gen,
                 'n_threads': n_threads,
                 'prefill_mean': prefill_mean,
                 'prefill_std': prefill_std,
+                'prefill_p50_ms': percentile(prefill_durations, 0.50),
+                'prefill_p95_ms': percentile(prefill_durations, 0.95),
                 'gen_mean': gen_mean,
-                'gen_std': gen_std
+                'gen_std': gen_std,
+                'gen_p50_ms': percentile(gen_durations, 0.50),
+                'gen_p95_ms': percentile(gen_durations, 0.95),
+                'minor_faults_mean': minor_faults_mean,
+                'minor_faults_std': minor_faults_std,
+                'major_faults_mean': major_faults_mean,
+                'major_faults_std': major_faults_std,
+                'file_inputs_mean': file_inputs_mean,
+                'file_inputs_std': file_inputs_std,
+                'max_rss_mean': max_rss_mean,
+                'max_rss_std': max_rss_std,
             })
             
             print(f"  Prefill: {prefill_mean:.2f} ± {prefill_std:.2f} TPS")

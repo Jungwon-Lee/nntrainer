@@ -17,6 +17,9 @@ A benchmark tool for nntrainer CausalLM models on Android devices.
 pip install tabulate
 ```
 
+Install `transformers` when exact prompt token counts are required. Without it,
+the benchmark falls back to an approximate character-based prompt.
+
 ## Usage
 
 ### Basic Benchmark
@@ -38,6 +41,55 @@ python3 benchmark_android.py \
 - `-n, --n-gen`: Number of generation tokens (default: 0)
 - `-t, --n-threads`: Number of OMP threads (default: 4)
 - `-b, --batch-size`: Batch size (default: 1)
+- `--weight-prefetch`: `baseline`, `prefetch`, or a comma-separated list
+- `--resource-metrics`: Collect page faults, filesystem inputs, and peak RSS
+  with `toybox time -v`
+- `--warmup-trials`: Number of unmeasured warmup processes per configuration
+
+### Qwen3 MoE Prefetch A/B Benchmark
+
+The same binary can compare the original sequential expert loading path with
+active expert prefetch:
+
+```bash
+python3 benchmark_android.py \
+  -m /data/local/tmp/nntrainer/causallm/models/qwen3-cached-slim-moe \
+  -p 32 \
+  -n 128 \
+  -r 10 \
+  -t 4 \
+  --weight-prefetch baseline,prefetch \
+  --resource-metrics
+```
+
+The modes set `NNTR_WEIGHT_PREFETCH` for each new CausalLM process:
+
+| Mode | Expert loading behavior |
+| --- | --- |
+| `baseline` | Map, compute, and continue one expert at a time |
+| `prefetch` | Map/advise active misses first, compute hits, then misses |
+
+For a warm page-cache comparison, add `--warmup-trials 1`. Every measured
+trial still starts a new process, so mappings and the model process are cold
+while file pages may remain in the kernel page cache.
+
+Android does not provide an unprivileged, portable way to drop the system page
+cache. A true cold-page-cache comparison therefore requires a rooted test
+device or a fresh boot. Apply the same cache preparation before every
+baseline/prefetch trial; otherwise the mode that runs second can inherit pages
+read by the first mode.
+
+`--resource-metrics` requires `toybox time -v` on the device. The result table
+adds:
+
+- Prefill and generation duration p50/p95
+- Minor and major page faults
+- Filesystem input operations
+- Maximum resident set size
+
+`MADV_WILLNEED` is a best-effort hint. The strongest positive signal is lower
+generation p95 and fewer major faults without a material increase in maximum
+RSS or filesystem inputs.
 
 ## Output
 
@@ -51,6 +103,9 @@ python3 benchmark_android.py \
   -r <n_trials> \                # Number of trials (default: 5)
   -t <n_threads> \               # Number of OMP threads (default: 4)
   -b <batch_size> \              # Batch size (default: 1)
+  --weight-prefetch <modes> \    # baseline,prefetch (default: prefetch)
+  --resource-metrics \           # Collect faults, I/O operations, and RSS
+  --warmup-trials <count> \      # Unmeasured trials per configuration
   --device-info <string> \       # Device info (auto-detect if not specified)
 ```
 

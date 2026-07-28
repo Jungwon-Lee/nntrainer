@@ -25,6 +25,7 @@
 #include <acti_func.h>
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <exception>
 #include <node_exporter.h>
 #include <qwen_moe_layer_fsu.h>
@@ -122,6 +123,55 @@ void deactivateExpertBatch(const std::vector<ExpertWeights> &experts) {
   if (first_error) {
     std::rethrow_exception(first_error);
   }
+}
+
+bool weightPrefetchEnabled() {
+  static const bool enabled = []() {
+    const char *value = std::getenv("NNTR_WEIGHT_PREFETCH");
+    return value == nullptr || value[0] != '0' || value[1] != '\0';
+  }();
+
+  return enabled;
+}
+
+template <typename Compute>
+void processExpertWeights(const std::vector<ExpertWeights> &experts,
+                          Compute compute) {
+  if (!weightPrefetchEnabled()) {
+    for (const auto &expert : experts) {
+      activateExpertWeights(expert);
+      try {
+        compute(expert);
+      } catch (...) {
+        deactivateExpertWeightsNoThrow(expert);
+        throw;
+      }
+      deactivateExpertWeights(expert);
+    }
+    return;
+  }
+
+  size_t activated_count = 0;
+  try {
+    // mmap() all active experts first. On Android and Linux, activate() also
+    // submits MADV_WILLNEED so later expert reads can overlap earlier compute.
+    for (const auto &expert : experts) {
+      activateExpertWeights(expert);
+      ++activated_count;
+    }
+
+    // Keep the outer loop serial because dot() already uses ThreadManager.
+    for (const auto &expert : experts) {
+      compute(expert);
+    }
+  } catch (...) {
+    while (activated_count > 0) {
+      deactivateExpertWeightsNoThrow(experts[--activated_count]);
+    }
+    throw;
+  }
+
+  deactivateExpertBatch(experts);
 }
 
 } // namespace
@@ -314,29 +364,10 @@ void SlimMoELayer::forwarding(nntrainer::RunLayerContext &context,
        &context.getWeight(expert_down_proj_indices[expert_idx])});
   }
 
-  size_t activated_count = 0;
-  try {
-    // mmap() all active experts first. On Android and Linux, activate() also
-    // submits MADV_WILLNEED so later expert reads can overlap earlier compute.
-    for (const auto &expert : active_experts) {
-      activateExpertWeights(expert);
-      ++activated_count;
-    }
-
-    // Keep the outer loop serial because dot() already uses ThreadManager.
-    for (const auto &expert : active_experts) {
-      compute_expert_forward(input, output, expert_assignments[expert.index],
-                             *expert.gate, *expert.up, *expert.down,
-                             hidden_size);
-    }
-  } catch (...) {
-    while (activated_count > 0) {
-      deactivateExpertWeightsNoThrow(active_experts[--activated_count]);
-    }
-    throw;
-  }
-
-  deactivateExpertBatch(active_experts);
+  processExpertWeights(active_experts, [&](const ExpertWeights &expert) {
+    compute_expert_forward(input, output, expert_assignments[expert.index],
+                           *expert.gate, *expert.up, *expert.down, hidden_size);
+  });
 
   // reshape output: [B*S,1,1,H] -> [B,1,S,H]
   output.reshape({batch_size, 1, seq_len, hidden_size});
@@ -556,29 +587,11 @@ void SlimMoELayer::incremental_forwarding(nntrainer::RunLayerContext &context,
          &context.getWeight(expert_down_proj_indices[expert_idx])});
     }
 
-    size_t activated_count = 0;
-    try {
-      // Submit readahead hints for every active expert before entering GEMV.
-      for (const auto &expert : active_experts) {
-        activateExpertWeights(expert);
-        ++activated_count;
-      }
-
-      // Serial outer loop: expert GEMV/GEMM parallelizes internally via
-      // ThreadManager, whose execution mutex does not permit nested dispatch.
-      for (const auto &expert : active_experts) {
-        compute_expert_forward_no_critical(
-          input, expert_outputs[expert.index], expert_assignments[expert.index],
-          *expert.gate, *expert.up, *expert.down, hidden_size);
-      }
-    } catch (...) {
-      while (activated_count > 0) {
-        deactivateExpertWeightsNoThrow(active_experts[--activated_count]);
-      }
-      throw;
-    }
-
-    deactivateExpertBatch(active_experts);
+    processExpertWeights(active_experts, [&](const ExpertWeights &expert) {
+      compute_expert_forward_no_critical(
+        input, expert_outputs[expert.index], expert_assignments[expert.index],
+        *expert.gate, *expert.up, *expert.down, hidden_size);
+    });
 
     // Combine expert outputs
     for (int expert_idx = 0; expert_idx < static_cast<int>(num_experts);
