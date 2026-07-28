@@ -146,7 +146,7 @@ void Transformer::setupParameters(json &cfg, json &generation_cfg,
   PLE_FILE_NAME = nntr_cfg.value("ple_file_name", std::string());
   USE_FLASH_ATTENTION = nntr_cfg.contains("use_flash_attention")
                           ? nntr_cfg["use_flash_attention"].get<bool>()
-                          : true;
+                          : false;
 
   if (cfg.contains("is_causal")) {
     IS_CAUSAL = cfg["is_causal"].get<bool>();
