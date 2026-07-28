@@ -13,16 +13,23 @@
 
 #include "nntrainer_test_util.h"
 #include "util_func.h"
+#include <array>
 #include <cmath>
 #include <cpu_backend.h>
+#include <cstdio>
 #include <float_tensor.h>
 #include <fp16.h>
 #include <fstream>
+#include <memory>
 #include <nntrainer_error.h>
 #include <sstream>
 #include <tensor.h>
 #include <tensor_dim.h>
 #include <thread_manager.h>
+
+#if !defined(_WIN32)
+#include <unistd.h>
+#endif
 
 TEST(nntrainer_TensorDim, ctor_initializer_p) {
   unsigned int b = 3;
@@ -7161,6 +7168,66 @@ TEST(nntrainer_Tensor, normalization_i_05_default_args_p) {
     EXPECT_NEAR(data[i], expected, 1e-5);
   }
 }
+
+#if !defined(_WIN32)
+TEST(nntrainer_Tensor, virtual_tensor_runtime_page_size_mmap_p) {
+  const long page_size = sysconf(_SC_PAGESIZE);
+  ASSERT_GT(page_size, 0);
+
+  std::unique_ptr<FILE, decltype(&fclose)> backing_file(tmpfile(), &fclose);
+  ASSERT_NE(backing_file, nullptr);
+
+  const size_t file_offset =
+    static_cast<size_t>(page_size) + static_cast<size_t>(page_size) / 4;
+  const std::array<float, 4> expected = {1.25f, -2.5f, 3.75f, 4.5f};
+
+  ASSERT_EQ(fseek(backing_file.get(), static_cast<long>(file_offset), SEEK_SET),
+            0);
+  ASSERT_EQ(
+    fwrite(expected.data(), sizeof(float), expected.size(), backing_file.get()),
+    expected.size());
+  ASSERT_EQ(fflush(backing_file.get()), 0);
+
+  const int backing_fd = fileno(backing_file.get());
+  ASSERT_GE(backing_fd, 0);
+
+  nntrainer::TensorDim dim(1, 1, 1, expected.size(), nntrainer::Tformat::NCHW,
+                           nntrainer::Tdatatype::FP32);
+  nntrainer::Tensor tensor(dim, false, nntrainer::Initializer::NONE,
+                           "virtual_runtime_page_size",
+                           nntrainer::QScheme::PER_TENSOR_AFFINE, true);
+  tensor.setFileOffset(file_offset);
+
+  std::ifstream unused_stream;
+  tensor.read(unused_stream, file_offset, true, backing_fd);
+
+  ASSERT_NO_THROW(tensor.activate());
+  for (size_t i = 0; i < expected.size(); ++i) {
+    EXPECT_FLOAT_EQ(tensor.getData<float>()[i], expected[i]);
+  }
+  ASSERT_NO_THROW(tensor.deactivate());
+
+  ASSERT_NO_THROW(tensor.activate());
+  for (size_t i = 0; i < expected.size(); ++i) {
+    EXPECT_FLOAT_EQ(tensor.getData<float>()[i], expected[i]);
+  }
+  ASSERT_NO_THROW(tensor.deactivate());
+}
+
+TEST(nntrainer_Tensor, virtual_tensor_failed_mmap_state_n) {
+  nntrainer::TensorDim dim(1, 1, 1, 4, nntrainer::Tformat::NCHW,
+                           nntrainer::Tdatatype::FP32);
+  nntrainer::Tensor tensor(dim, false, nntrainer::Initializer::NONE,
+                           "virtual_failed_mmap",
+                           nntrainer::QScheme::PER_TENSOR_AFFINE, true);
+
+  std::ifstream unused_stream;
+  tensor.read(unused_stream, 0, true, -2);
+
+  EXPECT_THROW(tensor.activate(), std::runtime_error);
+  EXPECT_NO_THROW(tensor.deactivate());
+}
+#endif
 
 int main(int argc, char **argv) {
   int result = -1;

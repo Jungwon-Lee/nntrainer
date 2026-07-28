@@ -36,10 +36,43 @@
 
 #include <fcntl.h>
 
-#if defined(__unix__) || defined(__ANDROID__) || defined(__arm__)
+#if !defined(_WIN32)
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#endif
+
+#if !defined(_WIN32)
+namespace {
+
+struct MMapRange {
+  size_t offset;
+  size_t data_offset;
+  size_t length;
+};
+
+size_t systemPageSize() {
+  static const size_t page_size = []() {
+    const long value = sysconf(_SC_PAGESIZE);
+    if (value <= 0) {
+      throw std::runtime_error("Failed to query the system page size");
+    }
+
+    return static_cast<size_t>(value);
+  }();
+
+  return page_size;
+}
+
+MMapRange calculateMMapRange(size_t file_offset, size_t data_length) {
+  const size_t page_size = systemPageSize();
+  const size_t aligned_offset = file_offset - (file_offset % page_size);
+  const size_t data_offset = file_offset - aligned_offset;
+
+  return {aligned_offset, data_offset, data_length + data_offset};
+}
+
+} // namespace
 #endif
 
 namespace nntrainer {
@@ -1662,10 +1695,7 @@ void Tensor::activate() {
     << "[Error/VirtualTensor] virtual tensor is not supported on Windows";
 #else
 
-  auto file_offset = getFileOffset();
-  size_t off = (file_offset / 4096) * 4096;
-  size_t diff = file_offset - off;
-  size_t len = getMemoryBytes() + diff;
+  const auto mmap_range = calculateMMapRange(getFileOffset(), getMemoryBytes());
 
   // A virtual tensor must have captured a backing fd during read (see
   // Tensor::read overloads). Without it, mmap() below returns MAP_FAILED
@@ -1675,15 +1705,26 @@ void Tensor::activate() {
     << "' has no backing fd; the model file fd was not propagated at "
        "read-time";
 
-  mapped_ptr = mmap(NULL, len, PROT_READ, MAP_PRIVATE, this->fd, off);
-#ifdef __ANDROID__
-  if (mapped_ptr != MAP_FAILED)
-    madvise(mapped_ptr, len, MADV_WILLNEED);
-#endif
-  NNTR_THROW_IF(mapped_ptr == MAP_FAILED, std::runtime_error)
+  void *mapping = mmap(NULL, mmap_range.length, PROT_READ, MAP_PRIVATE,
+                       this->fd, static_cast<off_t>(mmap_range.offset));
+  NNTR_THROW_IF(mapping == MAP_FAILED, std::runtime_error)
     << "[activate] mmap failed for virtual tensor '" << getName()
     << "': " << strerror(errno);
-  itensor_->activate((void *)&((uint8_t *)mapped_ptr)[diff]);
+
+#if defined(__linux__) || defined(__ANDROID__)
+  // This is a best-effort request. The kernel may start reading the mapped
+  // pages asynchronously while other experts are being computed.
+  (void)madvise(mapping, mmap_range.length, MADV_WILLNEED);
+#endif
+
+  try {
+    itensor_->activate((void *)&((uint8_t *)mapping)[mmap_range.data_offset]);
+  } catch (...) {
+    (void)munmap(mapping, mmap_range.length);
+    throw;
+  }
+
+  mapped_ptr = mapping;
 #endif
 }
 
@@ -1700,12 +1741,9 @@ void Tensor::deactivate() {
     return;
   };
 
-  auto file_offset = getFileOffset();
-  size_t off = (file_offset / 4096) * 4096;
-  size_t diff = file_offset - off;
-  size_t len = getMemoryBytes() + diff;
+  const auto mmap_range = calculateMMapRange(getFileOffset(), getMemoryBytes());
 
-  auto ret_munmap = munmap((void *)mapped_ptr, len);
+  auto ret_munmap = munmap((void *)mapped_ptr, mmap_range.length);
   const size_t error_buflen = 100;
   char error_buf[error_buflen];
   NNTR_THROW_IF(ret_munmap == -1, std::runtime_error)
