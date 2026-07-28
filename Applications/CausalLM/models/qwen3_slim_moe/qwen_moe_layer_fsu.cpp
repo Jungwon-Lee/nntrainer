@@ -25,6 +25,7 @@
 #include <acti_func.h>
 #include <algorithm>
 #include <cmath>
+#include <exception>
 #include <node_exporter.h>
 #include <qwen_moe_layer_fsu.h>
 #include <stdexcept>
@@ -33,6 +34,97 @@
 namespace causallm {
 
 static constexpr size_t SINGLE_INOUT_IDX = 0;
+
+namespace {
+
+struct ExpertWeights {
+  unsigned int index;
+  nntrainer::Tensor *gate;
+  nntrainer::Tensor *up;
+  nntrainer::Tensor *down;
+};
+
+void deactivateExpertWeightsNoThrow(const ExpertWeights &weights) noexcept {
+  try {
+    weights.down->deactivate();
+  } catch (...) {
+  }
+
+  try {
+    weights.up->deactivate();
+  } catch (...) {
+  }
+
+  try {
+    weights.gate->deactivate();
+  } catch (...) {
+  }
+}
+
+void activateExpertWeights(const ExpertWeights &weights) {
+  unsigned int activated = 0;
+  try {
+    weights.gate->activate();
+    activated = 1;
+    weights.up->activate();
+    activated = 2;
+    weights.down->activate();
+  } catch (...) {
+    if (activated >= 2) {
+      try {
+        weights.up->deactivate();
+      } catch (...) {
+      }
+    }
+    if (activated >= 1) {
+      try {
+        weights.gate->deactivate();
+      } catch (...) {
+      }
+    }
+    throw;
+  }
+}
+
+void deactivateExpertWeights(const ExpertWeights &weights) {
+  std::exception_ptr first_error;
+  auto deactivate = [&first_error](nntrainer::Tensor *weight) {
+    try {
+      weight->deactivate();
+    } catch (...) {
+      if (!first_error) {
+        first_error = std::current_exception();
+      }
+    }
+  };
+
+  deactivate(weights.down);
+  deactivate(weights.up);
+  deactivate(weights.gate);
+
+  if (first_error) {
+    std::rethrow_exception(first_error);
+  }
+}
+
+void deactivateExpertBatch(const std::vector<ExpertWeights> &experts) {
+  std::exception_ptr first_error;
+  for (auto iter = experts.rbegin(); iter != experts.rend(); ++iter) {
+    try {
+      deactivateExpertWeights(*iter);
+    } catch (...) {
+      if (!first_error) {
+        first_error = std::current_exception();
+      }
+    }
+  }
+
+  if (first_error) {
+    std::rethrow_exception(first_error);
+  }
+}
+
+} // namespace
 
 SlimMoELayer::SlimMoELayer() :
   LayerImpl(),
@@ -209,39 +301,42 @@ void SlimMoELayer::forwarding(nntrainer::RunLayerContext &context,
     }
   }
 
-  for (int expert_idx = 0; expert_idx < static_cast<int>(num_experts);
-       ++expert_idx) {
-    const auto &assignments = expert_assignments[expert_idx];
-    if (assignments.empty())
+  std::vector<ExpertWeights> active_experts;
+  active_experts.reserve(num_experts);
+  for (unsigned int expert_idx = 0; expert_idx < num_experts; ++expert_idx) {
+    if (expert_assignments[expert_idx].empty()) {
       continue;
+    }
 
-    ///@note load expert layer for the expert_idx
-    nntrainer::Tensor expert_gate_proj =
-      context.getWeight(expert_gate_proj_indices[expert_idx]);
-    nntrainer::Tensor expert_up_proj =
-      context.getWeight(expert_up_proj_indices[expert_idx]);
-    nntrainer::Tensor expert_down_proj =
-      context.getWeight(expert_down_proj_indices[expert_idx]);
-
-    ///@note Please note that expert_gate_proj is virtual tensor,
-    ///      which is not allocated so far. It will be allocated when it is
-    ///      used. `activate(read=true)` will allocate its memory and will read
-    ///      from the original weight. activate is true by default. i.e., mmap
-    expert_gate_proj.activate();
-    expert_up_proj.activate();
-    expert_down_proj.activate();
-
-    // Use optimized expert forward computation without memory copies
-    compute_expert_forward(input, output, assignments, expert_gate_proj,
-                           expert_up_proj, expert_down_proj, hidden_size);
-
-    ////@note Please note that the virtual tensor is deactivated after usage
-    ////      This will allocate and load data from the storage on-the-fly
-    ////      i.e., unmap
-    expert_gate_proj.deactivate();
-    expert_up_proj.deactivate();
-    expert_down_proj.deactivate();
+    active_experts.push_back(
+      {expert_idx, &context.getWeight(expert_gate_proj_indices[expert_idx]),
+       &context.getWeight(expert_up_proj_indices[expert_idx]),
+       &context.getWeight(expert_down_proj_indices[expert_idx])});
   }
+
+  size_t activated_count = 0;
+  try {
+    // mmap() all active experts first. On Android and Linux, activate() also
+    // submits MADV_WILLNEED so later expert reads can overlap earlier compute.
+    for (const auto &expert : active_experts) {
+      activateExpertWeights(expert);
+      ++activated_count;
+    }
+
+    // Keep the outer loop serial because dot() already uses ThreadManager.
+    for (const auto &expert : active_experts) {
+      compute_expert_forward(input, output, expert_assignments[expert.index],
+                             *expert.gate, *expert.up, *expert.down,
+                             hidden_size);
+    }
+  } catch (...) {
+    while (activated_count > 0) {
+      deactivateExpertWeightsNoThrow(active_experts[--activated_count]);
+    }
+    throw;
+  }
+
+  deactivateExpertBatch(active_experts);
 
   // reshape output: [B*S,1,1,H] -> [B,1,S,H]
   output.reshape({batch_size, 1, seq_len, hidden_size});
@@ -448,38 +543,42 @@ void SlimMoELayer::incremental_forwarding(nntrainer::RunLayerContext &context,
       }
     }
 
-    // Serial outer loop: the expert GEMV/GEMM parallelizes internally via
-    // ThreadManager (dot() calls parallel_for), and nesting parallel_for
-    // deadlocks because ThreadManager::parallelize() uses a non-recursive
-    // execution_mutex_.
-    for (int expert_idx = 0; expert_idx < static_cast<int>(num_experts);
-         ++expert_idx) {
-      const auto &assignments = expert_assignments[expert_idx];
-      if (assignments.empty())
+    std::vector<ExpertWeights> active_experts;
+    active_experts.reserve(num_experts);
+    for (unsigned int expert_idx = 0; expert_idx < num_experts; ++expert_idx) {
+      if (expert_assignments[expert_idx].empty()) {
         continue;
+      }
 
-      ///@note Please note that expert_gate_proj is virtual tensor,
-      ///      which is not allocated so far. It will be allocated when it
-      ///      is used. `activate(read=true)` will allocate its memory and
-      ///      will read from the original weight. activate is true by
-      ///      default. i.e., mmap
-      context.getWeight(expert_gate_proj_indices[expert_idx]).activate();
-      context.getWeight(expert_up_proj_indices[expert_idx]).activate();
-      context.getWeight(expert_down_proj_indices[expert_idx]).activate();
-
-      compute_expert_forward_no_critical(
-        input, expert_outputs[expert_idx], assignments,
-        context.getWeight(expert_gate_proj_indices[expert_idx]),
-        context.getWeight(expert_up_proj_indices[expert_idx]),
-        context.getWeight(expert_down_proj_indices[expert_idx]), hidden_size);
-
-      ////@note Please note that the virtual tensor is deactivated after
-      /// usage This will allocate and load data from the storage on-the-fly
-      /// i.e., unmap
-      context.getWeight(expert_gate_proj_indices[expert_idx]).deactivate();
-      context.getWeight(expert_up_proj_indices[expert_idx]).deactivate();
-      context.getWeight(expert_down_proj_indices[expert_idx]).deactivate();
+      active_experts.push_back(
+        {expert_idx, &context.getWeight(expert_gate_proj_indices[expert_idx]),
+         &context.getWeight(expert_up_proj_indices[expert_idx]),
+         &context.getWeight(expert_down_proj_indices[expert_idx])});
     }
+
+    size_t activated_count = 0;
+    try {
+      // Submit readahead hints for every active expert before entering GEMV.
+      for (const auto &expert : active_experts) {
+        activateExpertWeights(expert);
+        ++activated_count;
+      }
+
+      // Serial outer loop: expert GEMV/GEMM parallelizes internally via
+      // ThreadManager, whose execution mutex does not permit nested dispatch.
+      for (const auto &expert : active_experts) {
+        compute_expert_forward_no_critical(
+          input, expert_outputs[expert.index], expert_assignments[expert.index],
+          *expert.gate, *expert.up, *expert.down, hidden_size);
+      }
+    } catch (...) {
+      while (activated_count > 0) {
+        deactivateExpertWeightsNoThrow(active_experts[--activated_count]);
+      }
+      throw;
+    }
+
+    deactivateExpertBatch(active_experts);
 
     // Combine expert outputs
     for (int expert_idx = 0; expert_idx < static_cast<int>(num_experts);

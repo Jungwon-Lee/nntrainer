@@ -41,6 +41,59 @@ namespace causallm {
 
 static constexpr size_t SINGLE_INOUT_IDX = 0;
 
+namespace {
+
+struct ExpertWeights {
+  unsigned int index;
+  nntrainer::Tensor *gate;
+  nntrainer::Tensor *up;
+  nntrainer::Tensor *down;
+};
+
+void deactivateExpertWeightsNoThrow(const ExpertWeights &weights) noexcept {
+  try {
+    weights.down->deactivate();
+  } catch (...) {
+  }
+
+  try {
+    weights.up->deactivate();
+  } catch (...) {
+  }
+
+  try {
+    weights.gate->deactivate();
+  } catch (...) {
+  }
+}
+
+void activateExpertWeights(const ExpertWeights &weights) {
+  unsigned int activated = 0;
+  try {
+    weights.gate->activate();
+    activated = 1;
+    weights.up->activate();
+    activated = 2;
+    weights.down->activate();
+  } catch (...) {
+    if (activated >= 2) {
+      try {
+        weights.up->deactivate();
+      } catch (...) {
+      }
+    }
+    if (activated >= 1) {
+      try {
+        weights.gate->deactivate();
+      } catch (...) {
+      }
+    }
+    throw;
+  }
+}
+
+} // namespace
+
 CachedSlimMoELayer::CachedSlimMoELayer() :
   LayerImpl(),
   num_experts(0),
@@ -370,69 +423,97 @@ void CachedSlimMoELayer::incremental_forwarding(
       target_idx_vector.push_back(expert_idx);
     }
 
-    int hit_count = 0;
-    int miss_count = 0;
+    std::vector<int> hit_idx_vector;
+    std::vector<int> miss_idx_vector;
+    hit_idx_vector.reserve(target_idx_vector.size());
+    miss_idx_vector.reserve(target_idx_vector.size());
+    for (int expert_idx : target_idx_vector) {
+      if (need_load[expert_idx]) {
+        miss_idx_vector.push_back(expert_idx);
+      } else {
+        hit_idx_vector.push_back(expert_idx);
+      }
+    }
+
+    const int hit_count = static_cast<int>(hit_idx_vector.size());
+    const int miss_count = static_cast<int>(miss_idx_vector.size());
 
 #ifdef DEBUG
-    auto t1_miss = high_resolution_clock::now();
+    auto t1_prefetch = high_resolution_clock::now();
+    auto t2_prefetch = t1_prefetch;
+    auto t1_miss = t1_prefetch;
     auto t2_miss = t1_miss;
-    auto t1_hit = high_resolution_clock::now();
+    auto t1_hit = t1_prefetch;
     auto t2_hit = t1_hit;
 #endif
 
-    // Serial outer loop: the expert GEMV/GEMM parallelizes internally via
-    // ThreadManager (dot() calls parallel_for), and nesting parallel_for
-    // deadlocks because ThreadManager::parallelize() uses a non-recursive
-    // execution_mutex_.
-    for (int expert_idx : target_idx_vector) {
-      const auto &assignments = expert_assignments[expert_idx];
-      if (need_load[expert_idx]) {
+    std::vector<ExpertWeights> miss_experts;
+    miss_experts.reserve(miss_idx_vector.size());
+    for (int expert_idx : miss_idx_vector) {
+      miss_experts.push_back(
+        {static_cast<unsigned int>(expert_idx),
+         &context.getWeight(expert_gate_proj_indices[expert_idx]),
+         &context.getWeight(expert_up_proj_indices[expert_idx]),
+         &context.getWeight(expert_down_proj_indices[expert_idx])});
+    }
+
+    size_t activated_count = 0;
+    try {
+      // Map every miss first. activate() submits MADV_WILLNEED on Android and
+      // Linux, allowing the kernel to read miss pages while hits are computed.
+      for (const auto &expert : miss_experts) {
+        activateExpertWeights(expert);
+        ++activated_count;
+      }
+    } catch (...) {
+      while (activated_count > 0) {
+        deactivateExpertWeightsNoThrow(miss_experts[--activated_count]);
+      }
+      throw;
+    }
 
 #ifdef DEBUG
-        t1_miss = high_resolution_clock::now();
+    t2_prefetch = high_resolution_clock::now();
 #endif
 
-        context.getWeight(expert_gate_proj_indices[expert_idx]).activate();
-        context.getWeight(expert_up_proj_indices[expert_idx]).activate();
-        context.getWeight(expert_down_proj_indices[expert_idx]).activate();
-
-        {
-          std::lock_guard<std::mutex> lock(cache_mutex);
-          loaded_expert_deque.push_back(expert_idx);
-          iteration_map[expert_idx] = --loaded_expert_deque.end();
-          need_load[expert_idx] = false;
-          miss_count += 1;
-        }
-
-        compute_expert_forward(
-          input, expert_outputs[expert_idx], assignments,
-          context.getWeight(expert_gate_proj_indices[expert_idx]),
-          context.getWeight(expert_up_proj_indices[expert_idx]),
-          context.getWeight(expert_down_proj_indices[expert_idx]), hidden_size);
-#ifdef DEBUG
-        t2_miss = high_resolution_clock::now();
-#endif
-      } else {
-
-#ifdef DEBUG
-        t1_hit = high_resolution_clock::now();
-#endif
-        {
-          std::lock_guard<std::mutex> lock(cache_mutex);
-          hit_count += 1;
-        }
-
-        compute_expert_forward(
-          input, expert_outputs[expert_idx], assignments,
-          context.getWeight(expert_gate_proj_indices[expert_idx]),
-          context.getWeight(expert_up_proj_indices[expert_idx]),
-          context.getWeight(expert_down_proj_indices[expert_idx]), hidden_size);
-
-#ifdef DEBUG
-        t2_hit = high_resolution_clock::now();
-#endif
+    // Cache metadata is committed only after every miss mapping succeeds.
+    {
+      std::lock_guard<std::mutex> lock(cache_mutex);
+      for (const auto &expert : miss_experts) {
+        loaded_expert_deque.push_back(expert.index);
+        iteration_map[expert.index] = --loaded_expert_deque.end();
+        need_load[expert.index] = false;
       }
     }
+
+#ifdef DEBUG
+    t1_hit = high_resolution_clock::now();
+#endif
+
+    // Keep expert compute serial because dot() already uses ThreadManager and
+    // its execution mutex does not permit nested parallel dispatch.
+    for (int expert_idx : hit_idx_vector) {
+      compute_expert_forward(
+        input, expert_outputs[expert_idx], expert_assignments[expert_idx],
+        context.getWeight(expert_gate_proj_indices[expert_idx]),
+        context.getWeight(expert_up_proj_indices[expert_idx]),
+        context.getWeight(expert_down_proj_indices[expert_idx]), hidden_size);
+    }
+
+#ifdef DEBUG
+    t2_hit = high_resolution_clock::now();
+    t1_miss = high_resolution_clock::now();
+#endif
+
+    for (const auto &expert : miss_experts) {
+      compute_expert_forward(input, expert_outputs[expert.index],
+                             expert_assignments[expert.index], *expert.gate,
+                             *expert.up, *expert.down, hidden_size);
+    }
+
+#ifdef DEBUG
+    t2_miss = high_resolution_clock::now();
+#endif
 
     for (int i = extra_top_k.size() - 1; i >= 0; i--) {
       if (iteration_map.find(extra_top_k[i]) != iteration_map.end()) {
@@ -484,6 +565,7 @@ void CachedSlimMoELayer::incremental_forwarding(
 #ifdef DEBUG
     auto t2 = high_resolution_clock::now();
     auto dt = duration_cast<nanoseconds>(t2 - t1);
+    auto dt_prefetch = duration_cast<nanoseconds>(t2_prefetch - t1_prefetch);
     auto dt_miss = duration_cast<nanoseconds>(t2_miss - t1_miss);
     auto dt_hit = duration_cast<nanoseconds>(t2_hit - t1_hit);
     auto dt_evict = duration_cast<nanoseconds>(t2_evict - t1_evict);
@@ -494,6 +576,8 @@ void CachedSlimMoELayer::incremental_forwarding(
               << "hit ratio: " << hit_count / 8.0 << "\t | "
               << " miss ratio: " << miss_count / 8.0 << "\t | "
               << "hit_compute: " << dt_hit.count() / 1'000'000 << " ms "
+              << "\t| "
+              << "miss_prefetch: " << dt_prefetch.count() / 1'000'000 << " ms "
               << "\t| "
               << "miss_compute: " << dt_miss.count() / 1'000'000 << " ms "
               << "\t| "
