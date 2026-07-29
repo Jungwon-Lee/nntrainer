@@ -470,11 +470,12 @@ inline void CachedSlimGptOssMoELayer::compute_expert_forward(
   nntrainer::Tensor gate_out(intermediate_dim);
   nntrainer::Tensor acti_out(intermediate_dim);
   nntrainer::Tensor up_out(intermediate_dim);
-  nntrainer::Tensor token_input(token_input_dim);
+  nntrainer::Tensor token_input;
   const unsigned token_idx = token_assignments[0].first;
 
   if (num_tokens > 1) {
     /** if prefill, copy data to make a batch */
+    token_input = nntrainer::Tensor(token_input_dim);
     {
       auto &tm = nntrainer::ThreadManager::Global();
       tm.parallel_for(0, static_cast<size_t>(num_tokens), [&](size_t i) {
