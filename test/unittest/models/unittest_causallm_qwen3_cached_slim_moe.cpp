@@ -17,10 +17,13 @@
 #include <layer.h>
 #include <layer_context.h>
 #include <qwen3_cached_slim_moe_causallm.h>
+#include <qwen_moe_cache_policy.h>
 #include <qwen_moe_layer_cached.h>
 
 #include <cmath>
+#include <list>
 #include <map>
+#include <vector>
 
 namespace {
 
@@ -101,6 +104,38 @@ TEST(Qwen3CachedSlimMoERouterTest,
                 expected_values.getValue<float>(i), 1e-6f);
     EXPECT_TRUE(std::isfinite(selected_values.getValue<float>(i)));
   }
+}
+
+TEST(Qwen3CachedSlimMoECacheTest, PlansFinalLruWithoutMappingAllExperts) {
+  const std::list<int> loaded_experts = {0, 1, 2};
+  const std::vector<int> active_experts = {2, 3, 4, 5};
+  const std::vector<unsigned int> recent_experts = {5, 3, 1};
+
+  const auto planned_cache = causallm::qwen_moe::detail::planExpertCache(
+    loaded_experts, active_experts, recent_experts, 3);
+
+  EXPECT_EQ(planned_cache, (std::list<int>{1, 3, 5}));
+}
+
+TEST(Qwen3CachedSlimMoECacheTest, KeepsNewestActiveExpertsWithoutHints) {
+  const std::list<int> loaded_experts = {0, 1};
+  const std::vector<int> active_experts = {1, 2, 3, 4};
+
+  const auto planned_cache = causallm::qwen_moe::detail::planExpertCache(
+    loaded_experts, active_experts, {}, 3);
+
+  EXPECT_EQ(planned_cache, (std::list<int>{2, 3, 4}));
+}
+
+TEST(Qwen3CachedSlimMoECacheTest, DeduplicatesActiveAndRecencyExperts) {
+  const std::list<int> loaded_experts = {0, 1};
+  const std::vector<int> active_experts = {1, 1, 2, 2};
+  const std::vector<unsigned int> recent_experts = {2, 2, 0, 2};
+
+  const auto planned_cache = causallm::qwen_moe::detail::planExpertCache(
+    loaded_experts, active_experts, recent_experts, 4);
+
+  EXPECT_EQ(planned_cache, (std::list<int>{1, 0, 2}));
 }
 
 } // namespace

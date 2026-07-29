@@ -4,7 +4,7 @@
  *
  * @file   qwen_moe_cache_policy.h
  * @date   29 July 2026
- * @brief  Cache policy helpers for the cached Qwen3 MoE layer
+ * @brief  Cache planning helpers for the cached Qwen3 MoE layer
  * @see    https://github.com/nnstreamer/nntrainer
  */
 
@@ -14,7 +14,9 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <list>
 #include <stdexcept>
+#include <unordered_map>
 #include <vector>
 
 namespace causallm::qwen_moe::detail {
@@ -62,6 +64,50 @@ collectRecentExperts(const std::uint32_t *topk_indices,
   }
 
   return recent_experts;
+}
+
+/**
+ * @brief Plan the post-forward expert cache in least-to-most-recent order
+ *
+ * This mirrors the existing cache update policy without requiring all active
+ * experts to be mapped first.
+ */
+inline std::list<int> planExpertCache(const std::list<int> &loaded_experts,
+                                      const std::vector<int> &active_experts,
+                                      const std::vector<unsigned int>
+                                        &recent_experts,
+                                      std::size_t cache_capacity) {
+  std::list<int> planned_cache = loaded_experts;
+  std::unordered_map<int, std::list<int>::iterator> positions;
+  positions.reserve(loaded_experts.size() + active_experts.size());
+
+  for (auto iter = planned_cache.begin(); iter != planned_cache.end(); ++iter)
+    positions.emplace(*iter, iter);
+
+  for (int expert_idx : active_experts) {
+    if (positions.find(expert_idx) != positions.end())
+      continue;
+
+    planned_cache.push_back(expert_idx);
+    positions.emplace(expert_idx, --planned_cache.end());
+  }
+
+  for (auto iter = recent_experts.rbegin(); iter != recent_experts.rend();
+       ++iter) {
+    const int expert_idx = static_cast<int>(*iter);
+    auto position = positions.find(expert_idx);
+    if (position == positions.end())
+      continue;
+
+    planned_cache.splice(planned_cache.end(), planned_cache, position->second);
+  }
+
+  while (planned_cache.size() > cache_capacity) {
+    positions.erase(planned_cache.front());
+    planned_cache.pop_front();
+  }
+
+  return planned_cache;
 }
 
 } // namespace causallm::qwen_moe::detail
