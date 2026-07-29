@@ -26,8 +26,8 @@
 #include <algorithm>
 #include <atomic>
 #include <cmath>
-#include <deque>
 #include <node_exporter.h>
+#include <qwen_moe_cache_policy.h>
 #include <qwen_moe_layer_cached.h>
 #include <stdexcept>
 #include <thread_manager.h>
@@ -53,8 +53,7 @@ CachedSlimMoELayer::CachedSlimMoELayer() :
   loaded_expert_deque({}),
   need_load({}),
   gate_idx(std::numeric_limits<unsigned>::max()),
-  router_logits_idx(std::numeric_limits<unsigned>::max()),
-  expert_mask_idx(std::numeric_limits<unsigned>::max()) {}
+  router_logits_idx(std::numeric_limits<unsigned>::max()) {}
 
 void CachedSlimMoELayer::finalize(nntrainer::InitLayerContext &context) {
 
@@ -159,12 +158,6 @@ void CachedSlimMoELayer::finalize(nntrainer::InitLayerContext &context) {
   router_logits_idx =
     context.requestTensor({total_tokens, 1, 1, num_experts}, "router_logits",
                           nntrainer::Initializer::NONE, false,
-                          nntrainer::TensorLifespan::FORWARD_FUNC_LIFESPAN);
-
-  // Expert mask: [num_experts, batch*seq]
-  expert_mask_idx =
-    context.requestTensor({num_experts, 1, topk, total_tokens}, "expert_mask",
-                          nntrainer::Initializer::ZEROS, false,
                           nntrainer::TensorLifespan::FORWARD_FUNC_LIFESPAN);
 }
 
@@ -298,22 +291,6 @@ void CachedSlimMoELayer::incremental_forwarding(
     input.dot(gate_weights, router_logits);
     router_logits.apply(nntrainer::ActiFunc::softmax<float>, router_logits);
 
-    // get extra topK
-    auto extra_topk_result = router_logits.topK(topk + 5);
-    auto extra_topk_values = std::get<0>(extra_topk_result);
-    auto extra_topk_indices = std::get<1>(extra_topk_result);
-    std::deque<int> extra_top_k = {};
-    extra_topk_values.divide_i(extra_topk_values.sum(3));
-    const uint32_t *extra_indices_data = extra_topk_indices.getData<uint32_t>();
-
-    // get extra topk
-    for (int i = static_cast<int>(total_tokens) - 1; i >= 0; --i) {
-      for (int k = 0; k < static_cast<int>(topk + 5); ++k) {
-        unsigned expert_idx = extra_indices_data[i * topk + k];
-        extra_top_k.push_back(expert_idx);
-      }
-    }
-
     auto topk_result = router_logits.topK(topk);
     auto topk_values = std::get<0>(topk_result);
     auto topk_indices = std::get<1>(topk_result);
@@ -322,9 +299,11 @@ void CachedSlimMoELayer::incremental_forwarding(
     topk_values.divide_i(topk_values.sum(3));
 
     const uint32_t *indices_data = topk_indices.getData<uint32_t>();
+    const auto recent_experts = qwen_moe::detail::collectRecentExperts(
+      indices_data, total_tokens, topk, num_experts,
+      qwen_moe::detail::EXPERT_CACHE_CAPACITY);
     std::vector<std::vector<std::pair<unsigned, float>>> expert_assignments(
       num_experts);
-    // Set expert mask
     for (int i = 0; i < static_cast<int>(total_tokens); ++i) {
       for (int k = 0; k < static_cast<int>(topk); ++k) {
         unsigned expert_idx = indices_data[i * topk + k];
@@ -413,11 +392,13 @@ void CachedSlimMoELayer::incremental_forwarding(
       }
     }
 
-    for (int i = extra_top_k.size() - 1; i >= 0; i--) {
-      if (iteration_map.find(extra_top_k[i]) != iteration_map.end()) {
-        loaded_expert_deque.erase(iteration_map[extra_top_k[i]]);
-        loaded_expert_deque.push_back(extra_top_k[i]);
-        iteration_map[extra_top_k[i]] = --loaded_expert_deque.end();
+    for (auto iter = recent_experts.rbegin(); iter != recent_experts.rend();
+         ++iter) {
+      auto cached_expert = iteration_map.find(*iter);
+      if (cached_expert != iteration_map.end()) {
+        loaded_expert_deque.erase(cached_expert->second);
+        loaded_expert_deque.push_back(*iter);
+        iteration_map[*iter] = --loaded_expert_deque.end();
       }
     }
 
@@ -427,7 +408,8 @@ void CachedSlimMoELayer::incremental_forwarding(
 
     // Evict experts
     /// @todo apply multi thread loop
-    while (loaded_expert_deque.size() > 32) {
+    while (loaded_expert_deque.size() >
+           qwen_moe::detail::EXPERT_CACHE_CAPACITY) {
       int target_idx;
       {
         std::lock_guard<std::mutex> lock(cache_mutex);
