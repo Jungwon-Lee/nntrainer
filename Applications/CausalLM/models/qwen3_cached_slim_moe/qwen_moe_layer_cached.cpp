@@ -173,7 +173,9 @@ inline void CachedSlimMoELayer::compute_expert_forward(
   const nntrainer::Tensor &input, nntrainer::Tensor &output,
   const std::vector<std::pair<unsigned, float>> &token_assignments,
   const nntrainer::Tensor &gate_proj, const nntrainer::Tensor &up_proj,
-  const nntrainer::Tensor &down_proj, unsigned int hidden_size) {
+  const nntrainer::Tensor &down_proj, unsigned int hidden_size,
+  nntrainer::Tensor &token_input_scratch, nntrainer::Tensor &gate_out_scratch,
+  nntrainer::Tensor &up_out_scratch, nntrainer::Tensor &acti_out_scratch) {
 
   const unsigned intermediate_size = gate_proj.width();
   const unsigned num_tokens = token_assignments.size();
@@ -188,11 +190,15 @@ inline void CachedSlimMoELayer::compute_expert_forward(
                                         input.getTensorType());
   nntrainer::TensorDim out_step_dim({1, 1, 1, hidden_size},
                                     input.getTensorType());
-  // Create intermediate tensors for this token
-  nntrainer::Tensor gate_out(intermediate_dim);
-  nntrainer::Tensor acti_out(intermediate_dim);
-  nntrainer::Tensor up_out(intermediate_dim);
-  nntrainer::Tensor token_input(token_input_dim);
+  // Reuse maximum-capacity backing tensors allocated once per forwarding call.
+  nntrainer::Tensor gate_out =
+    gate_out_scratch.getSharedDataTensor(intermediate_dim, 0, true);
+  nntrainer::Tensor acti_out =
+    acti_out_scratch.getSharedDataTensor(intermediate_dim, 0, true);
+  nntrainer::Tensor up_out =
+    up_out_scratch.getSharedDataTensor(intermediate_dim, 0, true);
+  nntrainer::Tensor token_input =
+    token_input_scratch.getSharedDataTensor(token_input_dim, 0, true);
   const unsigned token_idx = token_assignments[0].first;
 
   if (num_tokens > 1) {
@@ -321,6 +327,7 @@ void CachedSlimMoELayer::incremental_forwarding(
     std::vector<nntrainer::Tensor> expert_outputs(num_experts);
     std::vector<int> target_idx_vector;
     target_idx_vector.reserve(num_experts);
+    size_t max_assigned_tokens = 0;
 
     for (int expert_idx = 0; expert_idx < static_cast<int>(num_experts);
          ++expert_idx) {
@@ -329,10 +336,24 @@ void CachedSlimMoELayer::incremental_forwarding(
         continue;
 
       target_idx_vector.push_back(expert_idx);
+      max_assigned_tokens = std::max(max_assigned_tokens, assignments.size());
       expert_outputs[expert_idx] =
         nntrainer::Tensor(static_cast<unsigned int>(assignments.size()), 1, 1,
                           hidden_size, output.getTensorType());
     }
+
+    const unsigned int scratch_tokens =
+      static_cast<unsigned int>(max_assigned_tokens);
+    const unsigned int intermediate_size =
+      std::get<nntrainer::props::Unit>(moe_props).get();
+    nntrainer::Tensor token_input_scratch(1, 1, scratch_tokens, hidden_size,
+                                          input.getTensorType());
+    nntrainer::Tensor gate_out_scratch(1, 1, scratch_tokens, intermediate_size,
+                                       input.getTensorType());
+    nntrainer::Tensor up_out_scratch(1, 1, scratch_tokens, intermediate_size,
+                                     input.getTensorType());
+    nntrainer::Tensor acti_out_scratch(1, 1, scratch_tokens, intermediate_size,
+                                       input.getTensorType());
 
     int hit_count = 0;
     int miss_count = 0;
@@ -372,7 +393,9 @@ void CachedSlimMoELayer::incremental_forwarding(
           input, expert_outputs[expert_idx], assignments,
           context.getWeight(expert_gate_proj_indices[expert_idx]),
           context.getWeight(expert_up_proj_indices[expert_idx]),
-          context.getWeight(expert_down_proj_indices[expert_idx]), hidden_size);
+          context.getWeight(expert_down_proj_indices[expert_idx]), hidden_size,
+          token_input_scratch, gate_out_scratch, up_out_scratch,
+          acti_out_scratch);
 #ifdef DEBUG
         t2_miss = high_resolution_clock::now();
 #endif
@@ -390,7 +413,9 @@ void CachedSlimMoELayer::incremental_forwarding(
           input, expert_outputs[expert_idx], assignments,
           context.getWeight(expert_gate_proj_indices[expert_idx]),
           context.getWeight(expert_up_proj_indices[expert_idx]),
-          context.getWeight(expert_down_proj_indices[expert_idx]), hidden_size);
+          context.getWeight(expert_down_proj_indices[expert_idx]), hidden_size,
+          token_input_scratch, gate_out_scratch, up_out_scratch,
+          acti_out_scratch);
 
 #ifdef DEBUG
         t2_hit = high_resolution_clock::now();
