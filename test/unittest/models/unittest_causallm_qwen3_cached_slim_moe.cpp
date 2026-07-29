@@ -17,7 +17,9 @@
 #include <layer.h>
 #include <layer_context.h>
 #include <qwen3_cached_slim_moe_causallm.h>
+#include <qwen_moe_layer_cached.h>
 
+#include <cmath>
 #include <map>
 
 namespace {
@@ -73,6 +75,32 @@ TEST(Qwen3CachedSlimMoETinyModelTest, GreedyGenerationSelectsArgmaxLogit) {
   auto model = std::make_unique<TinyQwen3CachedSlimMoECausalLM>(
     model_cfg, gen_cfg, nntr_cfg);
   causallm_test::expectGreedyGenerationSelectsArgmax(*model);
+}
+
+TEST(Qwen3CachedSlimMoERouterTest,
+     SelectedSoftmaxMatchesNormalizedFullSoftmax) {
+  std::vector<std::vector<std::vector<std::vector<float>>>> data = {
+    {{{1000.0f, 999.0f, 997.0f, -1000.0f, 995.0f, 998.0f}}},
+    {{{-1000.0f, -999.0f, -997.0f, 1000.0f, 999.0f, 998.0f}}}};
+  nntrainer::Tensor raw_logits(
+    data, {nntrainer::Tformat::NCHW, nntrainer::Tdatatype::FP32});
+  nntrainer::Tensor full_softmax(raw_logits.getDim());
+  raw_logits.apply(nntrainer::ActiFunc::softmax<float>, full_softmax);
+
+  auto [expected_values, expected_indices] = full_softmax.topK(3);
+  expected_values.divide_i(expected_values.sum(3));
+
+  auto [selected_values, selected_indices] = raw_logits.topK(3);
+  causallm::qwen3_cached_slim_detail::normalizeSelectedRouterLogits(
+    selected_values);
+
+  for (unsigned int i = 0; i < selected_values.size(); ++i) {
+    EXPECT_EQ(selected_indices.getValue<uint32_t>(i),
+              expected_indices.getValue<uint32_t>(i));
+    EXPECT_NEAR(selected_values.getValue<float>(i),
+                expected_values.getValue<float>(i), 1e-6f);
+    EXPECT_TRUE(std::isfinite(selected_values.getValue<float>(i)));
+  }
 }
 
 } // namespace

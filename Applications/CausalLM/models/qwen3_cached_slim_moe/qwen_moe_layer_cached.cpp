@@ -41,6 +41,11 @@ namespace causallm {
 
 static constexpr size_t SINGLE_INOUT_IDX = 0;
 
+void qwen3_cached_slim_detail::normalizeSelectedRouterLogits(
+  nntrainer::Tensor &selected_logits) {
+  selected_logits.apply(nntrainer::ActiFunc::softmax<float>, selected_logits);
+}
+
 CachedSlimMoELayer::CachedSlimMoELayer() :
   LayerImpl(),
   num_experts(0),
@@ -296,14 +301,11 @@ void CachedSlimMoELayer::incremental_forwarding(
     // routing
     nntrainer::Tensor &gate_weights = context.getWeight(gate_idx);
     input.dot(gate_weights, router_logits);
-    router_logits.apply(nntrainer::ActiFunc::softmax<float>, router_logits);
 
     // get extra topK
     auto extra_topk_result = router_logits.topK(topk + 5);
-    auto extra_topk_values = std::get<0>(extra_topk_result);
     auto extra_topk_indices = std::get<1>(extra_topk_result);
     std::deque<int> extra_top_k = {};
-    extra_topk_values.divide_i(extra_topk_values.sum(3));
     const uint32_t *extra_indices_data = extra_topk_indices.getData<uint32_t>();
 
     // get extra topk
@@ -318,8 +320,10 @@ void CachedSlimMoELayer::incremental_forwarding(
     auto topk_values = std::get<0>(topk_result);
     auto topk_indices = std::get<1>(topk_result);
 
-    // norm_topk_prob
-    topk_values.divide_i(topk_values.sum(3));
+    // Qwen3 norm_topk_prob: softmax only the selected raw logits. This is
+    // mathematically equivalent to normalizing selected probabilities from a
+    // full router softmax, while avoiding exponentiation of unselected experts.
+    qwen3_cached_slim_detail::normalizeSelectedRouterLogits(topk_values);
 
     const uint32_t *indices_data = topk_indices.getData<uint32_t>();
     std::vector<std::vector<std::pair<unsigned, float>>> expert_assignments(
