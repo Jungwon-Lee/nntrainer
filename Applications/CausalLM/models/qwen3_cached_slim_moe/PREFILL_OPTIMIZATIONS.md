@@ -85,7 +85,23 @@ router logits에서 topK만 계산
 
 ## 4. 적용한 최적화
 
+각 최적화와 통합 브랜치에 적용된 커밋의 대응 관계는 다음과 같습니다.
+
+| 최적화 | 커밋 |
+|---|---|
+| Expert cache 실제 상주 수 제한 | `4872b116` — `[CausalLM] Enforce Qwen3 CachedSlim expert cache limit` |
+| 다음 cache miss 하나 prefetch | `81aa90e2` — `[CausalLM] Prefetch Qwen3 CachedSlim experts with a bounded window` |
+| 실제 routing 기반 cache recency | `9ecc90b0` — `[CausalLM] Simplify Qwen3 CachedSlim expert routing` |
+| 선택된 router logit만 softmax | `346e7fe1` — `[CausalLM] Normalize only selected Qwen3 MoE router logits` |
+| Allocation-free small-k topK | `16b0cd11` — `[tensor] Add allocation-free small-k topK` |
+| Expert scratch tensor 재사용 | `4c4c2e68` — `[CausalLM] Reuse Qwen3 MoE expert scratch buffers` |
+| Expert output streaming | `1d05c16b` — `[CausalLM] Stream Qwen3 CachedSlim expert outputs` |
+| Runtime page size 기반 mmap | `bff47bb7` — `[tensor] Support runtime page size for virtual tensor mmap` |
+
 ### 4.1 Expert cache의 실제 상주 수 제한
+
+> 적용 커밋: `4872b116` —
+> `[CausalLM] Enforce Qwen3 CachedSlim expert cache limit`
 
 가장 영향이 큰 변경입니다.
 
@@ -124,6 +140,9 @@ Expert weight는 gate, up, down projection 세 tensor가 하나의 묶음으로
 
 ### 4.2 다음 cache miss 하나만 prefetch
 
+> 적용 커밋: `81aa90e2` —
+> `[CausalLM] Prefetch Qwen3 CachedSlim experts with a bounded window`
+
 현재 expert를 계산하는 동안 다음 cache miss expert 하나를 미리 활성화합니다.
 설정 이름은 `moe_prefetch_distance`입니다.
 
@@ -160,6 +179,9 @@ prefetch 거리를 1로 제한한 이유는 다음과 같습니다.
 
 #### 전체 softmax 제거
 
+> 적용 커밋: `346e7fe1` —
+> `[CausalLM] Normalize only selected Qwen3 MoE router logits`
+
 기존에는 모든 expert logit에 softmax를 적용한 뒤 topK를 선택했습니다.
 변경 후에는 raw logit에서 topK를 먼저 선택하고 선택된 값에만 softmax를
 적용합니다.
@@ -176,6 +198,9 @@ raw logit topK -> 선택된 logit만 softmax
 
 #### 두 번째 topK 제거
 
+> 적용 커밋: `9ecc90b0` —
+> `[CausalLM] Simplify Qwen3 CachedSlim expert routing`
+
 기존 코드는 실제 routing을 위한 `topK(topk)` 외에 cache recency 계산을 위해
 `topK(topk + 5)`를 한 번 더 수행했습니다. 이 결과는 실제 routing과 다를 수
 있고, 값 tensor를 정규화하는 연산도 cache 정책에는 필요하지 않았습니다.
@@ -190,6 +215,9 @@ raw logit topK -> 선택된 logit만 softmax
 
 #### Small-k topK 임시 할당 제거
 
+> 적용 커밋: `16b0cd11` —
+> `[tensor] Add allocation-free small-k topK`
+
 MoE의 `topk`는 일반적으로 전체 expert 수보다 매우 작습니다. 이 경우를 위한
 small-k 경로가 호출될 때마다 heap 메모리를 할당하지 않고, 이미 준비된 출력
 tensor와 작은 고정 작업 공간을 사용하도록 변경했습니다.
@@ -198,6 +226,9 @@ tensor와 작은 고정 작업 공간을 사용하도록 변경했습니다.
 테스트로 확인합니다.
 
 ### 4.4 Expert 중간 scratch tensor 재사용
+
+> 적용 커밋: `4c4c2e68` —
+> `[CausalLM] Reuse Qwen3 MoE expert scratch buffers`
 
 각 expert 계산에는 다음 중간 tensor가 필요합니다.
 
@@ -224,6 +255,9 @@ pressure를 줄여 page fault가 더 심해지는 것을 방지합니다.
 
 ### 4.5 Expert output을 하나씩 즉시 합산
 
+> 적용 커밋: `1d05c16b` —
+> `[CausalLM] Stream Qwen3 CachedSlim expert outputs`
+
 기존에는 각 활성 expert의 compact output을 `expert_outputs` 배열에 저장하고,
 모든 expert 계산이 끝난 뒤 최종 output에 합산했습니다.
 
@@ -248,6 +282,9 @@ expert를 오름차순으로 처리하고 기존과 같은 순서로 누적하�
 덧셈 순서도 유지합니다.
 
 ### 4.6 Virtual tensor의 실제 system page size 사용
+
+> 적용 커밋: `bff47bb7` —
+> `[tensor] Support runtime page size for virtual tensor mmap`
 
 기존 virtual tensor mapping은 page 크기를 항상 4096 byte로 가정했습니다.
 하지만 일부 Android, ARM, macOS 환경에서는 page 크기가 더 클 수 있습니다.
