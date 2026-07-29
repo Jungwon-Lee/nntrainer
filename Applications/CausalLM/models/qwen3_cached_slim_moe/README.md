@@ -7,6 +7,8 @@ This directory contains the implementation for Qwen3 Slim MoE model with caching
 ## Files
 - `qwen3_cached_slim_moe_causallm.cpp`: Cached Slim MoE implementation.
 - `qwen_moe_layer_cached.cpp`: Cached MoE layer implementation.
+- `PREFILL_OPTIMIZATIONS.md`: Integrated long-context prefill optimizations,
+  cache bounds, configuration, and validation coverage.
 
 ## Cache sizing follow-up
 
