@@ -40,6 +40,7 @@ void Qwen3CachedSlimMoECausalLM::setupParameters(json &cfg,
     NUM_EXPERTS = cfg["num_experts"];
     NUM_EXPERTS_PER_TOK = cfg["num_experts_per_tok"];
     INTERMEDIATE_SIZE = cfg["moe_intermediate_size"];
+    MOE_PREFETCH_DISTANCE = nntr_cfg.value("moe_prefetch_distance", 1U);
   } catch (const std::exception &e) {
     throw std::runtime_error("Qwen3MoE: num_experts and num_experts_per_tok "
                              "are not specified in the config file");
@@ -54,6 +55,7 @@ Tensor Qwen3CachedSlimMoECausalLM::createMlp(const int layer_id, int dim,
     {withKey("name", "layer" + std::to_string(layer_id) + "_ffn_down"),
      withKey("unit", hidden_dim), withKey("num_experts", NUM_EXPERTS),
      withKey("num_experts_per_token", NUM_EXPERTS_PER_TOK),
+     withKey("moe_prefetch_distance", MOE_PREFETCH_DISTANCE),
      withKey("moe_activation", "swish")}));
   return moe(input);
 }
