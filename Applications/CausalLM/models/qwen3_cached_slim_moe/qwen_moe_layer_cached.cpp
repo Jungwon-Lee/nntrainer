@@ -41,6 +41,11 @@ namespace causallm {
 
 static constexpr size_t SINGLE_INOUT_IDX = 0;
 
+void qwen3_cached_slim_detail::normalizeSelectedRouterLogits(
+  nntrainer::Tensor &selected_logits) {
+  selected_logits.apply(nntrainer::ActiFunc::softmax<float>, selected_logits);
+}
+
 CachedSlimMoELayer::CachedSlimMoELayer() :
   LayerImpl(),
   num_experts(0),
@@ -289,14 +294,15 @@ void CachedSlimMoELayer::incremental_forwarding(
     // routing
     nntrainer::Tensor &gate_weights = context.getWeight(gate_idx);
     input.dot(gate_weights, router_logits);
-    router_logits.apply(nntrainer::ActiFunc::softmax<float>, router_logits);
 
     auto topk_result = router_logits.topK(topk);
     auto topk_values = std::get<0>(topk_result);
     auto topk_indices = std::get<1>(topk_result);
 
-    // norm_topk_prob
-    topk_values.divide_i(topk_values.sum(3));
+    // Qwen3 norm_topk_prob: softmax only the selected raw logits. This is
+    // mathematically equivalent to normalizing selected probabilities from a
+    // full router softmax, while avoiding exponentiation of unselected experts.
+    qwen3_cached_slim_detail::normalizeSelectedRouterLogits(topk_values);
 
     const uint32_t *indices_data = topk_indices.getData<uint32_t>();
     const auto recent_experts = qwen_moe::detail::collectRecentExperts(

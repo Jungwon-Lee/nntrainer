@@ -37,6 +37,18 @@
 
 namespace causallm {
 
+namespace qwen3_cached_slim_detail {
+
+/**
+ * @brief Apply a numerically stable softmax to selected router logits
+ *
+ * @param selected_logits Router logits after topK selection
+ */
+WIN_EXPORT void
+normalizeSelectedRouterLogits(nntrainer::Tensor &selected_logits);
+
+} // namespace qwen3_cached_slim_detail
+
 /**
  * @class   SlimMoELayer
  * @brief   Mixture of Expert Layer
