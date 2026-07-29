@@ -9,6 +9,7 @@
  * @bug		No known bugs except for NYI items
  */
 
+#include <array>
 #include <iomanip>
 #include <iostream>
 #include <numeric>
@@ -1192,6 +1193,9 @@ std::vector<unsigned int> FloatTensor::argmin() const {
 
 void FloatTensor::topK(unsigned int k, void *output_data,
                        uint32_t *indices_data) {
+  constexpr unsigned int SMALL_TOPK_MAX_K = 16;
+  constexpr unsigned int SMALL_TOPK_MAX_WIDTH = 256;
+
   const auto &input_dim = getDim();
   const Tformat format = input_dim.getFormat();
   const auto batch = input_dim.batch();
@@ -1232,13 +1236,22 @@ void FloatTensor::topK(unsigned int k, void *output_data,
       const unsigned int width_stride =
         format == Tformat::NHWC ? input_strides[2] : 1;
       const float *B = static_cast<const float *>(getData()) + offset;
-      std::vector<size_t> local_idx(width);
-      std::iota(local_idx.begin(), local_idx.end(), 0);
-      std::partial_sort(local_idx.begin(), local_idx.begin() + k,
-                        local_idx.end(),
-                        [&B, width_stride](size_t i1, size_t i2) {
-                          return B[i1 * width_stride] > B[i2 * width_stride];
-                        });
+      auto compare = [&B, width_stride](size_t i1, size_t i2) {
+        return B[i1 * width_stride] > B[i2 * width_stride];
+      };
+
+      std::array<size_t, SMALL_TOPK_MAX_WIDTH> small_indices;
+      std::vector<size_t> generic_indices;
+      size_t *local_idx;
+      if (k <= SMALL_TOPK_MAX_K && width <= SMALL_TOPK_MAX_WIDTH) {
+        local_idx = small_indices.data();
+      } else {
+        generic_indices.resize(width);
+        local_idx = generic_indices.data();
+      }
+
+      std::iota(local_idx, local_idx + width, 0);
+      std::partial_sort(local_idx, local_idx + k, local_idx + width, compare);
 
       // write top-k values and their indices to output
       for (unsigned int i = 0; i < k; ++i) {
