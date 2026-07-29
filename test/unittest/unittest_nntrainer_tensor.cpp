@@ -5080,6 +5080,52 @@ TEST(nntrainer_Tensor, topK_negative_values_p) {
   }
 }
 
+TEST(nntrainer_Tensor, topK_small_width_tie_order_p) {
+  constexpr unsigned int width = 128;
+  constexpr unsigned int k = 8;
+  nntrainer::Tensor input(1, 1, 1, width, nntrainer::Tformat::NCHW,
+                          nntrainer::Tdatatype::FP32);
+  float *input_data = input.getData<float>();
+  for (unsigned int i = 0; i < width; ++i) {
+    input_data[i] = static_cast<float>(i % 11);
+  }
+
+  std::vector<size_t> reference_indices(width);
+  std::iota(reference_indices.begin(), reference_indices.end(), 0);
+  std::partial_sort(reference_indices.begin(), reference_indices.begin() + k,
+                    reference_indices.end(),
+                    [input_data](size_t lhs, size_t rhs) {
+                      return input_data[lhs] > input_data[rhs];
+                    });
+
+  auto [output, indices] = input.topK(k);
+  for (unsigned int i = 0; i < k; ++i) {
+    EXPECT_FLOAT_EQ(output.getValue<float>(i),
+                    input_data[reference_indices[i]]);
+    EXPECT_EQ(indices.getValue<uint32_t>(i), reference_indices[i]);
+  }
+}
+
+TEST(nntrainer_Tensor, topK_generic_fallback_p) {
+  constexpr unsigned int width = 257;
+  constexpr unsigned int k = 17;
+  nntrainer::Tensor input(1, 1, 1, width, nntrainer::Tformat::NCHW,
+                          nntrainer::Tdatatype::FP32);
+  float *input_data = input.getData<float>();
+  for (unsigned int i = 0; i < width; ++i) {
+    input_data[i] = static_cast<float>((i * 37) % width);
+  }
+
+  auto [output, indices] = input.topK(k);
+  for (unsigned int i = 0; i < k; ++i) {
+    const unsigned int expected_index = width - 1 - i;
+    EXPECT_FLOAT_EQ(output.getValue<float>(i),
+                    static_cast<float>(expected_index));
+    EXPECT_EQ(indices.getValue<uint32_t>(i),
+              static_cast<uint32_t>((expected_index * 132) % width));
+  }
+}
+
 TEST(nntrainer_Tensor, topK_multi_channel_p) {
   // NCHW: [batch=1][channel=3][height=2]
   std::vector<std::vector<std::vector<std::vector<float>>>> data = {
