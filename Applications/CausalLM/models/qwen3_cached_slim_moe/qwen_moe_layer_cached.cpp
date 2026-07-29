@@ -27,7 +27,9 @@
 #include <atomic>
 #include <cmath>
 #include <deque>
+#include <exception>
 #include <node_exporter.h>
+#include <qwen_moe_cache_policy.h>
 #include <qwen_moe_layer_cached.h>
 #include <stdexcept>
 #include <thread_manager.h>
@@ -40,6 +42,87 @@ using std::chrono::nanoseconds;
 namespace causallm {
 
 static constexpr size_t SINGLE_INOUT_IDX = 0;
+static constexpr size_t EXPERT_CACHE_CAPACITY = 32;
+
+namespace {
+
+/**
+ * @brief Owns newly activated expert weights until they are cached or released
+ */
+class ExpertWeightLease {
+public:
+  ExpertWeightLease(nntrainer::Tensor &gate, nntrainer::Tensor &up,
+                    nntrainer::Tensor &down, bool already_mapped = false) :
+    gate(gate),
+    up(up),
+    down(down),
+    gate_active(already_mapped),
+    up_active(already_mapped),
+    down_active(already_mapped) {}
+
+  ~ExpertWeightLease() noexcept { deactivateNoThrow(); }
+
+  void activate() {
+    try {
+      gate.activate();
+      gate_active = true;
+      up.activate();
+      up_active = true;
+      down.activate();
+      down_active = true;
+    } catch (...) {
+      deactivateNoThrow();
+      throw;
+    }
+  }
+
+  void deactivate() {
+    std::exception_ptr first_error;
+    deactivateWeight(down, down_active, first_error);
+    deactivateWeight(up, up_active, first_error);
+    deactivateWeight(gate, gate_active, first_error);
+
+    if (first_error)
+      std::rethrow_exception(first_error);
+  }
+
+  void keepMapped() noexcept {
+    gate_active = false;
+    up_active = false;
+    down_active = false;
+  }
+
+private:
+  static void deactivateWeight(nntrainer::Tensor &weight, bool &active,
+                               std::exception_ptr &first_error) noexcept {
+    if (!active)
+      return;
+
+    try {
+      weight.deactivate();
+      active = false;
+    } catch (...) {
+      if (!first_error)
+        first_error = std::current_exception();
+    }
+  }
+
+  void deactivateNoThrow() noexcept {
+    std::exception_ptr ignored;
+    deactivateWeight(down, down_active, ignored);
+    deactivateWeight(up, up_active, ignored);
+    deactivateWeight(gate, gate_active, ignored);
+  }
+
+  nntrainer::Tensor &gate;
+  nntrainer::Tensor &up;
+  nntrainer::Tensor &down;
+  bool gate_active = false;
+  bool up_active = false;
+  bool down_active = false;
+};
+
+} // namespace
 
 CachedSlimMoELayer::CachedSlimMoELayer() :
   LayerImpl(),
@@ -359,6 +442,60 @@ void CachedSlimMoELayer::incremental_forwarding(
     auto t2_hit = t1_hit;
 #endif
 
+    std::list<int> planned_cache;
+    {
+      std::lock_guard<std::mutex> lock(cache_mutex);
+      planned_cache = qwen3_cached_slim_detail::planExpertCache(
+        loaded_expert_deque, target_idx_vector, extra_top_k,
+        EXPERT_CACHE_CAPACITY);
+    }
+
+    std::vector<bool> keep_mapped(num_experts, false);
+    for (int expert_idx : planned_cache)
+      keep_mapped[expert_idx] = true;
+
+    std::vector<int> experts_to_evict;
+    {
+      std::lock_guard<std::mutex> lock(cache_mutex);
+      for (int expert_idx : loaded_expert_deque) {
+        if (!keep_mapped[expert_idx])
+          experts_to_evict.push_back(expert_idx);
+      }
+    }
+
+#ifdef DEBUG
+    auto t1_evict = high_resolution_clock::now();
+#endif
+
+    // Make room for every expert that will remain cached before processing
+    // misses. Experts outside planned_cache are mapped only while computing.
+    for (int expert_idx : experts_to_evict) {
+      ExpertWeightLease weights(
+        context.getWeight(expert_gate_proj_indices[expert_idx]),
+        context.getWeight(expert_up_proj_indices[expert_idx]),
+        context.getWeight(expert_down_proj_indices[expert_idx]), true);
+      try {
+        weights.deactivate();
+      } catch (...) {
+        std::lock_guard<std::mutex> lock(cache_mutex);
+        auto position = iteration_map.find(expert_idx);
+        if (position != iteration_map.end()) {
+          loaded_expert_deque.erase(position->second);
+          iteration_map.erase(position);
+        }
+        need_load[expert_idx] = true;
+        throw;
+      }
+
+      std::lock_guard<std::mutex> lock(cache_mutex);
+      auto position = iteration_map.find(expert_idx);
+      if (position != iteration_map.end()) {
+        loaded_expert_deque.erase(position->second);
+        iteration_map.erase(position);
+      }
+      need_load[expert_idx] = true;
+    }
+
     // Serial outer loop: the expert GEMV/GEMM parallelizes internally via
     // ThreadManager (dot() calls parallel_for), and nesting parallel_for
     // deadlocks because ThreadManager::parallelize() uses a non-recursive
@@ -371,23 +508,39 @@ void CachedSlimMoELayer::incremental_forwarding(
         t1_miss = high_resolution_clock::now();
 #endif
 
-        context.getWeight(expert_gate_proj_indices[expert_idx]).activate();
-        context.getWeight(expert_up_proj_indices[expert_idx]).activate();
-        context.getWeight(expert_down_proj_indices[expert_idx]).activate();
+        ExpertWeightLease weights(
+          context.getWeight(expert_gate_proj_indices[expert_idx]),
+          context.getWeight(expert_up_proj_indices[expert_idx]),
+          context.getWeight(expert_down_proj_indices[expert_idx]));
+        weights.activate();
 
-        {
+        if (keep_mapped[expert_idx]) {
           std::lock_guard<std::mutex> lock(cache_mutex);
           loaded_expert_deque.push_back(expert_idx);
-          iteration_map[expert_idx] = --loaded_expert_deque.end();
+          auto cache_position = --loaded_expert_deque.end();
+          bool inserted;
+          try {
+            inserted = iteration_map.emplace(expert_idx, cache_position).second;
+          } catch (...) {
+            loaded_expert_deque.pop_back();
+            throw;
+          }
+          if (!inserted) {
+            loaded_expert_deque.pop_back();
+            throw std::logic_error("expert cache metadata is inconsistent");
+          }
           need_load[expert_idx] = false;
-          miss_count += 1;
+          weights.keepMapped();
         }
+        miss_count += 1;
 
         compute_expert_forward(
           input, expert_outputs[expert_idx], assignments,
           context.getWeight(expert_gate_proj_indices[expert_idx]),
           context.getWeight(expert_up_proj_indices[expert_idx]),
           context.getWeight(expert_down_proj_indices[expert_idx]), hidden_size);
+        if (!keep_mapped[expert_idx])
+          weights.deactivate();
 #ifdef DEBUG
         t2_miss = high_resolution_clock::now();
 #endif
@@ -413,33 +566,15 @@ void CachedSlimMoELayer::incremental_forwarding(
       }
     }
 
-    for (int i = extra_top_k.size() - 1; i >= 0; i--) {
-      if (iteration_map.find(extra_top_k[i]) != iteration_map.end()) {
-        loaded_expert_deque.erase(iteration_map[extra_top_k[i]]);
-        loaded_expert_deque.push_back(extra_top_k[i]);
-        iteration_map[extra_top_k[i]] = --loaded_expert_deque.end();
+    {
+      std::lock_guard<std::mutex> lock(cache_mutex);
+      for (int expert_idx : planned_cache) {
+        auto position = iteration_map.find(expert_idx);
+        if (position == iteration_map.end())
+          continue;
+        loaded_expert_deque.splice(loaded_expert_deque.end(),
+                                   loaded_expert_deque, position->second);
       }
-    }
-
-#ifdef DEBUG
-    auto t1_evict = high_resolution_clock::now();
-#endif
-
-    // Evict experts
-    /// @todo apply multi thread loop
-    while (loaded_expert_deque.size() > 32) {
-      int target_idx;
-      {
-        std::lock_guard<std::mutex> lock(cache_mutex);
-        target_idx = loaded_expert_deque.front();
-        loaded_expert_deque.pop_front();
-        iteration_map.erase(target_idx);
-        need_load[target_idx] = true;
-      }
-
-      context.getWeight(expert_gate_proj_indices[target_idx]).deactivate();
-      context.getWeight(expert_up_proj_indices[target_idx]).deactivate();
-      context.getWeight(expert_down_proj_indices[target_idx]).deactivate();
     }
 
 #ifdef DEBUG

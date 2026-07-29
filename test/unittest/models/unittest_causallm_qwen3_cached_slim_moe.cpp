@@ -17,8 +17,12 @@
 #include <layer.h>
 #include <layer_context.h>
 #include <qwen3_cached_slim_moe_causallm.h>
+#include <qwen_moe_cache_policy.h>
 
+#include <deque>
+#include <list>
 #include <map>
+#include <vector>
 
 namespace {
 
@@ -73,6 +77,41 @@ TEST(Qwen3CachedSlimMoETinyModelTest, GreedyGenerationSelectsArgmaxLogit) {
   auto model = std::make_unique<TinyQwen3CachedSlimMoECausalLM>(
     model_cfg, gen_cfg, nntr_cfg);
   causallm_test::expectGreedyGenerationSelectsArgmax(*model);
+}
+
+TEST(Qwen3CachedSlimMoECacheTest, PlansFinalLruWithoutMappingAllExperts) {
+  const std::list<int> loaded_experts = {0, 1, 2};
+  const std::vector<int> active_experts = {2, 3, 4, 5};
+  const std::deque<int> expert_recency = {5, 3, 1};
+
+  const auto planned_cache =
+    causallm::qwen3_cached_slim_detail::planExpertCache(
+      loaded_experts, active_experts, expert_recency, 3);
+
+  EXPECT_EQ(planned_cache, (std::list<int>{1, 3, 5}));
+}
+
+TEST(Qwen3CachedSlimMoECacheTest, KeepsNewestActiveExpertsWithoutHints) {
+  const std::list<int> loaded_experts = {0, 1};
+  const std::vector<int> active_experts = {1, 2, 3, 4};
+
+  const auto planned_cache =
+    causallm::qwen3_cached_slim_detail::planExpertCache(loaded_experts,
+                                                        active_experts, {}, 3);
+
+  EXPECT_EQ(planned_cache, (std::list<int>{2, 3, 4}));
+}
+
+TEST(Qwen3CachedSlimMoECacheTest, DeduplicatesActiveAndRecencyExperts) {
+  const std::list<int> loaded_experts = {0, 1};
+  const std::vector<int> active_experts = {1, 1, 2, 2};
+  const std::deque<int> expert_recency = {2, 2, 0, 2};
+
+  const auto planned_cache =
+    causallm::qwen3_cached_slim_detail::planExpertCache(
+      loaded_experts, active_experts, expert_recency, 4);
+
+  EXPECT_EQ(planned_cache, (std::list<int>{1, 0, 2}));
 }
 
 } // namespace
