@@ -27,6 +27,7 @@
 #include <atomic>
 #include <cmath>
 #include <exception>
+#include <memory>
 #include <node_exporter.h>
 #include <qwen_moe_cache_policy.h>
 #include <qwen_moe_layer_cached.h>
@@ -131,8 +132,10 @@ CachedSlimMoELayer::CachedSlimMoELayer() :
   LayerImpl(),
   num_experts(0),
   topk(0),
+  prefetch_distance(1),
   moe_props(props::NumExperts(), props::NumExpertsPerToken(),
-            nntrainer::props::Unit(), props::MoEActivation()),
+            nntrainer::props::Unit(), props::MoEActivation(),
+            props::MoEPrefetchDistance()),
   expert_gate_proj_indices({}),
   expert_up_proj_indices({}),
   expert_down_proj_indices({}),
@@ -166,6 +169,9 @@ void CachedSlimMoELayer::finalize(nntrainer::InitLayerContext &context) {
   // 3. Get MoE properties
   num_experts = std::get<props::NumExperts>(moe_props).get();
   topk = std::get<props::NumExpertsPerToken>(moe_props).get();
+  prefetch_distance = std::get<props::MoEPrefetchDistance>(moe_props).get();
+  NNTR_THROW_IF(prefetch_distance > 1, std::invalid_argument)
+    << "moe_prefetch_distance must be 0 or 1";
   const unsigned int intermediate_size =
     std::get<nntrainer::props::Unit>(moe_props).get();
   const unsigned int hidden_size = in_dim.width(); // Feature dimension
@@ -423,12 +429,12 @@ void CachedSlimMoELayer::incremental_forwarding(
     nntrainer::Tensor acti_out_scratch(1, 1, scratch_tokens, intermediate_size,
                                        input.getTensorType());
 
-    int hit_count = 0;
-    int miss_count = 0;
     nntrainer::TensorDim token_step_dim({1, 1, 1, hidden_size},
                                         output.getTensorType());
 
 #ifdef DEBUG
+    int hit_count = 0;
+    int miss_count = 0;
     auto t1_miss = high_resolution_clock::now();
     auto t2_miss = t1_miss;
     auto t1_hit = high_resolution_clock::now();
@@ -493,42 +499,72 @@ void CachedSlimMoELayer::incremental_forwarding(
     // ThreadManager (dot() calls parallel_for), and nesting parallel_for
     // deadlocks because ThreadManager::parallelize() uses a non-recursive
     // execution_mutex_.
-    for (int expert_idx : target_idx_vector) {
+    std::vector<std::unique_ptr<ExpertWeightLease>> active_leases(num_experts);
+    std::vector<bool> activated_during_forward(num_experts, false);
+    auto activate_expert = [&](int expert_idx) {
+      if (!need_load[expert_idx] || active_leases[expert_idx])
+        return false;
+
+      auto weights = std::make_unique<ExpertWeightLease>(
+        context.getWeight(expert_gate_proj_indices[expert_idx]),
+        context.getWeight(expert_up_proj_indices[expert_idx]),
+        context.getWeight(expert_down_proj_indices[expert_idx]));
+      weights->activate();
+
+      if (keep_mapped[expert_idx]) {
+        std::lock_guard<std::mutex> lock(cache_mutex);
+        loaded_expert_deque.push_back(expert_idx);
+        auto cache_position = --loaded_expert_deque.end();
+        bool inserted;
+        try {
+          inserted = iteration_map.emplace(expert_idx, cache_position).second;
+        } catch (...) {
+          loaded_expert_deque.pop_back();
+          throw;
+        }
+        if (!inserted) {
+          loaded_expert_deque.pop_back();
+          throw std::logic_error("expert cache metadata is inconsistent");
+        }
+        need_load[expert_idx] = false;
+        weights->keepMapped();
+      } else {
+        active_leases[expert_idx] = std::move(weights);
+      }
+
+      return true;
+    };
+
+    for (size_t target_pos = 0; target_pos < target_idx_vector.size();
+         ++target_pos) {
+      const int expert_idx = target_idx_vector[target_pos];
       const auto &assignments = expert_assignments[expert_idx];
       nntrainer::Tensor expert_output(
         static_cast<unsigned int>(assignments.size()), 1, 1, hidden_size,
         output.getTensorType());
-      if (need_load[expert_idx]) {
+      if (activate_expert(expert_idx))
+        activated_during_forward[expert_idx] = true;
+
+      if (prefetch_distance == 1) {
+        for (size_t next_pos = target_pos + 1;
+             next_pos < target_idx_vector.size(); ++next_pos) {
+          const int next_expert_idx = target_idx_vector[next_pos];
+          if (activate_expert(next_expert_idx)) {
+            activated_during_forward[next_expert_idx] = true;
+            break;
+          }
+        }
+      }
+
+      if (activated_during_forward[expert_idx]) {
 
 #ifdef DEBUG
         t1_miss = high_resolution_clock::now();
 #endif
 
-        ExpertWeightLease weights(
-          context.getWeight(expert_gate_proj_indices[expert_idx]),
-          context.getWeight(expert_up_proj_indices[expert_idx]),
-          context.getWeight(expert_down_proj_indices[expert_idx]));
-        weights.activate();
-
-        if (keep_mapped[expert_idx]) {
-          std::lock_guard<std::mutex> lock(cache_mutex);
-          loaded_expert_deque.push_back(expert_idx);
-          auto cache_position = --loaded_expert_deque.end();
-          bool inserted;
-          try {
-            inserted = iteration_map.emplace(expert_idx, cache_position).second;
-          } catch (...) {
-            loaded_expert_deque.pop_back();
-            throw;
-          }
-          if (!inserted) {
-            loaded_expert_deque.pop_back();
-            throw std::logic_error("expert cache metadata is inconsistent");
-          }
-          need_load[expert_idx] = false;
-          weights.keepMapped();
-        }
+#ifdef DEBUG
         miss_count += 1;
+#endif
 
         compute_expert_forward(
           input, expert_output, assignments,
@@ -537,8 +573,10 @@ void CachedSlimMoELayer::incremental_forwarding(
           context.getWeight(expert_down_proj_indices[expert_idx]), hidden_size,
           token_input_scratch, gate_out_scratch, up_out_scratch,
           acti_out_scratch);
-        if (!keep_mapped[expert_idx])
-          weights.deactivate();
+        if (active_leases[expert_idx]) {
+          active_leases[expert_idx]->deactivate();
+          active_leases[expert_idx].reset();
+        }
 #ifdef DEBUG
         t2_miss = high_resolution_clock::now();
 #endif
@@ -546,11 +584,8 @@ void CachedSlimMoELayer::incremental_forwarding(
 
 #ifdef DEBUG
         t1_hit = high_resolution_clock::now();
+        hit_count += 1;
 #endif
-        {
-          std::lock_guard<std::mutex> lock(cache_mutex);
-          hit_count += 1;
-        }
 
         compute_expert_forward(
           input, expert_output, assignments,

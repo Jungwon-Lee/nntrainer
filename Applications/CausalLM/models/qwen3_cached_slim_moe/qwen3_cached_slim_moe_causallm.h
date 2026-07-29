@@ -47,6 +47,7 @@ public:
 private:
   unsigned int NUM_EXPERTS;
   unsigned int NUM_EXPERTS_PER_TOK;
+  unsigned int MOE_PREFETCH_DISTANCE;
 };
 }; // namespace causallm
 

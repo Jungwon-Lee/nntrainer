@@ -49,6 +49,21 @@ normalizeSelectedRouterLogits(nntrainer::Tensor &selected_logits);
 
 } // namespace qwen3_cached_slim_detail
 
+namespace props {
+
+/**
+ * @brief Number of expert misses to look ahead for prefetching
+ */
+class MoEPrefetchDistance : public nntrainer::Property<unsigned int> {
+public:
+  MoEPrefetchDistance(unsigned int value = 1) :
+    nntrainer::Property<unsigned int>(value) {}
+  static constexpr const char *key = "moe_prefetch_distance";
+  using prop_tag = nntrainer::uint_prop_tag;
+};
+
+} // namespace props
+
 /**
  * @class   SlimMoELayer
  * @brief   Mixture of Expert Layer
@@ -136,11 +151,13 @@ public:
     "moe_cached_slim"; /**< type of the layer */
 
 private:
-  unsigned int num_experts;      /**< number of experts */
-  unsigned int topk;             /**< number of experts per token, i.e., topk */
-  nntrainer::ActiFunc acti_func; /**< activation function for the expert */
+  unsigned int num_experts; /**< number of experts */
+  unsigned int topk;        /**< number of experts per token, i.e., topk */
+  unsigned int prefetch_distance; /**< number of expert misses to prefetch */
+  nntrainer::ActiFunc acti_func;  /**< activation function for the expert */
   std::tuple<props::NumExperts, props::NumExpertsPerToken,
-             nntrainer::props::Unit, props::MoEActivation>
+             nntrainer::props::Unit, props::MoEActivation,
+             props::MoEPrefetchDistance>
     moe_props;
 
   // weight indeices
