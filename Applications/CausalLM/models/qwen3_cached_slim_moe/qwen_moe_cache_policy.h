@@ -72,11 +72,9 @@ collectRecentExperts(const std::uint32_t *topk_indices,
  * This mirrors the existing cache update policy without requiring all active
  * experts to be mapped first.
  */
-inline std::list<int> planExpertCache(const std::list<int> &loaded_experts,
-                                      const std::vector<int> &active_experts,
-                                      const std::vector<unsigned int>
-                                        &recent_experts,
-                                      std::size_t cache_capacity) {
+inline std::list<int> planExpertCache(
+  const std::list<int> &loaded_experts, const std::vector<int> &active_experts,
+  const std::vector<unsigned int> &recent_experts, std::size_t cache_capacity) {
   std::list<int> planned_cache = loaded_experts;
   std::unordered_map<int, std::list<int>::iterator> positions;
   positions.reserve(loaded_experts.size() + active_experts.size());
