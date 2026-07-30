@@ -603,6 +603,56 @@ void runFp32DifferentialChecks(const DifferentialModel &model) {
 }
 
 /**
+ * @brief Run FP32 flash/reference/HF differential checks for a model
+ */
+void runFp32FlashDifferentialChecks(const DifferentialModel &model) {
+  std::filesystem::path fixture_dir;
+  ReferenceFixture fixture;
+  std::string skip_reason;
+  if (!tryLoadFixture(model, fixture_dir, fixture, skip_reason))
+    GTEST_SKIP() << skip_reason;
+
+  auto fc = loadFixtureConfigs(fixture_dir);
+  auto flash_nntr_cfg = fc.nntr_cfg;
+  auto reference_nntr_cfg = fc.nntr_cfg;
+  flash_nntr_cfg["use_flash_attention"] = true;
+  reference_nntr_cfg["use_flash_attention"] = false;
+
+  auto flash = model.make_model(fc.model_cfg, fc.gen_cfg, flash_nntr_cfg);
+  flash->initializeModel();
+  flash->loadWeight(fc.weight_path.string());
+
+  auto reference =
+    model.make_model(fc.model_cfg, fc.gen_cfg, reference_nntr_cfg);
+  reference->initializeModel();
+  reference->loadWeight(fc.weight_path.string());
+
+  std::vector<float> flash_logits;
+  std::vector<float> reference_logits;
+  ASSERT_NO_THROW(flash_logits =
+                    flash->prefillLogitsFromIds(fixture.input_ids));
+  ASSERT_NO_THROW(reference_logits =
+                    reference->prefillLogitsFromIds(fixture.input_ids));
+
+  expectLogitsNear(flash_logits, fixture.reference_logits,
+                   fixture.logits_atol_fp32);
+  expectLogitsNear(reference_logits, fixture.reference_logits,
+                   fixture.logits_atol_fp32);
+  expectLogitsNear(flash_logits, reference_logits, fixture.logits_atol_fp32);
+
+  auto flash_generation =
+    model.make_model(fc.model_cfg, fc.gen_cfg, flash_nntr_cfg);
+  flash_generation->initializeModel();
+  flash_generation->loadWeight(fc.weight_path.string());
+
+  std::vector<unsigned int> got_tokens;
+  ASSERT_NO_THROW(got_tokens = flash_generation->greedyGenerateFromIds(
+                    fixture.input_ids, fixture.reference_tokens.size()));
+  expectTokenPrefixMatch(got_tokens, fixture.reference_tokens,
+                         fixture.reference_tokens.size());
+}
+
+/**
  * @brief Run the Q4_0 differential checks for a model against its fixture
  */
 void runQ40DifferentialChecks(const DifferentialModel &model) {

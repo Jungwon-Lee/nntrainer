@@ -37,11 +37,12 @@
 // -march=...+fp16): hgemm.h and neon_impl.h declare bare __fp16 signatures,
 // which is not a usable type on ARM targets built without that extension
 // (e.g. Tizen armv7l/aarch64, which do not support fp16 NEON).
-#if !defined(__x86_64__) && !defined(__i386__) && defined(__ARM_NEON) &&       \
+#if defined(__ARM_NEON) &&                                                     \
   (defined(ENABLE_FP16) || defined(__ARM_FEATURE_FP16_VECTOR_ARITHMETIC))
 #include <hgemm.h>     // hgemm_f16xf16_f32_fmlal (QK, FMLAL)
 #include <neon_impl.h> // nntrainer::neon::hgemm_f16xf16_f16 (AV) + exp_ps
-#elif defined(__x86_64__) || defined(__i386__)
+#elif defined(__x86_64__) || defined(__i386__) || defined(_M_X64) ||           \
+  defined(_M_IX86)
 #include <avx2_impl.h> // nntrainer::avx2::hsgemm_fp16bits_avx2 (QK + AV)
 #endif
 

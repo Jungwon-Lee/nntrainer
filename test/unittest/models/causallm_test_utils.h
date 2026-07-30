@@ -634,6 +634,17 @@ struct DifferentialModel {
 void runFp32DifferentialChecks(const DifferentialModel &model);
 
 /**
+ * @brief Compare FP32 flash attention with both reference attention and HF
+ *
+ * Runs the same fixture once with flash attention enabled and once with it
+ * disabled. Verifies both logits against HF, compares them directly, and
+ * checks greedy tokens from the flash path.
+ *
+ * @param model Differential model descriptor
+ */
+void runFp32FlashDifferentialChecks(const DifferentialModel &model);
+
+/**
  * @brief Run the Q4_0 differential checks for a model against its fixture
  *
  * Skips when the fixture or the nntr_quantize binary (NNTR_QUANTIZE_BIN) are

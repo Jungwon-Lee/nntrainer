@@ -50,6 +50,20 @@ causallm_test::DifferentialModel qwen3Model() {
 }
 
 /**
+ * @brief Differential model descriptor that exercises flash attention
+ */
+causallm_test::DifferentialModel qwen3FlashModel() {
+  return {
+    "qwen3_flash_tiny",
+    [](causallm::json &cfg, causallm::json &gen_cfg, causallm::json &nntr_cfg) {
+      return std::make_unique<
+        causallm_test::CausalLMTestAdapter<causallm::Qwen3CausalLM>>(
+        cfg, gen_cfg, nntr_cfg);
+    },
+  };
+}
+
+/**
  * @brief FP32 prefill logits and greedy tokens match the HF reference
  */
 TEST(Qwen3DifferentialTest, FP32MatchesHFReference) {
@@ -61,6 +75,13 @@ TEST(Qwen3DifferentialTest, FP32MatchesHFReference) {
  */
 TEST(Qwen3DifferentialTest, Q40CloseToFP32Reference) {
   causallm_test::runQ40DifferentialChecks(qwen3Model());
+}
+
+/**
+ * @brief A 32-token prefill takes the flash path and matches the HF reference
+ */
+TEST(Qwen3FlashDifferentialTest, FP32MatchesHFReference) {
+  causallm_test::runFp32FlashDifferentialChecks(qwen3FlashModel());
 }
 
 } // namespace
