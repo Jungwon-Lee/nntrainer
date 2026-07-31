@@ -17,10 +17,12 @@ namespace causallm {
 /**
  * @brief Compute one routed SmallThinker expert token.
  *
- * The FP32 decode path evaluates the dense gate first and, when at least half
- * of the ReLU gate outputs are zero, computes only active up-projection
- * neurons and accumulates only their down-projection rows. Other data types
- * and dense activation patterns use the regular dense tensor kernels.
+ * The decode path evaluates the dense gate first and, when at least half of
+ * the ReLU gate outputs are zero, computes only active up-projection neurons.
+ * FP32 experts also accumulate only active down-projection rows. ARM Q4_0
+ * experts use a gate-masked packed GEMV for the up projection and the
+ * zero-aware Q4_0 GEMV for the down projection. Other data types and dense
+ * activation patterns use the regular dense tensor kernels.
  *
  * @param input Single-token expert input, shape [1, 1, 1, hidden_size].
  * @param output Single-token expert output.

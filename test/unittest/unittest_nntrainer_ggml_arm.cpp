@@ -560,6 +560,16 @@ TEST(nntrainer_ggml_arm, q8_0_subblock_mask_threshold) {
   EXPECT_EQ(masks[1], 0x7);
 }
 
+TEST(nntrainer_ggml_arm, output_masked_q4_0_cost_threshold) {
+  const std::vector<uint8_t> one_active_per_tile = {1, 0, 0, 0, 0, 1, 0, 0};
+  const std::vector<uint8_t> two_active_per_tile = {1, 0, 1, 0, 0, 1, 0, 1};
+
+  EXPECT_TRUE(nntr_should_use_output_masked_q4_0(one_active_per_tile.data(),
+                                                 one_active_per_tile.size()));
+  EXPECT_FALSE(nntr_should_use_output_masked_q4_0(two_active_per_tile.data(),
+                                                  two_active_per_tile.size()));
+}
+
 TEST(nntrainer_ggml_arm, sparse_gemv_q4_0_4x8_matches_dense) {
   nntr_ggml_init();
 
@@ -594,6 +604,31 @@ TEST(nntrainer_ggml_arm, sparse_gemv_q4_0_4x8_matches_dense) {
 
   for (unsigned int i = 0; i < N; ++i)
     EXPECT_FLOAT_EQ(sparse[i], dense[i]);
+
+  const std::vector<uint8_t> output_mask = {0, 0, 0, 0, 1, 0, 1, 0, 1, 1, 1, 0};
+  std::vector<float> output_masked(N);
+  nntr_gemv_q4_0_4x8_q8_0_output_masked(K, output_masked.data(), N, B.data(),
+                                        QA.data(), output_mask.data(), 1, N);
+  for (unsigned int i = 0; i < N; ++i) {
+    if (output_mask[i] != 0)
+      EXPECT_NEAR(output_masked[i], dense[i], 1e-5f);
+    else
+      EXPECT_FLOAT_EQ(output_masked[i], 0.0f);
+  }
+
+  std::vector<float> backend_masked(N);
+  ASSERT_TRUE(nntrainer::__ggml_q4_0_4x8_q8_0_GEMV_MASKED(
+    N, K, A.data(), B.data(), backend_masked.data(), output_mask.data()));
+  for (unsigned int i = 0; i < N; ++i)
+    EXPECT_NEAR(backend_masked[i], output_masked[i], 1e-5f);
+
+  const std::vector<uint8_t> unprofitable_mask = {1, 1, 0, 0, 1, 1,
+                                                  0, 0, 1, 1, 0, 0};
+  std::fill(backend_masked.begin(), backend_masked.end(), 123.0f);
+  EXPECT_FALSE(nntrainer::__ggml_q4_0_4x8_q8_0_GEMV_MASKED(
+    N, K, A.data(), B.data(), backend_masked.data(), unprofitable_mask.data()));
+  for (const float value : backend_masked)
+    EXPECT_FLOAT_EQ(value, 123.0f);
 }
 
 TEST(nntrainer_ggml_arm, DISABLED_quantize_row_q8_0_benchmark) {

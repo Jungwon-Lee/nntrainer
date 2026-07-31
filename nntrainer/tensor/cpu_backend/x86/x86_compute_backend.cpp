@@ -340,6 +340,12 @@ void gemm_q4_0(const unsigned int M, std::vector<unsigned int> Ns,
   throw std::runtime_error("Error: NYI for gemm_q4_0 with vectored weights");
 }
 
+bool gemv_q4_0_masked(const unsigned int N, const unsigned int K,
+                      const float *A, const void *B, float *C,
+                      const uint8_t *output_mask) {
+  return false;
+}
+
 void gemm_q4_K(const unsigned int M, const unsigned int N, const unsigned int K,
                const float *A, const unsigned int lda, const void *B,
                const unsigned int ldb, float *C, const unsigned int ldc) {

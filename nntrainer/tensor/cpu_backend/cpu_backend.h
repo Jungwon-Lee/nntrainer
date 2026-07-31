@@ -1096,6 +1096,17 @@ extern void gemm_q4_0(const unsigned int M, const unsigned int N,
                       const unsigned int ldc);
 
 /**
+ * @brief Q4_0 GEMV that computes only outputs selected by output_mask.
+ *
+ * @return true when a masked backend kernel was used; otherwise C is untouched.
+ */
+namespace nntrainer {
+bool gemv_q4_0_masked(const unsigned int N, const unsigned int K,
+                      const float *A, const void *B, float *C,
+                      const uint8_t *output_mask);
+}
+
+/**
  * @brief q4_K GEMM : A (M,K) * W.T (N,K) = O (M,N)
  *
  * @param M Original row size of output

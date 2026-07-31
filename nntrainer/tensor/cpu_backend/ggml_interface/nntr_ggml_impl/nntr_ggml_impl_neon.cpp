@@ -239,6 +239,118 @@ bool nntr_gemv_q4_0_4x8_q8_0_sparse_supported() {
 #endif
 }
 
+void nntr_gemv_q4_0_4x8_q8_0_output_masked(
+  int n, float *__restrict s, size_t bs, const void *__restrict vx,
+  const void *__restrict vy, const uint8_t *__restrict output_mask, int nr,
+  int nc) {
+#if defined(__ARM_FEATURE_DOTPROD)
+  const int nb = n / QK8_0;
+  constexpr int ncols_interleaved = 4;
+
+  assert(n % QK8_0 == 0);
+  assert(nc % ncols_interleaved == 0);
+  assert(nr == 1);
+
+  const block_q8_0 *a_ptr = static_cast<const block_q8_0 *>(vy);
+  for (int c = 0; c < nc; c += ncols_interleaved) {
+    const block_q4_0x4 *b_ptr =
+      static_cast<const block_q4_0x4 *>(vx) + (c / ncols_interleaved) * nb;
+    const int active_count = (output_mask[c] != 0) + (output_mask[c + 1] != 0) +
+                             (output_mask[c + 2] != 0) +
+                             (output_mask[c + 3] != 0);
+
+    if (active_count == 0) {
+      vst1q_f32(s + c, vdupq_n_f32(0));
+      continue;
+    }
+
+    if (active_count >= 2) {
+      float32x4_t acc = vdupq_n_f32(0);
+      for (int b = 0; b < nb; ++b) {
+        const int8x16_t b0 =
+          vld1q_s8(reinterpret_cast<const int8_t *>(b_ptr[b].qs));
+        const int8x16_t b1 =
+          vld1q_s8(reinterpret_cast<const int8_t *>(b_ptr[b].qs) + 16);
+        const int8x16_t b2 =
+          vld1q_s8(reinterpret_cast<const int8_t *>(b_ptr[b].qs) + 32);
+        const int8x16_t b3 =
+          vld1q_s8(reinterpret_cast<const int8_t *>(b_ptr[b].qs) + 48);
+        const int8x16_t a0 = vreinterpretq_s8_s64(
+          vld1q_dup_s64(reinterpret_cast<const int64_t *>(a_ptr[b].qs)));
+        const int8x16_t a1 = vreinterpretq_s8_s64(
+          vld1q_dup_s64(reinterpret_cast<const int64_t *>(a_ptr[b].qs) + 1));
+        const int8x16_t a2 = vreinterpretq_s8_s64(
+          vld1q_dup_s64(reinterpret_cast<const int64_t *>(a_ptr[b].qs) + 2));
+        const int8x16_t a3 = vreinterpretq_s8_s64(
+          vld1q_dup_s64(reinterpret_cast<const int64_t *>(a_ptr[b].qs) + 3));
+
+        int32x4_t ret0 = vdupq_n_s32(0);
+        int32x4_t ret1 = vdupq_n_s32(0);
+        ret0 = vdotq_s32(ret0, b0 << 4, a0);
+        ret1 = vdotq_s32(ret1, b1 << 4, a0);
+        ret0 = vdotq_s32(ret0, b2 << 4, a1);
+        ret1 = vdotq_s32(ret1, b3 << 4, a1);
+        ret0 = vdotq_s32(ret0, b0 & 0xf0U, a2);
+        ret1 = vdotq_s32(ret1, b1 & 0xf0U, a2);
+        ret0 = vdotq_s32(ret0, b2 & 0xf0U, a3);
+        ret1 = vdotq_s32(ret1, b3 & 0xf0U, a3);
+
+        const int32x4_t ret = vpaddq_s32(ret0, ret1);
+        const float16x4_t bd =
+          vld1_f16(reinterpret_cast<const __fp16 *>(b_ptr[b].d));
+        const float16x4_t ad =
+          vld1_dup_f16(reinterpret_cast<const __fp16 *>(&a_ptr[b].d));
+        acc = vfmaq_f32(acc, vcvtq_n_f32_s32(ret, 4),
+                        vmulq_f32(vcvt_f32_f16(ad), vcvt_f32_f16(bd)));
+      }
+      vst1q_f32(s + c, acc);
+      for (int lane = 0; lane < ncols_interleaved; ++lane) {
+        if (output_mask[c + lane] == 0)
+          s[c + lane] = 0.0f;
+      }
+      continue;
+    }
+
+    for (int lane = 0; lane < ncols_interleaved; ++lane) {
+      if (output_mask[c + lane] == 0) {
+        s[c + lane] = 0.0f;
+        continue;
+      }
+
+      float acc = 0.0f;
+      for (int b = 0; b < nb; ++b) {
+        int32_t sumi = 0;
+        for (int half = 0; half < 2; ++half) {
+          const int8x8_t q =
+            vld1_s8(reinterpret_cast<const int8_t *>(b_ptr[b].qs) +
+                    half * ncols_interleaved * 8 + lane * 8);
+          const int8x8_t q_low = vshl_n_s8(q, 4);
+          const int8x8_t q_high =
+            vand_s8(q, vreinterpret_s8_u8(vdup_n_u8(0xf0U)));
+          const int8x8_t a_low = vld1_s8(a_ptr[b].qs + half * 8);
+          const int8x8_t a_high = vld1_s8(a_ptr[b].qs + (half + 2) * 8);
+          const int32x4_t dot =
+            vdotq_s32(vdupq_n_s32(0), vcombine_s8(q_low, q_high),
+                      vcombine_s8(a_low, a_high));
+          sumi += vaddvq_s32(dot);
+        }
+
+        const float scale =
+          nntr_fp16_to_fp32(b_ptr[b].d[lane]) * nntr_fp16_to_fp32(a_ptr[b].d);
+        acc = fmaf(static_cast<float>(sumi) / 16.0f, scale, acc);
+      }
+      s[c + lane] = acc;
+    }
+  }
+#else
+  nntr_gemv_q4_0_4x8_q8_0(n, s, bs, vx, vy, nr, nc);
+  for (int c = 0; c < nc; ++c) {
+    if (output_mask[c] == 0)
+      s[c] = 0.0f;
+  }
+#endif
+}
+
 #ifdef ENABLE_FP16
 // FP16-output variant of nntr_gemv_q4_0_4x8_q8_0. Same kernel body, but the
 // final store fuses an fcvtn (FP32 4-lane -> FP16 4-lane) and writes a 64-bit

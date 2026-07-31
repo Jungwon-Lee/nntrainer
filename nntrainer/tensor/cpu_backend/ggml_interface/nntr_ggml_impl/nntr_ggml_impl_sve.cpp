@@ -116,6 +116,17 @@ void nntr_gemv_q4_0_4x8_q8_0_sparse(int n, float *__restrict s, size_t bs,
 
 bool nntr_gemv_q4_0_4x8_q8_0_sparse_supported() { return false; }
 
+void nntr_gemv_q4_0_4x8_q8_0_output_masked(
+  int n, float *__restrict s, size_t bs, const void *__restrict vx,
+  const void *__restrict vy, const uint8_t *__restrict output_mask, int nr,
+  int nc) {
+  nntr_gemv_q4_0_4x8_q8_0(n, s, bs, vx, vy, nr, nc);
+  for (int c = 0; c < nc; ++c) {
+    if (output_mask[c] == 0)
+      s[c] = 0.0f;
+  }
+}
+
 void nntr_gemm_q4_0_4x8_q8_0(int n, float *__restrict s, size_t bs,
                              const void *__restrict vx,
                              const void *__restrict vy, int nr, int nc) {

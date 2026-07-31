@@ -393,6 +393,12 @@ void gemm_q4_0(const unsigned int M, std::vector<unsigned int> Ns,
   return __ggml_q4_0_4x8_q8_0_GEMM<float>(M, Ns, K, A, lda, Bs, ldbs, Cs, ldcs);
 }
 
+bool gemv_q4_0_masked(const unsigned int N, const unsigned int K,
+                      const float *A, const void *B, float *C,
+                      const uint8_t *output_mask) {
+  return __ggml_q4_0_4x8_q8_0_GEMV_MASKED(N, K, A, B, C, output_mask);
+}
+
 void gemm_q4_K(const unsigned int M, const unsigned int N, const unsigned int K,
                const float *A, const unsigned int lda, const void *B,
                const unsigned int ldb, float *C, const unsigned int ldc) {

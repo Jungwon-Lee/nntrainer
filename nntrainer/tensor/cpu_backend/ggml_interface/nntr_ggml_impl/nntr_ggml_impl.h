@@ -61,6 +61,45 @@ void nntr_gemv_q4_0_4x8_q8_0_sparse(int n, float *__restrict s, size_t bs,
 
 bool nntr_gemv_q4_0_4x8_q8_0_sparse_supported();
 
+void nntr_gemv_q4_0_4x8_q8_0_output_masked(
+  int n, float *__restrict s, size_t bs, const void *__restrict vx,
+  const void *__restrict vy, const uint8_t *__restrict output_mask, int nr,
+  int nc);
+
+/**
+ * @brief Decide whether an output-masked Q4_0x4 GEMV is likely beneficial.
+ *
+ * The ARM kernel skips a four-output tile with no active lanes and uses a
+ * single-lane path for one active lane. Two or more active lanes use the dense
+ * SIMD path. The weights below conservatively model the measured relative cost
+ * of those paths and reject masks whose tile layout would only add dispatch
+ * overhead.
+ */
+static inline bool
+nntr_should_use_output_masked_q4_0(const uint8_t *output_mask, size_t size) {
+  constexpr size_t tile_size = 4;
+  constexpr size_t dense_cost = 20;
+  constexpr size_t single_lane_cost = 18;
+  constexpr size_t masked_dense_cost = 21;
+
+  if (size % tile_size != 0)
+    return false;
+
+  size_t estimated_cost = 0;
+  for (size_t offset = 0; offset < size; offset += tile_size) {
+    unsigned int active_count = 0;
+    for (size_t lane = 0; lane < tile_size; ++lane)
+      active_count += output_mask[offset + lane] != 0;
+
+    if (active_count == 1)
+      estimated_cost += single_lane_cost;
+    else if (active_count >= 2)
+      estimated_cost += masked_dense_cost;
+  }
+
+  return estimated_cost < dense_cost * (size / tile_size);
+}
+
 void nntr_gemv_q4_0_8x8_q8_0(int n, float *__restrict s, size_t bs,
                              const void *__restrict vx,
                              const void *__restrict vy, int nr, int nc);

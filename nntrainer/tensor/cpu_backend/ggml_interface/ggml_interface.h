@@ -163,6 +163,16 @@ void __ggml_q4_0_4x8_q8_0_GEMM(const unsigned int M, const unsigned int N,
                                const unsigned int ldc);
 
 /**
+ * @brief Compute a single Q4_0x4 GEMV while skipping inactive outputs.
+ *
+ * @return true when the masked ARM kernel was used; otherwise C is untouched.
+ */
+bool __ggml_q4_0_4x8_q8_0_GEMV_MASKED(const unsigned int N,
+                                      const unsigned int K, const float *A,
+                                      const void *B, float *C,
+                                      const uint8_t *output_mask);
+
+/**
  * @brief A(M, K) * W.T(N, K) = (M, N)
  *
  * @param M as descripted above
