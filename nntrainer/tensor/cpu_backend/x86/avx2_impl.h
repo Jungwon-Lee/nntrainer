@@ -51,6 +51,24 @@ void hsgemm_fp16bits_avx2(unsigned int M, unsigned int N, unsigned int K,
                           const uint16_t *B, unsigned int ldb, bool TransB,
                           float *C, unsigned int ldc);
 
+/**
+ * @brief Apply one online-softmax tile update with AVX2.
+ *
+ * Finds the tile maximum, replaces each score with
+ * exp(score - new_max), and returns their sum. Masked -INFINITY scores remain
+ * exactly zero.
+ *
+ * @param[in,out] scores FP32 scores, replaced by exponentials
+ * @param[in] size number of scores
+ * @param[in] previous_max running maximum before this tile
+ * @param[out] new_max updated running maximum
+ * @param[out] rescale exp(previous_max - new_max)
+ * @return sum of the exponentials written to scores
+ */
+float flash_softmax_tile_avx2(float *scores, unsigned int size,
+                              float previous_max, float *new_max,
+                              float *rescale);
+
 #ifdef ENABLE_FP16
 /**
  * @brief Converts half-precision floating point values to single-precision

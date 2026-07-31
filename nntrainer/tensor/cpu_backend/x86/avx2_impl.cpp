@@ -1332,6 +1332,57 @@ static inline __m256 rcp_ps(__m256 x) {
   return _mm256_mul_ps(rcp, _mm256_fnmadd_ps(x, rcp, two));
 }
 
+float flash_softmax_tile_avx2(float *scores, unsigned int size,
+                              float previous_max, float *new_max,
+                              float *rescale) {
+  __m256 vmax = _mm256_set1_ps(-3.0e38f);
+  unsigned int k = 0;
+  for (; k + 8 <= size; k += 8)
+    vmax = _mm256_max_ps(vmax, _mm256_loadu_ps(scores + k));
+
+  __m128 vmax_low = _mm256_castps256_ps128(vmax);
+  __m128 vmax_high = _mm256_extractf128_ps(vmax, 1);
+  __m128 vmax128 = _mm_max_ps(vmax_low, vmax_high);
+  vmax128 = _mm_max_ps(vmax128, _mm_movehl_ps(vmax128, vmax128));
+  vmax128 = _mm_max_ss(vmax128, _mm_shuffle_ps(vmax128, vmax128, 1));
+  float block_max = _mm_cvtss_f32(vmax128);
+  for (; k < size; ++k)
+    block_max = std::max(block_max, scores[k]);
+
+  *new_max = std::max(previous_max, block_max);
+  *rescale = std::exp(previous_max - *new_max);
+
+  const __m256 vnew_max = _mm256_set1_ps(*new_max);
+  const __m256 vnegative_infinity =
+    _mm256_set1_ps(-std::numeric_limits<float>::infinity());
+  const __m256 vzero = _mm256_setzero_ps();
+  __m256 vsum = vzero;
+  k = 0;
+  for (; k + 8 <= size; k += 8) {
+    const __m256 score = _mm256_loadu_ps(scores + k);
+    __m256 exponent = exp256_ps(_mm256_sub_ps(score, vnew_max));
+    const __m256 masked = _mm256_cmp_ps(score, vnegative_infinity, _CMP_EQ_OQ);
+    exponent = _mm256_blendv_ps(exponent, vzero, masked);
+    _mm256_storeu_ps(scores + k, exponent);
+    vsum = _mm256_add_ps(vsum, exponent);
+  }
+
+  __m128 vsum_low = _mm256_castps256_ps128(vsum);
+  __m128 vsum_high = _mm256_extractf128_ps(vsum, 1);
+  __m128 vsum128 = _mm_add_ps(vsum_low, vsum_high);
+  vsum128 = _mm_hadd_ps(vsum128, vsum128);
+  vsum128 = _mm_hadd_ps(vsum128, vsum128);
+  float sum = _mm_cvtss_f32(vsum128);
+  for (; k < size; ++k) {
+    const float exponent = std::isinf(scores[k]) && scores[k] < 0.0f
+                             ? 0.0f
+                             : std::exp(scores[k] - *new_max);
+    scores[k] = exponent;
+    sum += exponent;
+  }
+  return sum;
+}
+
 static void softmax_row_inplace(float *qk_out, size_t start_row, size_t end_row,
                                 size_t num_heads) {
   const size_t vec_end = num_heads & ~((size_t)7); // floor(num_heads / 8) * 8
