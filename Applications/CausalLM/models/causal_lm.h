@@ -187,6 +187,10 @@ protected:
   std::atomic<bool> stop_prepared_for_run_{false};
 
   std::string LMHEAD_DTYPE; /** embedding dtype */
+  bool SPARSE_LMHEAD;
+  unsigned int PREDICTOR_UNIT;
+  float LMHEAD_PREDICTOR_THRESHOLD;
+  unsigned int LMHEAD_PREDICTOR_TOPK_FLOOR;
   std::vector<unsigned int> EOS_TOKEN_ID;
   unsigned int BOS_TOKEN_ID;
   float TEMPERATURE;

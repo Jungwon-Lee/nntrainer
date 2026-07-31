@@ -38,6 +38,7 @@
 #include <lm_head.h>
 #include <mha_core.h>
 #include <nntrainer_error.h>
+#include <sparse_lm_head.h>
 #include <tensor.h>
 
 #include <causal_lm.h>
@@ -93,6 +94,21 @@ void CausalLM::setupParameters(json &cfg, json &generation_cfg,
   SKIP_PREFILL = nntr_cfg.contains("skip_prefill")
                    ? nntr_cfg["skip_prefill"].get<bool>()
                    : false;
+
+  SPARSE_LMHEAD = nntr_cfg.contains("sparse_lmhead")
+                    ? nntr_cfg["sparse_lmhead"].get<bool>()
+                    : false;
+  PREDICTOR_UNIT = nntr_cfg.contains("predictor_unit")
+                     ? nntr_cfg["predictor_unit"].get<unsigned int>()
+                     : 128u;
+  LMHEAD_PREDICTOR_THRESHOLD =
+    nntr_cfg.contains("lmhead_predictor_threshold")
+      ? nntr_cfg["lmhead_predictor_threshold"].get<float>()
+      : -2.0f;
+  LMHEAD_PREDICTOR_TOPK_FLOOR =
+    nntr_cfg.contains("lmhead_predictor_topk_floor")
+      ? nntr_cfg["lmhead_predictor_topk_floor"].get<unsigned int>()
+      : 0u;
 
   USE_KVCACHE = false;
   PRE_COMPUTED_CACHE_PATH = "";
@@ -225,8 +241,9 @@ std::pair<Tensor, Tensor> CausalLM::constructModel() {
   // base transformer (input, output_norm)
   auto [x, h] = Transformer::constructModel();
 
-  const std::string lmhead_type =
-    TIE_WORD_EMBEDDINGS ? "tie_word_embeddings" : "lm_head";
+  const std::string lmhead_type = SPARSE_LMHEAD ? SparseLmHeadLayer::type
+                                  : TIE_WORD_EMBEDDINGS ? "tie_word_embeddings"
+                                                        : LmHeadLayer::type;
 
   std::vector<std::string> lmhead_prop = {
     withKey("name", "output_of_causallm"),
@@ -235,8 +252,15 @@ std::pair<Tensor, Tensor> CausalLM::constructModel() {
     withKey("weight_dtype", LMHEAD_DTYPE),
   };
 
-  if (TIE_WORD_EMBEDDINGS)
+  if (TIE_WORD_EMBEDDINGS && !SPARSE_LMHEAD)
     lmhead_prop.emplace_back(withKey("shared_from", "embedding0"));
+  if (SPARSE_LMHEAD) {
+    lmhead_prop.emplace_back(withKey("predictor_unit", PREDICTOR_UNIT));
+    lmhead_prop.emplace_back(
+      withKey("predictor_threshold", LMHEAD_PREDICTOR_THRESHOLD));
+    lmhead_prop.emplace_back(
+      withKey("predictor_topk_floor", LMHEAD_PREDICTOR_TOPK_FLOOR));
+  }
 
   LayerHandle lmhead(createLayer(lmhead_type, lmhead_prop));
   Tensor y = lmhead(h);
@@ -356,6 +380,13 @@ void CausalLM::registerCustomLayers() {
   } catch (std::invalid_argument &e) {
     std::cerr << "failed to register factory, reason: " << e.what()
               << std::endl;
+  }
+  try {
+    app_context->registerFactory(
+      nntrainer::createLayer<causallm::SparseLmHeadLayer>);
+  } catch (std::invalid_argument &e) {
+    std::cerr << "failed to register sparse lm head factory, reason: "
+              << e.what() << std::endl;
   }
 }
 
