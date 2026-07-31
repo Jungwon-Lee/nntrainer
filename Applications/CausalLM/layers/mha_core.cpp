@@ -1141,13 +1141,6 @@ void MHACoreLayer::gemm_attention(nntrainer::Tensor &query_step,
               s[k] = -INFINITY;
           }
 
-          float nm;
-          float c;
-          float bs;
-#if defined(CAUSALLM_FLASH_X86_BACKEND)
-          bs =
-            nntrainer::avx2::flash_softmax_tile_avx2(s, bk, mrow[i], &nm, &c);
-#else
           float bm = -3.0e38f;
 #if defined(CAUSALLM_FLASH_ARM_FP16_BACKEND)
           {
@@ -1163,9 +1156,9 @@ void MHACoreLayer::gemm_attention(nntrainer::Tensor &query_step,
           for (unsigned int k = 0; k < bk; ++k)
             bm = std::max(bm, s[k]);
 #endif
-          nm = std::max(mrow[i], bm);
-          c = std::exp(mrow[i] - nm);
-          bs = 0.0f;
+          const float nm = std::max(mrow[i], bm);
+          const float c = std::exp(mrow[i] - nm);
+          float bs = 0.0f;
 #if defined(CAUSALLM_FLASH_ARM_FP16_BACKEND)
           if (q_fp16) {
             uint16_t *sp16 = Sp16.data() + (size_t)i * bk;
@@ -1204,7 +1197,6 @@ void MHACoreLayer::gemm_attention(nntrainer::Tensor &query_step,
             s[k] = e;
             bs += e;
           }
-#endif
 #endif
           lrow[i] = lrow[i] * c + bs;
           mrow[i] = nm;
