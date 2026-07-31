@@ -63,6 +63,45 @@ bool __ggml_q4_0_4x8_q8_0_GEMV_MASKED(const unsigned int N,
   return true;
 }
 
+bool __ggml_q4_0_8x8_q8_0_GEMV_MASKED(const unsigned int N,
+                                      const unsigned int K, const float *A,
+                                      const void *B, float *C,
+                                      const uint8_t *output_mask) {
+  if (!nntr_gemv_q4_0_8x8_q8_0_masked_supported() || N % 8 != 0 ||
+      K % QK8_0 != 0)
+    return false;
+
+  const size_t active_count = std::count_if(
+    output_mask, output_mask + N, [](uint8_t active) { return active != 0; });
+  if (active_count * 2 > N)
+    return false;
+  if (!nntr_should_use_output_masked_q4_0_8x8(output_mask, N))
+    return false;
+  if (active_count == 0) {
+    std::fill(C, C + N, 0.0f);
+    return true;
+  }
+
+  const unsigned int blocks_per_row = K / QK8_0;
+  std::vector<char> QA(sizeof(block_q8_0) * blocks_per_row);
+  nntr_quantize_row_q8_0(A, QA.data(), K);
+
+  constexpr unsigned int chunk_size = 16;
+  const unsigned int loop = (N + chunk_size - 1) / chunk_size;
+  const unsigned int B_step = sizeof(block_q4_0) * (K / QK4_0);
+  const char *qa_data = QA.data();
+  auto &tm = ThreadManager::Global();
+  tm.parallel_for(0, loop, [=](size_t idx) {
+    const unsigned int start = chunk_size * idx;
+    const unsigned int end =
+      std::min(chunk_size * (idx + 1), static_cast<size_t>(N));
+    nntr_gemv_q4_0_8x8_q8_0_output_masked(
+      K, C + start, N, static_cast<const char *>(B) + start * B_step, qa_data,
+      output_mask + start, 1, end - start);
+  });
+  return true;
+}
+
 template <>
 void __ggml_q4_0_4x8_q8_0_GEMM(const unsigned int M, const unsigned int N,
                                const unsigned int K, const float *A,

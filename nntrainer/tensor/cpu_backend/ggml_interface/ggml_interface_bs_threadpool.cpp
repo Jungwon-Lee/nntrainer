@@ -113,6 +113,46 @@ bool __ggml_q4_0_4x8_q8_0_GEMV_MASKED(const unsigned int N,
   return true;
 }
 
+bool __ggml_q4_0_8x8_q8_0_GEMV_MASKED(const unsigned int N,
+                                      const unsigned int K, const float *A,
+                                      const void *B, float *C,
+                                      const uint8_t *output_mask) {
+  if (!nntr_gemv_q4_0_8x8_q8_0_masked_supported() || N % 8 != 0 ||
+      K % QK8_0 != 0)
+    return false;
+
+  const size_t active_count = std::count_if(
+    output_mask, output_mask + N, [](uint8_t active) { return active != 0; });
+  if (active_count * 2 > N)
+    return false;
+  if (!nntr_should_use_output_masked_q4_0_8x8(output_mask, N))
+    return false;
+  if (active_count == 0) {
+    std::fill(C, C + N, 0.0f);
+    return true;
+  }
+
+  const unsigned int blocks_per_row = K / QK8_0;
+  std::vector<char> QA(sizeof(block_q8_0) * blocks_per_row);
+  nntr_quantize_row_q8_0(A, QA.data(), K);
+
+  constexpr unsigned int tile_size = 8;
+  const unsigned int B_step = sizeof(block_q4_0) * (K / QK4_0);
+  const char *qa_data = QA.data();
+  auto &tm = ThreadManager::Global();
+  const unsigned int thread_num = tm.getComputeThreadCount();
+  tm.parallel_for(0, thread_num, [=](size_t thread_idx) {
+    unsigned int start = (thread_idx * N) / thread_num;
+    unsigned int end = ((thread_idx + 1) * N) / thread_num;
+    start = (start + tile_size - 1) / tile_size * tile_size;
+    end = (end + tile_size - 1) / tile_size * tile_size;
+    nntr_gemv_q4_0_8x8_q8_0_output_masked(
+      K, C + start, N, static_cast<const char *>(B) + start * B_step, qa_data,
+      output_mask + start, 1, end - start);
+  });
+  return true;
+}
+
 static inline void __ggml_q4_0_4x8_q8_0_GEMM_GEMM(
   const unsigned int M, const unsigned int N, const unsigned int K,
   const float *A, const unsigned int lda, const void *B, const unsigned int ldb,

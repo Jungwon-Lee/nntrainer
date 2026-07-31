@@ -15,6 +15,7 @@
 #include <fallback_internal.h>
 #include <fp16.h>
 #include <gtest/gtest.h>
+#include <nntr_ggml_impl.h>
 #include <numeric>
 #include <random>
 #include <vector>
@@ -445,6 +446,62 @@ TEST(nntrainer_cpu_backend_standalone, q4_0_repack_unpack_dequantize) {
       << "Mismatch at index " << i;
   }
 }
+
+TEST(nntrainer_cpu_backend_standalone, output_masked_q4_0_x8_cost_threshold) {
+  const std::vector<uint8_t> one_active_per_tile = {1, 0, 0, 0, 0, 0, 0, 0,
+                                                    0, 1, 0, 0, 0, 0, 0, 0};
+  EXPECT_TRUE(nntr_should_use_output_masked_q4_0_8x8(
+    one_active_per_tile.data(), one_active_per_tile.size()));
+
+  const std::vector<uint8_t> two_active_per_tile = {1, 1, 0, 0, 0, 0, 0, 0,
+                                                    1, 1, 0, 0, 0, 0, 0, 0};
+  EXPECT_FALSE(nntr_should_use_output_masked_q4_0_8x8(
+    two_active_per_tile.data(), two_active_per_tile.size()));
+}
+
+#if defined(__x86_64__) || defined(_M_X64)
+TEST(nntrainer_cpu_backend_standalone, q4_0_masked_gemv_matches_dense) {
+  nntrainer::init_backend();
+
+  constexpr unsigned int N = 24;
+  constexpr unsigned int K = 256;
+  const size_t q4_size =
+    static_cast<size_t>(N) * K / QK4_0 * sizeof(block_q4_0_testonly);
+
+  std::vector<float> activation = generate_random_vector<float>(K);
+  std::vector<float> weight = generate_random_vector<float>(N * K);
+  std::vector<char> q4(q4_size);
+  std::vector<char> packed(q4_size);
+  nntrainer::quantize_q4_0(weight.data(), q4.data(), N, K, nullptr);
+  nntrainer::repack_q4_0(packed.data(), q4.data(), q4_size, N, K);
+
+  std::vector<float> dense(N);
+  nntrainer::gemm_q4_0(1, N, K, activation.data(), K, packed.data(), N,
+                       dense.data(), N);
+
+  const std::vector<uint8_t> profitable_mask = {
+    0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0};
+  std::vector<float> masked(N);
+  ASSERT_TRUE(nntrainer::gemv_q4_0_masked(N, K, activation.data(),
+                                          packed.data(), masked.data(),
+                                          profitable_mask.data()));
+  for (unsigned int i = 0; i < N; ++i) {
+    if (profitable_mask[i] != 0)
+      EXPECT_NEAR(masked[i], dense[i], 1e-5f);
+    else
+      EXPECT_FLOAT_EQ(masked[i], 0.0f);
+  }
+
+  const std::vector<uint8_t> unprofitable_mask = {
+    1, 1, 0, 0, 0, 0, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0};
+  std::fill(masked.begin(), masked.end(), 123.0f);
+  EXPECT_FALSE(nntrainer::gemv_q4_0_masked(N, K, activation.data(),
+                                           packed.data(), masked.data(),
+                                           unprofitable_mask.data()));
+  for (const float value : masked)
+    EXPECT_FLOAT_EQ(value, 123.0f);
+}
+#endif
 
 float test_gemm_q4_0(const uint32_t M, const uint32_t K, const uint32_t N,
                      const float *weights, const float *activations,

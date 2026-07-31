@@ -3991,3 +3991,73 @@ void nntr_gemv_q4_0_8x8_q8_0(int n, float *__restrict s, size_t bs,
   }
   return;
 }
+
+bool nntr_gemv_q4_0_8x8_q8_0_masked_supported() { return true; }
+
+void nntr_gemv_q4_0_8x8_q8_0_output_masked(
+  int n, float *__restrict s, size_t bs, const void *__restrict vx,
+  const void *__restrict vy, const uint8_t *__restrict output_mask, int nr,
+  int nc) {
+  constexpr int ncols_interleaved = 8;
+  const int nb = n / QK8_0;
+
+  assert(n % QK8_0 == 0);
+  assert(nc % ncols_interleaved == 0);
+  assert(nr == 1);
+
+  const block_q4_0x8 *b_ptr_start = static_cast<const block_q4_0x8 *>(vx);
+  const block_q8_0 *a_ptr = static_cast<const block_q8_0 *>(vy);
+  const __m128i nibble_mask = _mm_set1_epi8(0x0F);
+  const __m128i signextendlut =
+    _mm_set_epi8(-1, -2, -3, -4, -5, -6, -7, -8, 7, 6, 5, 4, 3, 2, 1, 0);
+
+  for (int c = 0; c < nc; c += ncols_interleaved) {
+    const block_q4_0x8 *b_ptr = b_ptr_start + (c / ncols_interleaved) * nb;
+    int active_count = 0;
+    int active_lane = 0;
+    for (int lane = 0; lane < ncols_interleaved; ++lane) {
+      if (output_mask[c + lane] != 0) {
+        ++active_count;
+        active_lane = lane;
+      }
+    }
+
+    if (active_count == 0) {
+      _mm256_storeu_ps(s + c, _mm256_setzero_ps());
+      continue;
+    }
+
+    if (active_count >= 2) {
+      nntr_gemv_q4_0_8x8_q8_0(n, s + c, bs, b_ptr, vy, 1, ncols_interleaved);
+      for (int lane = 0; lane < ncols_interleaved; ++lane) {
+        if (output_mask[c + lane] == 0)
+          s[c + lane] = 0.0f;
+      }
+      continue;
+    }
+
+    float acc = 0.0f;
+    for (int b = 0; b < nb; ++b) {
+      const __m128i packed_low = _mm_loadl_epi64(
+        reinterpret_cast<const __m128i *>(b_ptr[b].qs + active_lane * 8));
+      const __m128i packed_high = _mm_loadl_epi64(
+        reinterpret_cast<const __m128i *>(b_ptr[b].qs + 64 + active_lane * 8));
+      const __m128i packed = _mm_unpacklo_epi64(packed_low, packed_high);
+      const __m128i q4_low =
+        _mm_shuffle_epi8(signextendlut, _mm_and_si128(packed, nibble_mask));
+      const __m128i q4_high = _mm_shuffle_epi8(
+        signextendlut, _mm_and_si128(_mm_srli_epi16(packed, 4), nibble_mask));
+      const __m256i q4 = MM256_SET_M128I(q4_high, q4_low);
+      const __m256i q8 =
+        _mm256_loadu_si256(reinterpret_cast<const __m256i *>(a_ptr[b].qs));
+      const __m256i dot =
+        mul_sum_i8_pairs_acc_int32x8(_mm256_setzero_si256(), q4, q8);
+      const float scale = nntr_fp16_to_fp32(b_ptr[b].d[active_lane]) *
+                          nntr_fp16_to_fp32(a_ptr[b].d);
+      acc = fmaf(static_cast<float>(hsum_i32_8(dot)), scale, acc);
+    }
+
+    _mm256_storeu_ps(s + c, _mm256_setzero_ps());
+    s[c + active_lane] = acc;
+  }
+}
