@@ -224,8 +224,10 @@ void SmallThinkerCachedSlimMoELayer::forwarding(
   if (has_precomputed_route) {
     nntrainer::TensorDim route_dim({total_tokens, 1, 1, topk},
                                    context.getInput(2).getTensorType());
+    nntrainer::TensorDim index_dim({total_tokens, 1, 1, topk},
+                                   context.getInput(3).getTensorType());
     topk_values = context.getInput(2).getSharedDataTensor(route_dim, 0, true);
-    topk_indices = context.getInput(3).getSharedDataTensor(route_dim, 0, true);
+    topk_indices = context.getInput(3).getSharedDataTensor(index_dim, 0, true);
   } else {
     nntrainer::Tensor &gate_weights = context.getWeight(gate_idx);
     router_input.dot(gate_weights, router_logits);
@@ -436,10 +438,12 @@ void SmallThinkerCachedSlimMoELayer::incremental_forwarding(
     if (has_precomputed_route) {
       nntrainer::TensorDim route_step_dim({1, 1, to - from, topk},
                                           context.getInput(2).getTensorType());
+      nntrainer::TensorDim index_step_dim({1, 1, to - from, topk},
+                                          context.getInput(3).getTensorType());
       topk_values = context.getInput(2).getSharedDataTensor(
         route_step_dim, b * route_step_dim.getFeatureLen(), true);
       topk_indices = context.getInput(3).getSharedDataTensor(
-        route_step_dim, b * route_step_dim.getFeatureLen(), true);
+        index_step_dim, b * index_step_dim.getFeatureLen(), true);
       topk_values.reshape({total_tokens, 1, 1, topk});
       topk_indices.reshape({total_tokens, 1, 1, topk});
     } else {

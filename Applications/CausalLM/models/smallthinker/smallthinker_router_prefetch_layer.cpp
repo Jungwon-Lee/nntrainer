@@ -323,6 +323,8 @@ void SmallThinkerRouterPrefetchLayer::incremental_forwarding(
                                       input.getTensorType());
   nntrainer::TensorDim route_step_dim({1, 1, step, topk},
                                       context.getOutput(1).getTensorType());
+  nntrainer::TensorDim index_step_dim({1, 1, step, topk},
+                                      context.getOutput(2).getTensorType());
   nntrainer::TensorDim valid_step_dim({1, 1, step, 1},
                                       context.getOutput(3).getTensorType());
 
@@ -334,7 +336,7 @@ void SmallThinkerRouterPrefetchLayer::incremental_forwarding(
     auto weight_step = context.getOutput(1).getSharedDataTensor(
       route_step_dim, batch * route_step_dim.getFeatureLen(), true);
     auto index_step = context.getOutput(2).getSharedDataTensor(
-      route_step_dim, batch * route_step_dim.getFeatureLen(), true);
+      index_step_dim, batch * index_step_dim.getFeatureLen(), true);
     auto valid_step = context.getOutput(3).getSharedDataTensor(
       valid_step_dim, batch * valid_step_dim.getFeatureLen(), true);
     route(input_step, passthrough_step, weight_step, index_step, valid_step);
