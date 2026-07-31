@@ -1352,31 +1352,9 @@ float flash_softmax_tile_avx2(float *scores, unsigned int size,
   *new_max = std::max(previous_max, block_max);
   *rescale = std::exp(previous_max - *new_max);
 
-  const __m256 vnew_max = _mm256_set1_ps(*new_max);
-  const __m256 vnegative_infinity =
-    _mm256_set1_ps(-std::numeric_limits<float>::infinity());
-  const __m256 vzero = _mm256_setzero_ps();
-  __m256 vsum = vzero;
-  k = 0;
-  for (; k + 8 <= size; k += 8) {
-    const __m256 score = _mm256_loadu_ps(scores + k);
-    __m256 exponent = exp256_ps(_mm256_sub_ps(score, vnew_max));
-    const __m256 masked = _mm256_cmp_ps(score, vnegative_infinity, _CMP_EQ_OQ);
-    exponent = _mm256_blendv_ps(exponent, vzero, masked);
-    _mm256_storeu_ps(scores + k, exponent);
-    vsum = _mm256_add_ps(vsum, exponent);
-  }
-
-  __m128 vsum_low = _mm256_castps256_ps128(vsum);
-  __m128 vsum_high = _mm256_extractf128_ps(vsum, 1);
-  __m128 vsum128 = _mm_add_ps(vsum_low, vsum_high);
-  vsum128 = _mm_hadd_ps(vsum128, vsum128);
-  vsum128 = _mm_hadd_ps(vsum128, vsum128);
-  float sum = _mm_cvtss_f32(vsum128);
-  for (; k < size; ++k) {
-    const float exponent = std::isinf(scores[k]) && scores[k] < 0.0f
-                             ? 0.0f
-                             : std::exp(scores[k] - *new_max);
+  float sum = 0.0f;
+  for (k = 0; k < size; ++k) {
+    const float exponent = std::exp(scores[k] - *new_max);
     scores[k] = exponent;
     sum += exponent;
   }

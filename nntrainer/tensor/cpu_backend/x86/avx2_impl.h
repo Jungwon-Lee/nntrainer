@@ -52,11 +52,12 @@ void hsgemm_fp16bits_avx2(unsigned int M, unsigned int N, unsigned int K,
                           float *C, unsigned int ldc);
 
 /**
- * @brief Apply one online-softmax tile update with AVX2.
+ * @brief Apply one online-softmax tile update with an AVX2 max reduction.
  *
- * Finds the tile maximum, replaces each score with
- * exp(score - new_max), and returns their sum. Masked -INFINITY scores remain
- * exactly zero.
+ * Finds the tile maximum with AVX2, then replaces each score with
+ * std::exp(score - new_max) and accumulates in scalar index order. Keeping the
+ * exponent and sum identical to the reference order avoids token changes from
+ * approximate vector exponentials or reassociated sums.
  *
  * @param[in,out] scores FP32 scores, replaced by exponentials
  * @param[in] size number of scores
