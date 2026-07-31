@@ -923,6 +923,11 @@ void MHACoreLayer::gemm_attention(nntrainer::Tensor &query_step,
 #endif
   packed_k.resize((size_t)num_heads_KV * N_kv * d);
   packed_v.resize((size_t)num_heads_KV * N_kv * d);
+  // Capture pointers to the calling thread's resized TLS buffers. Accessing
+  // packed_k/packed_v by name in a worker resolves that worker's empty TLS
+  // copy.
+  auto *const packed_k_data = packed_k.data();
+  auto *const packed_v_data = packed_v.data();
 
   const unsigned int num_kb = (N_kv + Bk - 1) / Bk;
   tm.parallel_for(0, static_cast<size_t>(num_heads_KV) * num_kb, [&](size_t u) {
@@ -933,8 +938,8 @@ void MHACoreLayer::gemm_attention(nntrainer::Tensor &query_step,
     const uint16_t *vsrc = Vbase + (size_t)h_kv * d;
 #if defined(CAUSALLM_FLASH_ARM_BACKEND) &&                                     \
   !defined(CAUSALLM_FLASH_ARM_FP16_BACKEND)
-    float *kdst = packed_k.data() + ((size_t)h_kv * N_kv + kb) * d;
-    float *vdst = packed_v.data() + ((size_t)h_kv * N_kv + kb) * d;
+    float *kdst = packed_k_data + ((size_t)h_kv * N_kv + kb) * d;
+    float *vdst = packed_v_data + ((size_t)h_kv * N_kv + kb) * d;
     for (unsigned int k = 0; k < bk; ++k) {
       for (unsigned int x = 0; x < d; ++x) {
         kdst[(size_t)k * d + x] =
@@ -944,8 +949,8 @@ void MHACoreLayer::gemm_attention(nntrainer::Tensor &query_step,
       }
     }
 #else
-    uint16_t *kdst = packed_k.data() + ((size_t)h_kv * N_kv + kb) * d;
-    uint16_t *vdst = packed_v.data() + ((size_t)h_kv * N_kv + kb) * d;
+    uint16_t *kdst = packed_k_data + ((size_t)h_kv * N_kv + kb) * d;
+    uint16_t *vdst = packed_v_data + ((size_t)h_kv * N_kv + kb) * d;
     for (unsigned int k = 0; k < bk; ++k) {
       std::memcpy(kdst + (size_t)k * d,
                   ksrc + (size_t)(kb + k) * HD_KV,
@@ -1065,13 +1070,13 @@ void MHACoreLayer::gemm_attention(nntrainer::Tensor &query_step,
       {
 #if defined(CAUSALLM_FLASH_ARM_BACKEND) &&                                     \
   !defined(CAUSALLM_FLASH_ARM_FP16_BACKEND)
-        const float *Kp = packed_k.data() + ((size_t)h_kv * N_kv + kb) * d;
-        const float *Vp = packed_v.data() + ((size_t)h_kv * N_kv + kb) * d;
+        const float *Kp = packed_k_data + ((size_t)h_kv * N_kv + kb) * d;
+        const float *Vp = packed_v_data + ((size_t)h_kv * N_kv + kb) * d;
 #else
         const uint16_t *Kp =
-          packed_k.data() + ((size_t)h_kv * N_kv + kb) * d;
+          packed_k_data + ((size_t)h_kv * N_kv + kb) * d;
         const uint16_t *Vp =
-          packed_v.data() + ((size_t)h_kv * N_kv + kb) * d;
+          packed_v_data + ((size_t)h_kv * N_kv + kb) * d;
 #endif
         // QK -> FP32 score buffer S. One buffer, two query sources:
         //   - q_fp16:  FP16 Q × FP16 K via FMLAL-widening — every product is
