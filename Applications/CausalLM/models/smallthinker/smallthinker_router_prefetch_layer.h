@@ -53,15 +53,17 @@ public:
   bool acquire(unsigned int expert);
   void release(unsigned int expert);
   void trim();
+  void shutdown();
   size_t residentCount() const;
 
 private:
-  enum class Status { UNLOADED, LOADING, RESIDENT, FAILED };
+  enum class Status { UNLOADED, LOADING, RESIDENT, EVICTING, FAILED };
 
   void activate(unsigned int expert);
   void touch(unsigned int expert);
 
   mutable std::mutex mutex;
+  std::mutex task_mutex;
   std::condition_variable condition;
   nntrainer::Tensor *router_weight = nullptr;
   std::vector<SmallThinkerExpertWeights> weights;
@@ -72,6 +74,7 @@ private:
   std::unordered_map<unsigned int, std::list<unsigned int>::iterator>
     lru_position;
   unsigned int capacity = 0;
+  bool shutting_down = false;
   std::future<void> prefetch_task;
 };
 
@@ -80,6 +83,11 @@ private:
  */
 std::shared_ptr<SmallThinkerExpertPrefetchState>
 getSmallThinkerExpertPrefetchState(const std::string &key);
+
+/**
+ * @brief Stop asynchronous work for an existing shared state.
+ */
+void shutdownSmallThinkerExpertPrefetchState(const std::string &key);
 
 /**
  * @class SmallThinkerRouterPrefetchLayer

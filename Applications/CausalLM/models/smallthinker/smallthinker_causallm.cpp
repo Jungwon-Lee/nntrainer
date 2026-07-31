@@ -68,6 +68,11 @@ SmallThinkerCachedSlimCausalLM::SmallThinkerCachedSlimCausalLM(
   SmallThinkerCausalLM(cfg, generation_cfg, nntr_cfg),
   prefetch_namespace(nextPrefetchNamespace()) {}
 
+SmallThinkerCachedSlimCausalLM::~SmallThinkerCachedSlimCausalLM() {
+  for (int layer = 0; layer < NUM_LAYERS; ++layer)
+    shutdownSmallThinkerExpertPrefetchState(getExpertPrefetchKey(layer));
+}
+
 json &SmallThinkerCausalLM::normalizeConfig(json &cfg) {
   if (!cfg.contains("intermediate_size") &&
       cfg.contains("moe_ffn_hidden_size")) {

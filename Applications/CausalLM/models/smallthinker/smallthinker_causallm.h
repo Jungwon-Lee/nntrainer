@@ -100,7 +100,7 @@ public:
   SmallThinkerCachedSlimCausalLM(json &cfg, json &generation_cfg,
                                  json &nntr_cfg);
 
-  virtual ~SmallThinkerCachedSlimCausalLM() = default;
+  virtual ~SmallThinkerCachedSlimCausalLM();
 
 protected:
   const char *getMoELayerType() const override {

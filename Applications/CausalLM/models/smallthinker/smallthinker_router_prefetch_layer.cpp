@@ -63,8 +63,7 @@ std::unordered_map<std::string, std::weak_ptr<SmallThinkerExpertPrefetchState>>
 } // namespace
 
 SmallThinkerExpertPrefetchState::~SmallThinkerExpertPrefetchState() {
-  if (prefetch_task.valid())
-    prefetch_task.wait();
+  shutdown();
 }
 
 void SmallThinkerExpertPrefetchState::registerWeights(
@@ -72,6 +71,8 @@ void SmallThinkerExpertPrefetchState::registerWeights(
   std::vector<SmallThinkerExpertWeights> expert_weights,
   unsigned int cache_size) {
   std::lock_guard<std::mutex> lock(mutex);
+  NNTR_THROW_IF(shutting_down, std::logic_error)
+    << "Cannot register SmallThinker expert weights during shutdown";
   if (router_weight != nullptr)
     return;
 
@@ -97,9 +98,15 @@ void SmallThinkerExpertPrefetchState::touch(unsigned int expert) {
 }
 
 void SmallThinkerExpertPrefetchState::activate(unsigned int expert) {
+  bool gate_activation_attempted = false;
+  bool up_activation_attempted = false;
+  bool down_activation_attempted = false;
   try {
+    gate_activation_attempted = true;
     weights[expert].gate->activate();
+    up_activation_attempted = true;
     weights[expert].up->activate();
+    down_activation_attempted = true;
     weights[expert].down->activate();
 
     {
@@ -108,8 +115,25 @@ void SmallThinkerExpertPrefetchState::activate(unsigned int expert) {
       touch(expert);
     }
   } catch (...) {
+    const std::exception_ptr activation_error = std::current_exception();
+    try {
+      if (down_activation_attempted)
+        weights[expert].down->deactivate();
+    } catch (...) {
+    }
+    try {
+      if (up_activation_attempted)
+        weights[expert].up->deactivate();
+    } catch (...) {
+    }
+    try {
+      if (gate_activation_attempted)
+        weights[expert].gate->deactivate();
+    } catch (...) {
+    }
+
     std::lock_guard<std::mutex> lock(mutex);
-    errors[expert] = std::current_exception();
+    errors[expert] = activation_error;
     status[expert] = Status::FAILED;
   }
   condition.notify_all();
@@ -117,19 +141,25 @@ void SmallThinkerExpertPrefetchState::activate(unsigned int expert) {
 
 void SmallThinkerExpertPrefetchState::prefetch(
   const std::vector<unsigned int> &experts) {
+  std::lock_guard<std::mutex> task_lock(task_mutex);
   if (prefetch_task.valid())
     prefetch_task.wait();
 
   std::vector<unsigned int> to_load;
   {
-    std::lock_guard<std::mutex> lock(mutex);
-    if (router_weight == nullptr)
+    std::unique_lock<std::mutex> lock(mutex);
+    if (router_weight == nullptr || shutting_down)
       return;
 
     std::unordered_set<unsigned int> unique;
     for (unsigned int expert : experts) {
       if (expert >= weights.size() || !unique.insert(expert).second)
         continue;
+      condition.wait(lock, [&]() {
+        return status[expert] != Status::EVICTING || shutting_down;
+      });
+      if (shutting_down)
+        return;
       if (status[expert] == Status::UNLOADED) {
         status[expert] = Status::LOADING;
         to_load.push_back(expert);
@@ -142,10 +172,25 @@ void SmallThinkerExpertPrefetchState::prefetch(
   if (to_load.empty())
     return;
 
-  prefetch_task = std::async(std::launch::async, [this, to_load]() {
-    for (unsigned int expert : to_load)
-      activate(expert);
-  });
+  try {
+    prefetch_task = std::async(std::launch::async, [this, to_load]() {
+      for (unsigned int expert : to_load)
+        activate(expert);
+    });
+  } catch (...) {
+    const std::exception_ptr launch_error = std::current_exception();
+    {
+      std::lock_guard<std::mutex> lock(mutex);
+      for (unsigned int expert : to_load) {
+        if (status[expert] != Status::LOADING)
+          continue;
+        errors[expert] = launch_error;
+        status[expert] = Status::FAILED;
+      }
+    }
+    condition.notify_all();
+    throw;
+  }
 }
 
 bool SmallThinkerExpertPrefetchState::acquire(unsigned int expert) {
@@ -153,6 +198,20 @@ bool SmallThinkerExpertPrefetchState::acquire(unsigned int expert) {
   std::unique_lock<std::mutex> lock(mutex);
   NNTR_THROW_IF(expert >= weights.size(), std::out_of_range)
     << "SmallThinker expert index is out of range";
+  NNTR_THROW_IF(shutting_down, std::runtime_error)
+    << "SmallThinker expert cache is shutting down";
+
+  while (status[expert] == Status::LOADING ||
+         status[expert] == Status::EVICTING) {
+    cache_miss = true;
+    condition.wait(lock, [&]() {
+      return (status[expert] != Status::LOADING &&
+              status[expert] != Status::EVICTING) ||
+             shutting_down;
+    });
+    NNTR_THROW_IF(shutting_down, std::runtime_error)
+      << "SmallThinker expert cache is shutting down";
+  }
 
   if (status[expert] == Status::UNLOADED) {
     status[expert] = Status::LOADING;
@@ -160,11 +219,10 @@ bool SmallThinkerExpertPrefetchState::acquire(unsigned int expert) {
     lock.unlock();
     activate(expert);
     lock.lock();
-  } else if (status[expert] == Status::LOADING) {
-    cache_miss = true;
-    condition.wait(lock, [&]() { return status[expert] != Status::LOADING; });
   }
 
+  NNTR_THROW_IF(shutting_down, std::runtime_error)
+    << "SmallThinker expert cache is shutting down";
   if (status[expert] == Status::FAILED)
     std::rethrow_exception(errors[expert]);
 
@@ -179,6 +237,7 @@ void SmallThinkerExpertPrefetchState::release(unsigned int expert) {
                 std::logic_error)
     << "SmallThinker expert cache pin count underflow";
   --pin_count[expert];
+  condition.notify_all();
 }
 
 void SmallThinkerExpertPrefetchState::trim() {
@@ -187,7 +246,7 @@ void SmallThinkerExpertPrefetchState::trim() {
     unsigned int target_index = 0;
     {
       std::lock_guard<std::mutex> lock(mutex);
-      if (lru.size() <= capacity)
+      if (shutting_down || lru.size() <= capacity)
         return;
 
       auto candidate =
@@ -201,13 +260,63 @@ void SmallThinkerExpertPrefetchState::trim() {
       target = weights[target_index];
       lru_position.erase(target_index);
       lru.erase(candidate);
-      status[target_index] = Status::UNLOADED;
+      status[target_index] = Status::EVICTING;
     }
 
-    target.gate->deactivate();
-    target.up->deactivate();
-    target.down->deactivate();
+    std::exception_ptr eviction_error;
+    try {
+      target.gate->deactivate();
+    } catch (...) {
+      eviction_error = std::current_exception();
+    }
+    try {
+      target.up->deactivate();
+    } catch (...) {
+      if (eviction_error == nullptr)
+        eviction_error = std::current_exception();
+    }
+    try {
+      target.down->deactivate();
+    } catch (...) {
+      if (eviction_error == nullptr)
+        eviction_error = std::current_exception();
+    }
+
+    {
+      std::lock_guard<std::mutex> lock(mutex);
+      if (eviction_error == nullptr) {
+        status[target_index] = Status::UNLOADED;
+      } else {
+        errors[target_index] = eviction_error;
+        status[target_index] = Status::FAILED;
+      }
+    }
+    condition.notify_all();
   }
+}
+
+void SmallThinkerExpertPrefetchState::shutdown() {
+  {
+    std::lock_guard<std::mutex> lock(mutex);
+    shutting_down = true;
+  }
+  condition.notify_all();
+
+  std::lock_guard<std::mutex> task_lock(task_mutex);
+  if (prefetch_task.valid())
+    prefetch_task.wait();
+
+  std::unique_lock<std::mutex> lock(mutex);
+  condition.wait(lock, [&]() {
+    const bool no_weight_operation =
+      std::none_of(status.begin(), status.end(), [](Status current) {
+        return current == Status::LOADING || current == Status::EVICTING;
+      });
+    const bool no_pinned_expert =
+      std::none_of(pin_count.begin(), pin_count.end(),
+                   [](unsigned int count) { return count != 0; });
+    return no_weight_operation && no_pinned_expert;
+  });
 }
 
 size_t SmallThinkerExpertPrefetchState::residentCount() const {
@@ -227,6 +336,20 @@ getSmallThinkerExpertPrefetchState(const std::string &key) {
     state_registry[key] = state;
   }
   return state;
+}
+
+void shutdownSmallThinkerExpertPrefetchState(const std::string &key) {
+  std::shared_ptr<SmallThinkerExpertPrefetchState> state;
+  {
+    std::lock_guard<std::mutex> lock(state_registry_mutex);
+    auto found = state_registry.find(key);
+    if (found == state_registry.end())
+      return;
+    state = found->second.lock();
+  }
+
+  if (state != nullptr)
+    state->shutdown();
 }
 
 SmallThinkerRouterPrefetchLayer::SmallThinkerRouterPrefetchLayer() :
