@@ -29,12 +29,21 @@
 #include <cstring>
 #include <node_exporter.h>
 #include <smallthinker_moe_layer.h>
+#include <smallthinker_sparse_ffn.h>
 #include <stdexcept>
 #include <thread_manager.h>
 
 namespace causallm {
 
 static constexpr size_t SINGLE_INOUT_IDX = 0;
+
+static inline void reglu(unsigned int size, float *output, const float *gate,
+                         const float *up) {
+  for (unsigned int i = 0; i < size; ++i) {
+    const float activated = gate[i] <= 0.0f ? 0.0f : gate[i];
+    output[i] = activated * up[i];
+  }
+}
 
 SmallThinkerMoELayer::SmallThinkerMoELayer() :
   LayerImpl(),
@@ -48,8 +57,7 @@ SmallThinkerMoELayer::SmallThinkerMoELayer() :
   expert_up_proj_indices({}),
   expert_down_proj_indices({}),
   gate_idx(std::numeric_limits<unsigned>::max()),
-  router_logits_idx(std::numeric_limits<unsigned>::max()),
-  expert_mask_idx(std::numeric_limits<unsigned>::max()) {}
+  router_logits_idx(std::numeric_limits<unsigned>::max()) {}
 
 void SmallThinkerMoELayer::finalize(nntrainer::InitLayerContext &context) {
 
@@ -148,11 +156,6 @@ void SmallThinkerMoELayer::finalize(nntrainer::InitLayerContext &context) {
     context.requestTensor({total_tokens, 1, 1, num_experts}, "router_logits",
                           nntrainer::Initializer::NONE, false,
                           nntrainer::TensorLifespan::FORWARD_FUNC_LIFESPAN);
-
-  expert_mask_idx =
-    context.requestTensor({num_experts, 1, topk, total_tokens}, "expert_mask",
-                          nntrainer::Initializer::ZEROS, false,
-                          nntrainer::TensorLifespan::FORWARD_FUNC_LIFESPAN);
 }
 
 void SmallThinkerMoELayer::forwarding(nntrainer::RunLayerContext &context,
@@ -162,7 +165,6 @@ void SmallThinkerMoELayer::forwarding(nntrainer::RunLayerContext &context,
   nntrainer::Tensor &output = context.getOutput(SINGLE_INOUT_IDX);
 
   nntrainer::Tensor &router_logits = context.getTensor(router_logits_idx);
-  nntrainer::Tensor &expert_mask = context.getTensor(expert_mask_idx);
 
   const unsigned batch_size = input.batch();
   const unsigned seq_len = input.height();
@@ -200,16 +202,6 @@ void SmallThinkerMoELayer::forwarding(nntrainer::RunLayerContext &context,
   }
 
   const uint32_t *indices_data = topk_indices.getData<uint32_t>();
-  {
-    auto &tm = nntrainer::ThreadManager::Global();
-    size_t total_iters =
-      static_cast<size_t>(total_tokens) * static_cast<size_t>(topk);
-    tm.parallel_for(0, total_iters, [&](size_t idx) {
-      int k = idx % topk;
-      int i = idx / topk;
-      expert_mask.setValue(indices_data[idx], 0, k, i, 1.0f);
-    });
-  }
 
   std::vector<std::vector<std::pair<unsigned, float>>> expert_assignments(
     num_experts);
@@ -247,7 +239,6 @@ inline void SmallThinkerMoELayer::compute_expert_forward(
   const nntrainer::Tensor &gate_proj, const nntrainer::Tensor &up_proj,
   const nntrainer::Tensor &down_proj, unsigned int hidden_size) {
 
-  const unsigned intermediate_size = gate_proj.width();
   const unsigned num_tokens = token_assignments.size();
 
   if (num_tokens == 0)
@@ -255,8 +246,6 @@ inline void SmallThinkerMoELayer::compute_expert_forward(
 
   nntrainer::TensorDim token_input_dim({1, 1, 1, hidden_size},
                                        input.getTensorType());
-  nntrainer::TensorDim intermediate_dim({1, 1, 1, intermediate_size},
-                                        input.getTensorType());
   nntrainer::TensorDim token_output_dim({1, 1, 1, hidden_size},
                                         input.getTensorType());
 
@@ -273,18 +262,9 @@ inline void SmallThinkerMoELayer::compute_expert_forward(
     nntrainer::Tensor token_input =
       input.getSharedDataTensor(token_input_dim, token_offset, true);
 
-    nntrainer::Tensor gate_out(intermediate_dim);
-    nntrainer::Tensor acti_out(intermediate_dim);
-    nntrainer::Tensor up_out(intermediate_dim);
-
-    token_input.dot(gate_proj, gate_out);
-    acti_func.run_fn(gate_out, acti_out);
-    token_input.dot(up_proj, up_out);
-    acti_out.multiply_i(up_out);
-
     nntrainer::Tensor token_expert_output(token_output_dim);
-    acti_out.dot(down_proj, token_expert_output);
-    token_expert_output.multiply_i(weight);
+    computeSmallThinkerReGLU(token_input, token_expert_output, gate_proj,
+                             up_proj, down_proj, weight);
 
     size_t output_offset = token_idx * hidden_size;
     nntrainer::Tensor token_output =
@@ -301,7 +281,6 @@ inline void SmallThinkerMoELayer::compute_expert_forward_no_critical(
   const nntrainer::Tensor &gate_proj, const nntrainer::Tensor &up_proj,
   const nntrainer::Tensor &down_proj, unsigned int hidden_size) {
 
-  const unsigned intermediate_size = gate_proj.width();
   const unsigned num_tokens = token_assignments.size();
 
   if (num_tokens == 0)
@@ -309,8 +288,6 @@ inline void SmallThinkerMoELayer::compute_expert_forward_no_critical(
 
   nntrainer::TensorDim token_input_dim({1, 1, 1, hidden_size},
                                        input.getTensorType());
-  nntrainer::TensorDim intermediate_dim({1, 1, 1, intermediate_size},
-                                        input.getTensorType());
   nntrainer::TensorDim token_output_dim({1, 1, 1, hidden_size},
                                         input.getTensorType());
 
@@ -322,18 +299,9 @@ inline void SmallThinkerMoELayer::compute_expert_forward_no_critical(
     nntrainer::Tensor token_input =
       input.getSharedDataTensor(token_input_dim, token_offset, true);
 
-    nntrainer::Tensor gate_out(intermediate_dim);
-    nntrainer::Tensor acti_out(intermediate_dim);
-    nntrainer::Tensor up_out(intermediate_dim);
-
-    token_input.dot(gate_proj, gate_out);
-    acti_func.run_fn(gate_out, acti_out);
-    token_input.dot(up_proj, up_out);
-    acti_out.multiply_i(up_out);
-
     nntrainer::Tensor token_expert_output(token_output_dim);
-    acti_out.dot(down_proj, token_expert_output);
-    token_expert_output.multiply_i(weight);
+    computeSmallThinkerReGLU(token_input, token_expert_output, gate_proj,
+                             up_proj, down_proj, weight);
 
     size_t output_offset = token_idx * hidden_size;
     nntrainer::Tensor token_output =
@@ -386,9 +354,13 @@ inline void SmallThinkerMoELayer::compute_expert_forward_batched(
   nntrainer::Tensor acti_out(intermed_dim);
 
   gathered.dot(gate_proj, gate_out);
-  acti_func.run_fn(gate_out, acti_out);
   gathered.dot(up_proj, up_out);
-  acti_out.multiply_i(up_out);
+  auto &tm = nntrainer::ThreadManager::Global();
+  tm.parallel_for(0, static_cast<size_t>(num_tokens), [&](size_t i) {
+    const unsigned offset = acti_out.getIndex(0, 0, i, 0);
+    reglu(acti_out.width(), acti_out.getData<float>() + offset,
+          gate_out.getData<float>() + offset, up_out.getData<float>() + offset);
+  });
 
   nntrainer::Tensor down_out(down_dim);
   acti_out.dot(down_proj, down_out);
@@ -415,7 +387,6 @@ void SmallThinkerMoELayer::incremental_forwarding(
   nntrainer::Tensor &output_ = context.getOutput(SINGLE_INOUT_IDX);
 
   nntrainer::Tensor &router_logits_ = context.getTensor(router_logits_idx);
-  nntrainer::Tensor &expert_mask = context.getTensor(expert_mask_idx);
 
   nntrainer::TensorDim input_step_dim = input_.getDim();
   nntrainer::TensorDim output_step_dim = output_.getDim();
@@ -446,7 +417,6 @@ void SmallThinkerMoELayer::incremental_forwarding(
     router_input.reshape({total_tokens, 1, 1, hidden_size});
     output.reshape({total_tokens, 1, 1, hidden_size});
     output.setZero();
-    expert_mask.setZero();
 
     nntrainer::Tensor &gate_weights = context.getWeight(gate_idx);
     router_input.dot(gate_weights, router_logits);
@@ -473,16 +443,6 @@ void SmallThinkerMoELayer::incremental_forwarding(
     }
 
     const uint32_t *indices_data = topk_indices.getData<uint32_t>();
-    {
-      auto &tm = nntrainer::ThreadManager::Global();
-      size_t total_iters =
-        static_cast<size_t>(total_tokens) * static_cast<size_t>(topk);
-      tm.parallel_for(0, total_iters, [&](size_t idx) {
-        int k = idx % topk;
-        int i = idx / topk;
-        expert_mask.setValue(indices_data[idx], 0, k, i, 1.0f);
-      });
-    }
 
     std::vector<std::vector<std::pair<unsigned, float>>> expert_assignments(
       num_experts);

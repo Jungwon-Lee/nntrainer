@@ -36,7 +36,8 @@
 
 #include <fcntl.h>
 
-#if defined(__unix__) || defined(__ANDROID__) || defined(__arm__)
+#if defined(__unix__) || defined(__APPLE__) || defined(__ANDROID__) ||         \
+  defined(__arm__)
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -1676,9 +1677,9 @@ void Tensor::activate() {
        "read-time";
 
   mapped_ptr = mmap(NULL, len, PROT_READ, MAP_PRIVATE, this->fd, off);
-#ifdef __ANDROID__
+#if defined(MADV_WILLNEED)
   if (mapped_ptr != MAP_FAILED)
-    madvise(mapped_ptr, len, MADV_WILLNEED);
+    (void)madvise(mapped_ptr, len, MADV_WILLNEED);
 #endif
   NNTR_THROW_IF(mapped_ptr == MAP_FAILED, std::runtime_error)
     << "[activate] mmap failed for virtual tensor '" << getName()

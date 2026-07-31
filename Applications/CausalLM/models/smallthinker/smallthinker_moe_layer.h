@@ -52,6 +52,16 @@ public:
   using prop_tag = nntrainer::uint_prop_tag;           /**< property type */
 };
 
+/**
+ * @brief Key used to share pre-attention routing and expert-cache state.
+ */
+class MoEPrefetchKey : public nntrainer::Property<std::string> {
+public:
+  MoEPrefetchKey(std::string value = "") { set(value); }
+  static constexpr const char *key = "moe_prefetch_key"; /**< unique key */
+  using prop_tag = nntrainer::str_prop_tag;              /**< property type */
+};
+
 } // namespace props
 
 /**
@@ -166,7 +176,6 @@ private:
 
   // Intermediate tensor indices
   unsigned int router_logits_idx;
-  unsigned int expert_mask_idx;
 
   inline void compute_expert_forward(
     const nntrainer::Tensor &input, nntrainer::Tensor &output,

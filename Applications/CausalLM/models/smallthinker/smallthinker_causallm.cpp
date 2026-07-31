@@ -23,12 +23,14 @@
 #include <model.h>
 
 #include <algorithm>
+#include <atomic>
 #include <climits>
 #include <iostream>
 #include <smallthinker_causallm.h>
 #include <smallthinker_moe_layer.h>
 #include <smallthinker_moe_layer_cached_slim.h>
 #include <smallthinker_moe_layer_slim.h>
+#include <smallthinker_router_prefetch_layer.h>
 #include <stdexcept>
 
 namespace causallm {
@@ -52,7 +54,19 @@ std::vector<bool> parseLayerLayout(const json &cfg, const char *key,
   return layout;
 }
 
+std::string nextPrefetchNamespace() {
+  static std::atomic<unsigned long long> next_id{0};
+  return "smallthinker:" + std::to_string(next_id.fetch_add(1));
+}
+
 } // namespace
+
+SmallThinkerCachedSlimCausalLM::SmallThinkerCachedSlimCausalLM(
+  json &cfg, json &generation_cfg, json &nntr_cfg) :
+  Transformer(normalizeConfig(cfg), generation_cfg, nntr_cfg,
+              ModelType::CAUSALLM),
+  SmallThinkerCausalLM(cfg, generation_cfg, nntr_cfg),
+  prefetch_namespace(nextPrefetchNamespace()) {}
 
 json &SmallThinkerCausalLM::normalizeConfig(json &cfg) {
   if (!cfg.contains("intermediate_size") &&
@@ -165,12 +179,29 @@ Tensor SmallThinkerCausalLM::createAttention(const int layer_id, int seq_len,
 Tensor SmallThinkerCausalLM::createTransformerDecoderBlock(const int layer_id,
                                                            Tensor input) {
 
+  Tensor attention_input = input;
+  std::vector<Tensor> precomputed_route;
+  const std::string prefetch_key = getExpertPrefetchKey(layer_id);
+  if (useExpertPrefetch()) {
+    LayerHandle router_prefetch(createLayer(
+      "smallthinker_router_prefetch",
+      {withKey("name", "layer" + std::to_string(layer_id) + "_router_prefetch"),
+       withKey("num_experts", NUM_EXPERTS),
+       withKey("num_experts_per_token", NUM_EXPERTS_PER_TOK),
+       withKey("moe_router_apply_softmax",
+               ROUTER_APPLY_SOFTMAX ? "true" : "false"),
+       withKey("moe_prefetch_key", prefetch_key)}));
+    Tensor routed = router_prefetch(input);
+    attention_input = routed.output(0);
+    precomputed_route = {routed.output(1), routed.output(2), routed.output(3)};
+  }
+
   LayerHandle attn_norm(createLayer(
     "rms_norm",
     {withKey("name", "layer" + std::to_string(layer_id) + "_attention_norm"),
      withKey("epsilon", std::to_string(NORM_EPS)),
      withKey("packed", "false")}));
-  Tensor normed = attn_norm(input);
+  Tensor normed = attn_norm(attention_input);
 
   Tensor att_out = createAttention(layer_id, INIT_SEQ_LEN, NUM_HEADS, HEAD_DIM,
                                    normed, normed, normed);
@@ -178,7 +209,7 @@ Tensor SmallThinkerCausalLM::createTransformerDecoderBlock(const int layer_id,
   LayerHandle decoder_add(createLayer(
     "addition",
     {withKey("name", "layer" + std::to_string(layer_id) + "_decoder_add")}));
-  Tensor residual = decoder_add({input, att_out});
+  Tensor residual = decoder_add({attention_input, att_out});
 
   LayerHandle ffn_norm(createLayer(
     "rms_norm",
@@ -190,15 +221,22 @@ Tensor SmallThinkerCausalLM::createTransformerDecoderBlock(const int layer_id,
   // SmallThinker MoE uses 2 inputs: expert input (ffn_normed) and router input
   // (pre-attention residual). The router is applied on the block's input before
   // the attention norm, matching the HF reference implementation.
-  LayerHandle moe(createLayer(
-    getMoELayerType(),
-    {withKey("name", "layer" + std::to_string(layer_id) + "_ffn_down"),
-     withKey("unit", INTERMEDIATE_SIZE), withKey("num_experts", NUM_EXPERTS),
-     withKey("num_experts_per_token", NUM_EXPERTS_PER_TOK),
-     withKey("moe_activation", "relu"),
-     withKey("moe_router_apply_softmax",
-             ROUTER_APPLY_SOFTMAX ? "true" : "false")}));
-  Tensor ffn_out = moe({ffn_normed, input});
+  std::vector<std::string> moe_properties = {
+    withKey("name", "layer" + std::to_string(layer_id) + "_ffn_down"),
+    withKey("unit", INTERMEDIATE_SIZE),
+    withKey("num_experts", NUM_EXPERTS),
+    withKey("num_experts_per_token", NUM_EXPERTS_PER_TOK),
+    withKey("moe_activation", "relu"),
+    withKey("moe_router_apply_softmax",
+            ROUTER_APPLY_SOFTMAX ? "true" : "false")};
+  if (useExpertPrefetch())
+    moe_properties.push_back(withKey("moe_prefetch_key", prefetch_key));
+
+  LayerHandle moe(createLayer(getMoELayerType(), moe_properties));
+  std::vector<Tensor> moe_inputs = {ffn_normed, attention_input};
+  moe_inputs.insert(moe_inputs.end(), precomputed_route.begin(),
+                    precomputed_route.end());
+  Tensor ffn_out = moe(moe_inputs);
 
   LayerHandle decoder_output(createLayer(
     "addition",
@@ -248,6 +286,14 @@ void SmallThinkerCachedSlimCausalLM::registerCustomLayers() {
   try {
     app_context->registerFactory(
       nntrainer::createLayer<causallm::SmallThinkerCachedSlimMoELayer>);
+  } catch (std::invalid_argument &e) {
+    std::cerr << "failed to register factory, reason: " << e.what()
+              << std::endl;
+  }
+
+  try {
+    app_context->registerFactory(
+      nntrainer::createLayer<causallm::SmallThinkerRouterPrefetchLayer>);
   } catch (std::invalid_argument &e) {
     std::cerr << "failed to register factory, reason: " << e.what()
               << std::endl;

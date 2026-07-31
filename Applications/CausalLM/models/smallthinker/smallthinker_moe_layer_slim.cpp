@@ -20,6 +20,7 @@
 #include <cmath>
 #include <node_exporter.h>
 #include <smallthinker_moe_layer_slim.h>
+#include <smallthinker_sparse_ffn.h>
 #include <stdexcept>
 #include <thread_manager.h>
 
@@ -65,8 +66,7 @@ SmallThinkerSlimMoELayer::SmallThinkerSlimMoELayer() :
   expert_up_proj_indices({}),
   expert_down_proj_indices({}),
   gate_idx(std::numeric_limits<unsigned>::max()),
-  router_logits_idx(std::numeric_limits<unsigned>::max()),
-  expert_mask_idx(std::numeric_limits<unsigned>::max()) {}
+  router_logits_idx(std::numeric_limits<unsigned>::max()) {}
 
 void SmallThinkerSlimMoELayer::finalize(nntrainer::InitLayerContext &context) {
 
@@ -162,11 +162,6 @@ void SmallThinkerSlimMoELayer::finalize(nntrainer::InitLayerContext &context) {
     context.requestTensor({total_tokens, 1, 1, num_experts}, "router_logits",
                           nntrainer::Initializer::NONE, false,
                           nntrainer::TensorLifespan::FORWARD_FUNC_LIFESPAN);
-
-  expert_mask_idx =
-    context.requestTensor({num_experts, 1, topk, total_tokens}, "expert_mask",
-                          nntrainer::Initializer::ZEROS, false,
-                          nntrainer::TensorLifespan::FORWARD_FUNC_LIFESPAN);
 }
 
 void SmallThinkerSlimMoELayer::forwarding(nntrainer::RunLayerContext &context,
@@ -176,7 +171,6 @@ void SmallThinkerSlimMoELayer::forwarding(nntrainer::RunLayerContext &context,
   nntrainer::Tensor &output = context.getOutput(SINGLE_INOUT_IDX);
 
   nntrainer::Tensor &router_logits = context.getTensor(router_logits_idx);
-  nntrainer::Tensor &expert_mask = context.getTensor(expert_mask_idx);
 
   const unsigned batch_size = input.batch();
   const unsigned seq_len = input.height();
@@ -197,14 +191,7 @@ void SmallThinkerSlimMoELayer::forwarding(nntrainer::RunLayerContext &context,
   normalize_router_weights(topk_values, total_tokens, topk,
                            router_apply_softmax);
 
-  expert_mask.setZero();
   const uint32_t *indices_data = topk_indices.getData<uint32_t>();
-  auto &tm = nntrainer::ThreadManager::Global();
-  tm.parallel_for(0, total_tokens * topk, [&](size_t idx) {
-    const size_t i = idx / topk;
-    const size_t k = idx % topk;
-    expert_mask.setValue(indices_data[i * topk + k], 0, k, i, 1.0f);
-  });
 
   std::vector<std::vector<std::pair<unsigned, float>>> expert_assignments(
     num_experts);
@@ -248,7 +235,6 @@ inline void SmallThinkerSlimMoELayer::compute_expert_forward(
   const nntrainer::Tensor &gate_proj, const nntrainer::Tensor &up_proj,
   const nntrainer::Tensor &down_proj, unsigned int hidden_size) {
 
-  const unsigned intermediate_size = gate_proj.width();
   const unsigned num_tokens = token_assignments.size();
 
   if (num_tokens == 0)
@@ -256,8 +242,6 @@ inline void SmallThinkerSlimMoELayer::compute_expert_forward(
 
   nntrainer::TensorDim token_input_dim({1, 1, 1, hidden_size},
                                        input.getTensorType());
-  nntrainer::TensorDim intermediate_dim({1, 1, 1, intermediate_size},
-                                        input.getTensorType());
   nntrainer::TensorDim token_output_dim({1, 1, 1, hidden_size},
                                         input.getTensorType());
 
@@ -274,19 +258,9 @@ inline void SmallThinkerSlimMoELayer::compute_expert_forward(
     nntrainer::Tensor token_input =
       input.getSharedDataTensor(token_input_dim, token_offset, true);
 
-    nntrainer::Tensor gate_out(intermediate_dim);
-    nntrainer::Tensor acti_out(intermediate_dim);
-    nntrainer::Tensor up_out(intermediate_dim);
-
-    token_input.dot(gate_proj, gate_out);
-    acti_func.run_fn(gate_out, acti_out);
-    token_input.dot(up_proj, up_out);
-    acti_out.multiply_i(up_out);
-
     nntrainer::Tensor token_expert_output(token_output_dim);
-    acti_out.dot(down_proj, token_expert_output);
-
-    token_expert_output.multiply_i(weight);
+    computeSmallThinkerReGLU(token_input, token_expert_output, gate_proj,
+                             up_proj, down_proj, weight);
     size_t output_offset = token_idx * hidden_size;
     nntrainer::Tensor token_output =
       expert_output.getSharedDataTensor(token_output_dim, output_offset, true);
@@ -306,7 +280,6 @@ void SmallThinkerSlimMoELayer::incremental_forwarding(
   nntrainer::Tensor &output_ = context.getOutput(SINGLE_INOUT_IDX);
 
   nntrainer::Tensor &router_logits_ = context.getTensor(router_logits_idx);
-  nntrainer::Tensor &expert_mask = context.getTensor(expert_mask_idx);
 
   nntrainer::TensorDim input_step_dim = input_.getDim();
   nntrainer::TensorDim output_step_dim = output_.getDim();
@@ -338,7 +311,6 @@ void SmallThinkerSlimMoELayer::incremental_forwarding(
     router_input.reshape({total_tokens, 1, 1, hidden_size});
     output.reshape({total_tokens, 1, 1, hidden_size});
     output.setZero();
-    expert_mask.setZero();
 
     nntrainer::Tensor &gate_weights = context.getWeight(gate_idx);
     router_input.dot(gate_weights, router_logits);
@@ -350,11 +322,6 @@ void SmallThinkerSlimMoELayer::incremental_forwarding(
                              router_apply_softmax);
 
     const uint32_t *indices_data = topk_indices.getData<uint32_t>();
-    for (int i = 0; i < static_cast<int>(total_tokens); ++i) {
-      for (int k = 0; k < static_cast<int>(topk); ++k) {
-        expert_mask.setValue(indices_data[i * topk + k], 0, k, i, 1.0f);
-      }
-    }
 
     std::vector<std::vector<std::pair<unsigned, float>>> expert_assignments(
       num_experts);

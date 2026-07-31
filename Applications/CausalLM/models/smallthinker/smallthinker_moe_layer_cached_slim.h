@@ -12,10 +12,8 @@
 #define __SMALLTHINKER_MOE_LAYER_CACHED_SLIM_H__
 #ifdef __cplusplus
 
-#include <list>
-#include <mutex>
 #include <smallthinker_moe_layer.h>
-#include <unordered_map>
+#include <smallthinker_router_prefetch_layer.h>
 #include <vector>
 
 namespace causallm {
@@ -42,14 +40,14 @@ public:
    * @param[in] SmallThinkerCachedSlimMoELayer &&
    */
   SmallThinkerCachedSlimMoELayer(
-    SmallThinkerCachedSlimMoELayer &&rhs) noexcept = default;
+    SmallThinkerCachedSlimMoELayer &&rhs) noexcept = delete;
 
   /**
    * @brief  Move assignment operator.
    * @param[in] rhs SmallThinkerCachedSlimMoELayer to be moved.
    */
   SmallThinkerCachedSlimMoELayer &
-  operator=(SmallThinkerCachedSlimMoELayer &&rhs) = default;
+  operator=(SmallThinkerCachedSlimMoELayer &&rhs) = delete;
 
   /**
    * @copydoc Layer::finalize(InitLayerContext &context)
@@ -113,7 +111,8 @@ private:
   nntrainer::ActiFunc acti_func; /**< activation function for the expert */
   std::tuple<props::NumExperts, props::NumExpertsPerToken,
              nntrainer::props::Unit, props::MoEActivation,
-             props::MoERouterApplySoftmax, props::MoECacheSize>
+             props::MoERouterApplySoftmax, props::MoECacheSize,
+             props::MoEPrefetchKey>
     moe_props;
 
   // weight indices
@@ -124,15 +123,8 @@ private:
 
   // intermediate tensor indices
   unsigned int router_logits_idx;
-  unsigned int expert_mask_idx;
 
-  // LRU cache of resident (mmap'd) experts. An expert stays mapped across
-  // tokens until evicted, so repeatedly-hit experts are not re-loaded. Guarded
-  // by cache_mutex so a background prefetch thread can mutate it too.
-  std::list<int> loaded_expert_deque; /**< LRU order */
-  std::unordered_map<int, std::list<int>::iterator> iteration_map;
-  std::vector<bool> need_load; /**< per-expert: must activate before use */
-  std::mutex cache_mutex;
+  std::shared_ptr<SmallThinkerExpertPrefetchState> prefetch_state;
 
   inline void compute_expert_forward(
     const nntrainer::Tensor &input, nntrainer::Tensor &output,
@@ -141,9 +133,8 @@ private:
     const nntrainer::Tensor &down_proj, unsigned int hidden_size);
 
   /**
-   * @brief Activate the expert on a cache miss (and record it in the LRU),
-   *        then run the expert forward. Does NOT deactivate; eviction is
-   *        deferred to evict_experts().
+   * @brief Wait for a prefetched expert or activate it on a cache miss, then
+   *        run the expert forward.
    * @return true if this was a cache miss (expert was activated here).
    */
   bool
@@ -153,11 +144,7 @@ private:
                     unsigned int expert_idx, unsigned int hidden_size,
                     long long &activate_ns, long long &compute_ns);
 
-  /** @brief Bump predicted experts to the MRU end so they survive eviction. */
-  void touch_predicted(const std::vector<unsigned int> &predicted);
-
-  /** @brief Deactivate (munmap) LRU-front experts until size <= cache_size. */
-  void evict_experts(nntrainer::RunLayerContext &context);
+  void registerPrefetchWeights(nntrainer::RunLayerContext &context);
 };
 } // namespace causallm
 

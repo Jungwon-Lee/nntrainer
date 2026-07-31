@@ -47,6 +47,12 @@ protected:
 
   virtual const char *getMoELayerType() const { return "smallthinker_moe"; }
 
+  virtual bool useExpertPrefetch() const { return false; }
+
+  virtual std::string getExpertPrefetchKey(const int layer_id) const {
+    return "";
+  }
+
   static json &normalizeConfig(json &cfg);
 
 private:
@@ -92,10 +98,7 @@ public:
     "SmallThinkerCachedSlimForCausalLM";
 
   SmallThinkerCachedSlimCausalLM(json &cfg, json &generation_cfg,
-                                 json &nntr_cfg) :
-    Transformer(normalizeConfig(cfg), generation_cfg, nntr_cfg,
-                ModelType::CAUSALLM),
-    SmallThinkerCausalLM(cfg, generation_cfg, nntr_cfg) {}
+                                 json &nntr_cfg);
 
   virtual ~SmallThinkerCachedSlimCausalLM() = default;
 
@@ -104,7 +107,16 @@ protected:
     return "smallthinker_moe_cached_slim";
   }
 
+  bool useExpertPrefetch() const override { return true; }
+
+  std::string getExpertPrefetchKey(const int layer_id) const override {
+    return prefetch_namespace + ":" + std::to_string(layer_id);
+  }
+
   void registerCustomLayers() override;
+
+private:
+  std::string prefetch_namespace;
 };
 
 } // namespace causallm

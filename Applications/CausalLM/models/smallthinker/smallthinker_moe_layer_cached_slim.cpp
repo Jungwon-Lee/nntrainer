@@ -26,6 +26,7 @@
 #endif
 #include <node_exporter.h>
 #include <smallthinker_moe_layer_cached_slim.h>
+#include <smallthinker_sparse_ffn.h>
 #include <stdexcept>
 #include <thread_manager.h>
 
@@ -38,6 +39,14 @@ namespace causallm {
 namespace {
 
 static constexpr size_t SINGLE_INOUT_IDX = 0;
+
+void reglu(unsigned int size, float *output, const float *gate,
+           const float *up) {
+  for (unsigned int i = 0; i < size; ++i) {
+    const float activated = gate[i] <= 0.0f ? 0.0f : gate[i];
+    output[i] = activated * up[i];
+  }
+}
 
 void normalize_router_weights(nntrainer::Tensor &topk_values,
                               unsigned int total_tokens, unsigned int topk,
@@ -61,26 +70,6 @@ void normalize_router_weights(nntrainer::Tensor &topk_values,
   }
 }
 
-// Collect the top (topk + extra) expert indices across all tokens, used as the
-// LRU prediction set. Indices only; routing weights are computed separately.
-std::vector<unsigned int> collect_predicted(nntrainer::Tensor &router_logits,
-                                            unsigned int total_tokens,
-                                            unsigned int topk,
-                                            unsigned int num_experts) {
-  const unsigned int extra =
-    std::min(topk + 5u, num_experts); // a few near-misses kept warm
-  auto extra_topk_result = router_logits.topK(extra);
-  auto extra_topk_indices = std::get<1>(extra_topk_result);
-  const uint32_t *idx = extra_topk_indices.getData<uint32_t>();
-
-  std::vector<unsigned int> predicted;
-  predicted.reserve(total_tokens * extra);
-  for (unsigned int i = 0; i < total_tokens; ++i)
-    for (unsigned int k = 0; k < extra; ++k)
-      predicted.push_back(idx[i * extra + k]);
-  return predicted;
-}
-
 } // namespace
 
 SmallThinkerCachedSlimMoELayer::SmallThinkerCachedSlimMoELayer() :
@@ -91,20 +80,21 @@ SmallThinkerCachedSlimMoELayer::SmallThinkerCachedSlimMoELayer() :
   cache_size(32),
   moe_props(props::NumExperts(), props::NumExpertsPerToken(),
             nntrainer::props::Unit(), props::MoEActivation(),
-            props::MoERouterApplySoftmax(), props::MoECacheSize()),
+            props::MoERouterApplySoftmax(), props::MoECacheSize(),
+            props::MoEPrefetchKey()),
   expert_gate_proj_indices({}),
   expert_up_proj_indices({}),
   expert_down_proj_indices({}),
   gate_idx(std::numeric_limits<unsigned>::max()),
-  router_logits_idx(std::numeric_limits<unsigned>::max()),
-  expert_mask_idx(std::numeric_limits<unsigned>::max()) {}
+  router_logits_idx(std::numeric_limits<unsigned>::max()) {}
 
 void SmallThinkerCachedSlimMoELayer::finalize(
   nntrainer::InitLayerContext &context) {
 
-  NNTR_THROW_IF(context.getNumInputs() != 2, std::invalid_argument)
-    << "SmallThinker cached-slim MoE layer requires expert input and router "
-       "input";
+  NNTR_THROW_IF(context.getNumInputs() != 2 && context.getNumInputs() != 5,
+                std::invalid_argument)
+    << "SmallThinker cached-slim MoE layer requires expert/router inputs and "
+       "optionally precomputed routing weights, indices, and validity";
 
   auto &weight_regularizer =
     std::get<nntrainer::props::WeightRegularizer>(*layer_impl_props);
@@ -130,6 +120,11 @@ void SmallThinkerCachedSlimMoELayer::finalize(
   // reproduces the old behavior (evict every expert after each token).
   if (const char *env = std::getenv("NNTR_MOE_CACHE_SIZE"))
     cache_size = static_cast<unsigned int>(std::stoul(env));
+  const std::string &prefetch_key =
+    std::get<props::MoEPrefetchKey>(moe_props).get();
+  prefetch_state = prefetch_key.empty()
+                     ? std::make_shared<SmallThinkerExpertPrefetchState>()
+                     : getSmallThinkerExpertPrefetchState(prefetch_key);
   const unsigned int intermediate_size =
     std::get<nntrainer::props::Unit>(moe_props).get();
   const unsigned int hidden_size = in_dim.width();
@@ -192,9 +187,6 @@ void SmallThinkerCachedSlimMoELayer::finalize(
       "expert_down_" + std::to_string(i), false, true));
   }
 
-  // All experts start unloaded; the LRU cache populates them on first use.
-  need_load.assign(num_experts, true);
-
   const unsigned batch_size = in_dim.batch();
   const unsigned seq_len = in_dim.height();
   const unsigned total_tokens = batch_size * seq_len;
@@ -203,21 +195,17 @@ void SmallThinkerCachedSlimMoELayer::finalize(
     context.requestTensor({total_tokens, 1, 1, num_experts}, "router_logits",
                           nntrainer::Initializer::NONE, false,
                           nntrainer::TensorLifespan::FORWARD_FUNC_LIFESPAN);
-
-  expert_mask_idx =
-    context.requestTensor({num_experts, 1, topk, total_tokens}, "expert_mask",
-                          nntrainer::Initializer::ZEROS, false,
-                          nntrainer::TensorLifespan::FORWARD_FUNC_LIFESPAN);
 }
 
 void SmallThinkerCachedSlimMoELayer::forwarding(
   nntrainer::RunLayerContext &context, bool training) {
+  registerPrefetchWeights(context);
+
   nntrainer::Tensor &input = context.getInput(SINGLE_INOUT_IDX);
   nntrainer::Tensor &router_input = context.getInput(1);
   nntrainer::Tensor &output = context.getOutput(SINGLE_INOUT_IDX);
 
   nntrainer::Tensor &router_logits = context.getTensor(router_logits_idx);
-  nntrainer::Tensor &expert_mask = context.getTensor(expert_mask_idx);
 
   const unsigned batch_size = input.batch();
   const unsigned seq_len = input.height();
@@ -229,23 +217,26 @@ void SmallThinkerCachedSlimMoELayer::forwarding(
   output.reshape({total_tokens, 1, 1, hidden_size});
   output.setZero();
 
-  nntrainer::Tensor &gate_weights = context.getWeight(gate_idx);
-  router_input.dot(gate_weights, router_logits);
-  auto topk_result = router_logits.topK(topk);
-  auto topk_values = std::get<0>(topk_result);
-  auto topk_indices = std::get<1>(topk_result);
+  nntrainer::Tensor topk_values;
+  nntrainer::Tensor topk_indices;
+  const bool has_precomputed_route =
+    context.getNumInputs() == 5 && context.getInput(4).getData<float>()[0] > 0;
+  if (has_precomputed_route) {
+    nntrainer::TensorDim route_dim({total_tokens, 1, 1, topk},
+                                   context.getInput(2).getTensorType());
+    topk_values = context.getInput(2).getSharedDataTensor(route_dim, 0, true);
+    topk_indices = context.getInput(3).getSharedDataTensor(route_dim, 0, true);
+  } else {
+    nntrainer::Tensor &gate_weights = context.getWeight(gate_idx);
+    router_input.dot(gate_weights, router_logits);
+    auto topk_result = router_logits.topK(topk);
+    topk_values = std::get<0>(topk_result);
+    topk_indices = std::get<1>(topk_result);
+    normalize_router_weights(topk_values, total_tokens, topk,
+                             router_apply_softmax);
+  }
 
-  normalize_router_weights(topk_values, total_tokens, topk,
-                           router_apply_softmax);
-
-  expert_mask.setZero();
   const uint32_t *indices_data = topk_indices.getData<uint32_t>();
-  auto &tm = nntrainer::ThreadManager::Global();
-  tm.parallel_for(0, total_tokens * topk, [&](size_t idx) {
-    const size_t i = idx / topk;
-    const size_t k = idx % topk;
-    expert_mask.setValue(indices_data[i * topk + k], 0, k, i, 1.0f);
-  });
 
   std::vector<std::vector<std::pair<unsigned, float>>> expert_assignments(
     num_experts);
@@ -256,9 +247,6 @@ void SmallThinkerCachedSlimMoELayer::forwarding(
       expert_assignments[expert_idx].emplace_back(i, weight);
     }
   }
-
-  std::vector<unsigned int> predicted =
-    collect_predicted(router_logits, total_tokens, topk, num_experts);
 
   long long activate_ns = 0, compute_ns = 0;
   for (unsigned int expert_idx = 0; expert_idx < num_experts; ++expert_idx) {
@@ -272,8 +260,7 @@ void SmallThinkerCachedSlimMoELayer::forwarding(
   (void)activate_ns;
   (void)compute_ns;
 
-  touch_predicted(predicted);
-  evict_experts(context);
+  prefetch_state->trim();
 
   output.reshape({batch_size, 1, seq_len, hidden_size});
   input.reshape({batch_size, 1, seq_len, hidden_size});
@@ -292,47 +279,65 @@ inline void SmallThinkerCachedSlimMoELayer::compute_expert_forward(
   if (num_tokens == 0)
     return;
 
-  nntrainer::TensorDim token_input_dim({1, 1, 1, hidden_size},
+  nntrainer::TensorDim token_input_dim({1, 1, num_tokens, hidden_size},
                                        input.getTensorType());
-  nntrainer::TensorDim intermediate_dim({1, 1, 1, intermediate_size},
+  nntrainer::TensorDim intermediate_dim({1, 1, num_tokens, intermediate_size},
                                         input.getTensorType());
-  nntrainer::TensorDim token_output_dim({1, 1, 1, hidden_size},
-                                        input.getTensorType());
+  nntrainer::TensorDim compact_output_dim({1, 1, num_tokens, hidden_size},
+                                          output.getTensorType());
+  nntrainer::TensorDim token_step_dim({1, 1, 1, hidden_size},
+                                      output.getTensorType());
 
-  nntrainer::Tensor expert_output(output.batch(), output.channel(),
-                                  output.height(), output.width(),
-                                  output.getTensorType());
-  expert_output.setZero();
+  if (num_tokens == 1) {
+    nntrainer::Tensor token_input = input.getSharedDataTensor(
+      token_step_dim, token_assignments[0].first * hidden_size, true);
+    nntrainer::Tensor expert_output(token_step_dim);
+    computeSmallThinkerReGLU(token_input, expert_output, gate_proj, up_proj,
+                             down_proj, token_assignments[0].second);
 
-  for (size_t i = 0; i < num_tokens; ++i) {
-    const unsigned token_idx = token_assignments[i].first;
-    const float weight = token_assignments[i].second;
-
-    size_t token_offset = token_idx * hidden_size;
-    nntrainer::Tensor token_input =
-      input.getSharedDataTensor(token_input_dim, token_offset, true);
-
-    nntrainer::Tensor gate_out(intermediate_dim);
-    nntrainer::Tensor acti_out(intermediate_dim);
-    nntrainer::Tensor up_out(intermediate_dim);
-
-    token_input.dot(gate_proj, gate_out);
-    acti_func.run_fn(gate_out, acti_out);
-    token_input.dot(up_proj, up_out);
-    acti_out.multiply_i(up_out);
-
-    nntrainer::Tensor token_expert_output(token_output_dim);
-    acti_out.dot(down_proj, token_expert_output);
-
-    token_expert_output.multiply_i(weight);
-    size_t output_offset = token_idx * hidden_size;
-    nntrainer::Tensor token_output =
-      expert_output.getSharedDataTensor(token_output_dim, output_offset, true);
-
-    token_output.add_i(token_expert_output);
+    nntrainer::Tensor token_output = output.getSharedDataTensor(
+      token_step_dim, token_assignments[0].first * hidden_size, true);
+    token_output.add_i(expert_output);
+    return;
   }
 
-  output.add_i(expert_output);
+  nntrainer::Tensor token_input(token_input_dim);
+  auto &tm = nntrainer::ThreadManager::Global();
+  tm.parallel_for(0, static_cast<size_t>(num_tokens), [&](size_t i) {
+    const unsigned token_idx = token_assignments[i].first;
+    nntrainer::Tensor src_view =
+      input.getSharedDataTensor(token_step_dim, token_idx * hidden_size, true);
+    nntrainer::Tensor dst_view =
+      token_input.getSharedDataTensor(token_step_dim, i * hidden_size, true);
+    dst_view.copyData(src_view);
+  });
+
+  nntrainer::Tensor gate_out(intermediate_dim);
+  nntrainer::Tensor acti_out(intermediate_dim);
+  nntrainer::Tensor up_out(intermediate_dim);
+
+  token_input.dot(gate_proj, gate_out);
+  token_input.dot(up_proj, up_out);
+
+  tm.parallel_for(0, static_cast<size_t>(num_tokens), [&](size_t i) {
+    const unsigned offset = acti_out.getIndex(0, 0, i, 0);
+    reglu(acti_out.width(), acti_out.getData<float>() + offset,
+          gate_out.getData<float>() + offset, up_out.getData<float>() + offset);
+  });
+
+  nntrainer::Tensor compact_output(compact_output_dim);
+  acti_out.dot(down_proj, compact_output);
+
+  for (size_t i = 0; i < num_tokens; ++i) {
+    const size_t output_offset =
+      token_assignments[i].first * static_cast<size_t>(hidden_size);
+    nntrainer::Tensor token_output =
+      output.getSharedDataTensor(token_step_dim, output_offset, true);
+    nntrainer::Tensor expert_token_output =
+      compact_output.getSharedDataTensor(token_step_dim, i * hidden_size, true);
+    expert_token_output.multiply_i(token_assignments[i].second);
+    token_output.add_i(expert_token_output);
+  }
 }
 
 bool SmallThinkerCachedSlimMoELayer::run_active_expert(
@@ -342,86 +347,55 @@ bool SmallThinkerCachedSlimMoELayer::run_active_expert(
   unsigned int expert_idx, unsigned int hidden_size, long long &activate_ns,
   long long &compute_ns) {
 
-  bool is_miss;
-  {
-    std::lock_guard<std::mutex> lock(cache_mutex);
-    is_miss = need_load[expert_idx];
-  }
-
-  // On a miss, page the expert in and record it as the most-recently-used.
-  // activate()/deactivate() must operate on the persistent context weight so
-  // that eviction can later munmap the same mapping. We never deactivate here;
-  // eviction is deferred to evict_experts().
-  if (is_miss) {
-    auto ta0 = high_resolution_clock::now();
-    context.getWeight(expert_gate_proj_indices[expert_idx]).activate();
-    context.getWeight(expert_up_proj_indices[expert_idx]).activate();
-    context.getWeight(expert_down_proj_indices[expert_idx]).activate();
-    auto ta1 = high_resolution_clock::now();
-    activate_ns += duration_cast<nanoseconds>(ta1 - ta0).count();
-
-    std::lock_guard<std::mutex> lock(cache_mutex);
-    loaded_expert_deque.push_back(expert_idx);
-    iteration_map[expert_idx] = --loaded_expert_deque.end();
-    need_load[expert_idx] = false;
-  }
+  auto ta0 = high_resolution_clock::now();
+  const bool is_miss = prefetch_state->acquire(expert_idx);
+  auto ta1 = high_resolution_clock::now();
+  activate_ns += duration_cast<nanoseconds>(ta1 - ta0).count();
 
   auto tc0 = high_resolution_clock::now();
-  compute_expert_forward(
-    input, output, assignments,
-    context.getWeight(expert_gate_proj_indices[expert_idx]),
-    context.getWeight(expert_up_proj_indices[expert_idx]),
-    context.getWeight(expert_down_proj_indices[expert_idx]), hidden_size);
+  try {
+    compute_expert_forward(
+      input, output, assignments,
+      context.getWeight(expert_gate_proj_indices[expert_idx]),
+      context.getWeight(expert_up_proj_indices[expert_idx]),
+      context.getWeight(expert_down_proj_indices[expert_idx]), hidden_size);
+  } catch (...) {
+    prefetch_state->release(expert_idx);
+    throw;
+  }
+  prefetch_state->release(expert_idx);
   auto tc1 = high_resolution_clock::now();
   compute_ns += duration_cast<nanoseconds>(tc1 - tc0).count();
 
   return is_miss;
 }
 
-void SmallThinkerCachedSlimMoELayer::touch_predicted(
-  const std::vector<unsigned int> &predicted) {
-  // Move already-resident predicted experts (this token's top-k plus a few
-  // near-misses) to the MRU end so eviction prefers genuinely cold experts.
-  std::lock_guard<std::mutex> lock(cache_mutex);
-  for (auto it = predicted.rbegin(); it != predicted.rend(); ++it) {
-    auto found = iteration_map.find(static_cast<int>(*it));
-    if (found != iteration_map.end()) {
-      loaded_expert_deque.erase(found->second);
-      loaded_expert_deque.push_back(static_cast<int>(*it));
-      iteration_map[static_cast<int>(*it)] = --loaded_expert_deque.end();
-    }
-  }
-}
-
-void SmallThinkerCachedSlimMoELayer::evict_experts(
+void SmallThinkerCachedSlimMoELayer::registerPrefetchWeights(
   nntrainer::RunLayerContext &context) {
-  while (true) {
-    int target_idx;
-    {
-      std::lock_guard<std::mutex> lock(cache_mutex);
-      if (loaded_expert_deque.size() <= cache_size)
-        break;
-      target_idx = loaded_expert_deque.front();
-      loaded_expert_deque.pop_front();
-      iteration_map.erase(target_idx);
-      need_load[target_idx] = true;
-    }
-    context.getWeight(expert_gate_proj_indices[target_idx]).deactivate();
-    context.getWeight(expert_up_proj_indices[target_idx]).deactivate();
-    context.getWeight(expert_down_proj_indices[target_idx]).deactivate();
+  if (prefetch_state->getRouterWeight() != nullptr)
+    return;
+
+  std::vector<SmallThinkerExpertWeights> weights;
+  weights.reserve(num_experts);
+  for (unsigned int expert = 0; expert < num_experts; ++expert) {
+    weights.push_back({&context.getWeight(expert_gate_proj_indices[expert]),
+                       &context.getWeight(expert_up_proj_indices[expert]),
+                       &context.getWeight(expert_down_proj_indices[expert])});
   }
+  prefetch_state->registerWeights(&context.getWeight(gate_idx),
+                                  std::move(weights), cache_size);
 }
 
 void SmallThinkerCachedSlimMoELayer::incremental_forwarding(
   nntrainer::RunLayerContext &context, unsigned int from, unsigned int to,
   bool training) {
+  registerPrefetchWeights(context);
 
   nntrainer::Tensor &input_ = context.getInput(SINGLE_INOUT_IDX);
   nntrainer::Tensor &router_input_ = context.getInput(1);
   nntrainer::Tensor &output_ = context.getOutput(SINGLE_INOUT_IDX);
 
   nntrainer::Tensor &router_logits_ = context.getTensor(router_logits_idx);
-  nntrainer::Tensor &expert_mask = context.getTensor(expert_mask_idx);
 
   nntrainer::TensorDim input_step_dim = input_.getDim();
   nntrainer::TensorDim output_step_dim = output_.getDim();
@@ -453,23 +427,32 @@ void SmallThinkerCachedSlimMoELayer::incremental_forwarding(
     router_input.reshape({total_tokens, 1, 1, hidden_size});
     output.reshape({total_tokens, 1, 1, hidden_size});
     output.setZero();
-    expert_mask.setZero();
 
-    nntrainer::Tensor &gate_weights = context.getWeight(gate_idx);
-    router_input.dot(gate_weights, router_logits);
-    auto topk_result = router_logits.topK(topk);
-    auto topk_values = std::get<0>(topk_result);
-    auto topk_indices = std::get<1>(topk_result);
-
-    normalize_router_weights(topk_values, total_tokens, topk,
-                             router_apply_softmax);
+    nntrainer::Tensor topk_values;
+    nntrainer::Tensor topk_indices;
+    const bool has_precomputed_route =
+      context.getNumInputs() == 5 &&
+      context.getInput(4).getData<float>()[b * (to - from)] > 0;
+    if (has_precomputed_route) {
+      nntrainer::TensorDim route_step_dim({1, 1, to - from, topk},
+                                          context.getInput(2).getTensorType());
+      topk_values = context.getInput(2).getSharedDataTensor(
+        route_step_dim, b * route_step_dim.getFeatureLen(), true);
+      topk_indices = context.getInput(3).getSharedDataTensor(
+        route_step_dim, b * route_step_dim.getFeatureLen(), true);
+      topk_values.reshape({total_tokens, 1, 1, topk});
+      topk_indices.reshape({total_tokens, 1, 1, topk});
+    } else {
+      nntrainer::Tensor &gate_weights = context.getWeight(gate_idx);
+      router_input.dot(gate_weights, router_logits);
+      auto topk_result = router_logits.topK(topk);
+      topk_values = std::get<0>(topk_result);
+      topk_indices = std::get<1>(topk_result);
+      normalize_router_weights(topk_values, total_tokens, topk,
+                               router_apply_softmax);
+    }
 
     const uint32_t *indices_data = topk_indices.getData<uint32_t>();
-    for (int i = 0; i < static_cast<int>(total_tokens); ++i) {
-      for (int k = 0; k < static_cast<int>(topk); ++k) {
-        expert_mask.setValue(indices_data[i * topk + k], 0, k, i, 1.0f);
-      }
-    }
 
     std::vector<std::vector<std::pair<unsigned, float>>> expert_assignments(
       num_experts);
@@ -480,11 +463,6 @@ void SmallThinkerCachedSlimMoELayer::incremental_forwarding(
         expert_assignments[expert_idx].emplace_back(i, weight);
       }
     }
-
-    // LRU prediction set (this token's top-k plus a few near-misses), indices
-    // only; routing weights above are unchanged so output is bit-identical.
-    std::vector<unsigned int> predicted =
-      collect_predicted(router_logits, total_tokens, topk, num_experts);
 
     long long activate_ns = 0, compute_ns = 0;
 #ifdef DEBUG
@@ -509,9 +487,7 @@ void SmallThinkerCachedSlimMoELayer::incremental_forwarding(
 #endif
     }
 
-    // Keep predicted experts warm, then evict the coldest beyond cache_size.
-    touch_predicted(predicted);
-    evict_experts(context);
+    prefetch_state->trim();
 
 #ifdef DEBUG
     auto t_loop1 = high_resolution_clock::now();
@@ -520,7 +496,7 @@ void SmallThinkerCachedSlimMoELayer::incremental_forwarding(
               << "\t| hit=" << hit_count << " miss=" << miss_count
               << "\t| activate=" << activate_ns / 1'000'000 << "ms"
               << " compute=" << compute_ns / 1'000'000 << "ms"
-              << " resident=" << loaded_expert_deque.size() << std::endl;
+              << " resident=" << prefetch_state->residentCount() << std::endl;
 #else
     (void)activate_ns;
     (void)compute_ns;

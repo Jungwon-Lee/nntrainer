@@ -119,7 +119,6 @@ private:
 
   // intermediate tensor indices
   unsigned int router_logits_idx;
-  unsigned int expert_mask_idx;
 
   inline void compute_expert_forward(
     const nntrainer::Tensor &input, nntrainer::Tensor &output,
