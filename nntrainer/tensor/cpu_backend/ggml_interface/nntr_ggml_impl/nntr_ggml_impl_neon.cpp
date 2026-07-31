@@ -148,6 +148,97 @@ void nntr_gemv_q4_0_4x8_q8_0(int n, float *__restrict s, size_t bs,
 #endif
 }
 
+void nntr_gemv_q4_0_4x8_q8_0_sparse(int n, float *__restrict s, size_t bs,
+                                    const void *__restrict vx,
+                                    const void *__restrict vy,
+                                    const uint8_t *__restrict block_masks,
+                                    int nr, int nc) {
+#if defined(__ARM_FEATURE_DOTPROD)
+  const int nb = n / QK8_0;
+  constexpr int ncols_interleaved = 4;
+
+  assert(n % QK8_0 == 0);
+  assert(nc % ncols_interleaved == 0);
+  assert(nr == 1);
+
+  const block_q8_0 *a_ptr = static_cast<const block_q8_0 *>(vy);
+  for (int c = 0; c < nc; c += ncols_interleaved) {
+    const block_q4_0x4 *b_ptr =
+      static_cast<const block_q4_0x4 *>(vx) + (c / ncols_interleaved) * nb;
+    float32x4_t acc = vdupq_n_f32(0);
+
+    for (int b = 0; b < nb; ++b) {
+      const uint8_t mask = block_masks[b];
+      if (mask == 0)
+        continue;
+
+      int32x4_t ret0 = vdupq_n_s32(0);
+      int32x4_t ret1 = vdupq_n_s32(0);
+
+      if ((mask & 0x5U) != 0) {
+        const int8x16_t b0 =
+          vld1q_s8(reinterpret_cast<const int8_t *>(b_ptr[b].qs));
+        const int8x16_t b1 =
+          vld1q_s8(reinterpret_cast<const int8_t *>(b_ptr[b].qs) + 16);
+
+        if ((mask & 0x1U) != 0) {
+          const int8x16_t a0 = vreinterpretq_s8_s64(
+            vld1q_dup_s64(reinterpret_cast<const int64_t *>(a_ptr[b].qs)));
+          ret0 = vdotq_s32(ret0, b0 << 4, a0);
+          ret1 = vdotq_s32(ret1, b1 << 4, a0);
+        }
+        if ((mask & 0x4U) != 0) {
+          const int8x16_t a2 = vreinterpretq_s8_s64(
+            vld1q_dup_s64(reinterpret_cast<const int64_t *>(a_ptr[b].qs) + 2));
+          ret0 = vdotq_s32(ret0, b0 & 0xf0U, a2);
+          ret1 = vdotq_s32(ret1, b1 & 0xf0U, a2);
+        }
+      }
+
+      if ((mask & 0xaU) != 0) {
+        const int8x16_t b2 =
+          vld1q_s8(reinterpret_cast<const int8_t *>(b_ptr[b].qs) + 32);
+        const int8x16_t b3 =
+          vld1q_s8(reinterpret_cast<const int8_t *>(b_ptr[b].qs) + 48);
+
+        if ((mask & 0x2U) != 0) {
+          const int8x16_t a1 = vreinterpretq_s8_s64(
+            vld1q_dup_s64(reinterpret_cast<const int64_t *>(a_ptr[b].qs) + 1));
+          ret0 = vdotq_s32(ret0, b2 << 4, a1);
+          ret1 = vdotq_s32(ret1, b3 << 4, a1);
+        }
+        if ((mask & 0x8U) != 0) {
+          const int8x16_t a3 = vreinterpretq_s8_s64(
+            vld1q_dup_s64(reinterpret_cast<const int64_t *>(a_ptr[b].qs) + 3));
+          ret0 = vdotq_s32(ret0, b2 & 0xf0U, a3);
+          ret1 = vdotq_s32(ret1, b3 & 0xf0U, a3);
+        }
+      }
+
+      const int32x4_t ret = vpaddq_s32(ret0, ret1);
+      const float16x4_t bd =
+        vld1_f16(reinterpret_cast<const __fp16 *>(b_ptr[b].d));
+      const float16x4_t ad =
+        vld1_dup_f16(reinterpret_cast<const __fp16 *>(&a_ptr[b].d));
+      acc = vfmaq_f32(acc, vcvtq_n_f32_s32(ret, 4),
+                      vmulq_f32(vcvt_f32_f16(ad), vcvt_f32_f16(bd)));
+    }
+    vst1q_f32(s + c, acc);
+  }
+#else
+  (void)block_masks;
+  nntr_gemv_q4_0_4x8_q8_0(n, s, bs, vx, vy, nr, nc);
+#endif
+}
+
+bool nntr_gemv_q4_0_4x8_q8_0_sparse_supported() {
+#if defined(__ARM_FEATURE_DOTPROD)
+  return true;
+#else
+  return false;
+#endif
+}
+
 #ifdef ENABLE_FP16
 // FP16-output variant of nntr_gemv_q4_0_4x8_q8_0. Same kernel body, but the
 // final store fuses an fcvtn (FP32 4-lane -> FP16 4-lane) and writes a 64-bit

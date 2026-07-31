@@ -254,6 +254,62 @@ void nntr_gemv_q4_0_4x8_q8_0(int n, float *__restrict s, size_t bs,
   }
 }
 
+void nntr_gemv_q4_0_4x8_q8_0_sparse(int n, float *__restrict s, size_t bs,
+                                    const void *__restrict vx,
+                                    const void *__restrict vy,
+                                    const uint8_t *__restrict block_masks,
+                                    int nr, int nc) {
+  const int nb = n / QK8_0;
+  constexpr int ncols_interleaved = 4;
+  constexpr int blocklen = 8;
+
+  assert(n % QK8_0 == 0);
+  assert(nc % ncols_interleaved == 0);
+  assert(nr == 1);
+
+  const block_q8_0 *a_ptr = static_cast<const block_q8_0 *>(vy);
+  for (int x = 0; x < nc / ncols_interleaved; ++x) {
+    const block_q4_0x4 *b_ptr = static_cast<const block_q4_0x4 *>(vx) + x * nb;
+    float sumf[ncols_interleaved] = {};
+
+    for (int block = 0; block < nb; ++block) {
+      const uint8_t mask = block_masks[block];
+      if (mask == 0)
+        continue;
+
+      for (int half = 0; half < 2; ++half) {
+        const uint8_t low_bit = static_cast<uint8_t>(1U << half);
+        const uint8_t high_bit = static_cast<uint8_t>(1U << (half + 2));
+        if ((mask & (low_bit | high_bit)) == 0)
+          continue;
+
+        for (int j = 0; j < ncols_interleaved; ++j) {
+          int sumi = 0;
+          for (int i = 0; i < blocklen; ++i) {
+            const uint8_t q =
+              b_ptr[block]
+                .qs[half * ncols_interleaved * blocklen + j * blocklen + i];
+            if ((mask & low_bit) != 0)
+              sumi += static_cast<int8_t>(q << 4) *
+                      a_ptr[block].qs[half * blocklen + i];
+            if ((mask & high_bit) != 0)
+              sumi += static_cast<int8_t>(q & 0xf0U) *
+                      a_ptr[block].qs[(half + 2) * blocklen + i];
+          }
+          sumf[j] += (sumi >> 4) *
+                     nntr_compute_fp16_to_fp32(b_ptr[block].d[j]) *
+                     nntr_compute_fp16_to_fp32(a_ptr[block].d);
+        }
+      }
+    }
+
+    for (int j = 0; j < ncols_interleaved; ++j)
+      s[x * ncols_interleaved + j] = sumf[j];
+  }
+}
+
+bool nntr_gemv_q4_0_4x8_q8_0_sparse_supported() { return true; }
+
 //============================================================================
 // GEMM (General Matrix-Matrix Multiplication) - Q4_0 4x8
 //============================================================================

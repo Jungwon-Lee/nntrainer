@@ -37,6 +37,15 @@ static inline void __ggml_q4_0_4x8_q8_0_GEMM_GEMV(
   auto qa_data = QA.data();
 
   nntr_quantize_row_q8_0(A, qa_data, K);
+  thread_local std::vector<uint8_t> block_masks;
+  block_masks.clear();
+  bool use_sparse = false;
+  if (nntr_gemv_q4_0_4x8_q8_0_sparse_supported()) {
+    block_masks.resize(blocks_per_row);
+    use_sparse = nntr_build_q8_0_subblock_masks(qa_data, blocks_per_row,
+                                                block_masks.data());
+  }
+  const uint8_t *mask_data = block_masks.data();
   int B_step = sizeof(block_q4_0) * (K / QK4_0);
 
   auto &tm = ThreadManager::Global();
@@ -52,9 +61,16 @@ static inline void __ggml_q4_0_4x8_q8_0_GEMM_GEMV(
                    ? M_step_end + NB_COLS - (M_step_end % NB_COLS)
                    : M_step_end;
 
-    nntr_gemv_q4_0_4x8_q8_0(K, (float *)(C + M_step_start), N,
-                            (void *)((char *)B + M_step_start * B_step),
-                            qa_data, M, M_step_end - M_step_start);
+    if (use_sparse) {
+      nntr_gemv_q4_0_4x8_q8_0_sparse(
+        K, (float *)(C + M_step_start), N,
+        (void *)((char *)B + M_step_start * B_step), qa_data, mask_data, M,
+        M_step_end - M_step_start);
+    } else {
+      nntr_gemv_q4_0_4x8_q8_0(K, (float *)(C + M_step_start), N,
+                              (void *)((char *)B + M_step_start * B_step),
+                              qa_data, M, M_step_end - M_step_start);
+    }
   });
 }
 

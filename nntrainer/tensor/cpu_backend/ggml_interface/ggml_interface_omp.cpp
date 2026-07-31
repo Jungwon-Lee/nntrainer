@@ -40,6 +40,15 @@ void __ggml_q4_0_4x8_q8_0_GEMM(const unsigned int M, const unsigned int N,
 
     // online quantization for fp32 activation with no packing
     nntr_quantize_row_q8_0(A, QA.data(), K);
+    std::vector<uint8_t> block_masks;
+    bool use_sparse = false;
+    if (nntr_gemv_q4_0_4x8_q8_0_sparse_supported()) {
+      block_masks.resize(blocks_per_row);
+      use_sparse = nntr_build_q8_0_subblock_masks(QA.data(), blocks_per_row,
+                                                  block_masks.data());
+    }
+    const char *qa_data = QA.data();
+    const uint8_t *mask_data = block_masks.data();
 
     unsigned int chunk_size = 16;
     unsigned int loop = (N + chunk_size - 1) / chunk_size;
@@ -49,9 +58,16 @@ void __ggml_q4_0_4x8_q8_0_GEMM(const unsigned int M, const unsigned int N,
       unsigned int M_step_start = chunk_size * idx;
       unsigned int M_step_end = std::min(chunk_size * (idx + 1), (size_t)N);
 
-      nntr_gemv_q4_0_4x8_q8_0(K, (float *)((C) + M_step_start), N,
-                              (void *)((char *)B + M_step_start * B_step),
-                              QA.data(), M, M_step_end - M_step_start);
+      if (use_sparse) {
+        nntr_gemv_q4_0_4x8_q8_0_sparse(
+          K, (float *)((C) + M_step_start), N,
+          (void *)((char *)B + M_step_start * B_step), qa_data, mask_data, M,
+          M_step_end - M_step_start);
+      } else {
+        nntr_gemv_q4_0_4x8_q8_0(K, (float *)((C) + M_step_start), N,
+                                (void *)((char *)B + M_step_start * B_step),
+                                qa_data, M, M_step_end - M_step_start);
+      }
     });
   } else { // GEMM
     unsigned int blocks_per_4_rows = (K + QK8_0 - 1) / QK8_0;

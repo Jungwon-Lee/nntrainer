@@ -891,6 +891,29 @@ void dequantize_row_q8_0_impl(const block_q8_0 *__restrict x,
   }
 }
 
+bool nntr_build_q8_0_subblock_masks(const void *__restrict q8_data,
+                                    int64_t num_blocks,
+                                    uint8_t *__restrict block_masks) {
+  const block_q8_0 *blocks = static_cast<const block_q8_0 *>(q8_data);
+  int64_t active_subblocks = 0;
+
+  for (int64_t block = 0; block < num_blocks; ++block) {
+    uint8_t mask = 0;
+    for (int subblock = 0; subblock < 4; ++subblock) {
+      bool active = false;
+      for (int i = 0; i < 8; ++i)
+        active |= blocks[block].qs[subblock * 8 + i] != 0;
+      if (active) {
+        mask |= static_cast<uint8_t>(1U << subblock);
+        ++active_subblocks;
+      }
+    }
+    block_masks[block] = mask;
+  }
+
+  return num_blocks > 0 && active_subblocks <= num_blocks * 3;
+}
+
 void nntr_dequantize_row_q8_0(const void *__restrict x, float *__restrict y,
                               int64_t k) {
   dequantize_row_q8_0_impl((const block_q8_0 *)x, y, k);

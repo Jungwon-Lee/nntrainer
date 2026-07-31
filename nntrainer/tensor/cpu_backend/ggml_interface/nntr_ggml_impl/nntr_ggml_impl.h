@@ -53,6 +53,14 @@ void nntr_gemv_q4_0_4x8_q8_0(int n, float *__restrict s, size_t bs,
                              const void *__restrict vx,
                              const void *__restrict vy, int nr, int nc);
 
+void nntr_gemv_q4_0_4x8_q8_0_sparse(int n, float *__restrict s, size_t bs,
+                                    const void *__restrict vx,
+                                    const void *__restrict vy,
+                                    const uint8_t *__restrict block_masks,
+                                    int nr, int nc);
+
+bool nntr_gemv_q4_0_4x8_q8_0_sparse_supported();
+
 void nntr_gemv_q4_0_8x8_q8_0(int n, float *__restrict s, size_t bs,
                              const void *__restrict vx,
                              const void *__restrict vy, int nr, int nc);
@@ -120,6 +128,15 @@ size_t nntr_quantize_q8_0(const float *__restrict src, void *__restrict dst,
 
 void nntr_quantize_row_q8_0(const float *__restrict x, void *__restrict y,
                             int64_t k);
+
+/**
+ * @brief Build four 8-element non-zero masks for each Q8_0 block.
+ *
+ * @return true when at least one quarter of the sub-blocks can be skipped.
+ */
+bool nntr_build_q8_0_subblock_masks(const void *__restrict q8_data,
+                                    int64_t num_blocks,
+                                    uint8_t *__restrict block_masks);
 
 void nntr_quantize_row_q8_K(const float *__restrict x, void *__restrict y,
                             int64_t k);

@@ -540,6 +540,62 @@ TEST(nntrainer_ggml_arm, gemm_q8_0_4x8_128x128x128) {
   EXPECT_GT(cos, 0.999f);
 }
 
+TEST(nntrainer_ggml_arm, q8_0_subblock_mask_threshold) {
+  std::vector<block_q8_0_testonly> blocks(2);
+  std::vector<uint8_t> masks(blocks.size());
+
+  for (auto &block : blocks)
+    std::fill(std::begin(block.qs), std::end(block.qs), 1);
+
+  std::fill(blocks[0].qs, blocks[0].qs + 8, 0);
+  EXPECT_FALSE(
+    nntr_build_q8_0_subblock_masks(blocks.data(), blocks.size(), masks.data()));
+  EXPECT_EQ(masks[0], 0xe);
+  EXPECT_EQ(masks[1], 0xf);
+
+  std::fill(blocks[1].qs + 24, blocks[1].qs + 32, 0);
+  EXPECT_TRUE(
+    nntr_build_q8_0_subblock_masks(blocks.data(), blocks.size(), masks.data()));
+  EXPECT_EQ(masks[0], 0xe);
+  EXPECT_EQ(masks[1], 0x7);
+}
+
+TEST(nntrainer_ggml_arm, sparse_gemv_q4_0_4x8_matches_dense) {
+  nntr_ggml_init();
+
+  constexpr unsigned int N = 12;
+  constexpr unsigned int K = 256;
+  constexpr unsigned int blocks_per_row = K / 32;
+
+  auto A = generate_activations(K, 11, 1);
+  auto W = generate_activations(K, 22, N);
+  for (unsigned int block = 0; block < blocks_per_row; ++block) {
+    std::fill(A.begin() + block * 32 + 8, A.begin() + block * 32 + 24, 0.0f);
+  }
+
+  const size_t q4_size =
+    static_cast<size_t>(N) * K / 32 * sizeof(block_q4_0_testonly);
+  std::vector<char> Q4(q4_size), B(q4_size);
+  nntr_quantize_q4_0(W.data(), Q4.data(), N, K, nullptr);
+  nntr_repack_q4_0_to_q4_0_4_bl(B.data(), 8, Q4.data(), q4_size, N, K);
+
+  std::vector<block_q8_0_testonly> QA(blocks_per_row);
+  std::vector<uint8_t> masks(blocks_per_row);
+  nntr_quantize_row_q8_0(A.data(), QA.data(), K);
+  ASSERT_TRUE(
+    nntr_build_q8_0_subblock_masks(QA.data(), QA.size(), masks.data()));
+  for (uint8_t mask : masks)
+    EXPECT_EQ(mask, 0x9);
+
+  std::vector<float> dense(N), sparse(N);
+  nntr_gemv_q4_0_4x8_q8_0(K, dense.data(), N, B.data(), QA.data(), 1, N);
+  nntr_gemv_q4_0_4x8_q8_0_sparse(K, sparse.data(), N, B.data(), QA.data(),
+                                 masks.data(), 1, N);
+
+  for (unsigned int i = 0; i < N; ++i)
+    EXPECT_FLOAT_EQ(sparse[i], dense[i]);
+}
+
 TEST(nntrainer_ggml_arm, DISABLED_quantize_row_q8_0_benchmark) {
   nntr_ggml_init();
 
