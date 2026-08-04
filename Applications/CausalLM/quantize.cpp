@@ -59,13 +59,16 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <limits>
 #include <map>
 #include <string>
 #include <vector>
 
 #include "json.hpp"
 #include <app_context.h>
+#include <cpu_backend.h>
 #include <factory.h>
+#include <tensor.h>
 #include <tensor_dim.h>
 
 #include "causal_lm.h"
@@ -388,13 +391,12 @@ void registerAllModels() {
         cfg, generation_cfg, nntr_cfg);
     });
 #endif
-  factory.registerModel(
-    "SmallThinkerForCausalLM",
-    [](json cfg, json generation_cfg, json nntr_cfg) {
-      return std::make_unique<causallm::SmallThinkerCausalLM>(cfg,
-                                                              generation_cfg,
-                                                              nntr_cfg);
-    });
+  factory.registerModel("SmallThinkerForCausalLM", [](json cfg,
+                                                      json generation_cfg,
+                                                      json nntr_cfg) {
+    return std::make_unique<causallm::SmallThinkerCausalLM>(cfg, generation_cfg,
+                                                            nntr_cfg);
+  });
   factory.registerModel(
     "SmallThinkerSlimForCausalLM",
     [](json cfg, json generation_cfg, json nntr_cfg) {
@@ -439,6 +441,13 @@ void printUsage(const char *prog) {
        "omitted)\n"
     << "  --output_format <fmt> Output container: 'bin' (default) or "
        "'safetensors'\n"
+    << "  --sparse_lmhead       Append a Q4_0 LM-head predictor\n"
+    << "  --predictor_fp32 <path> Raw fc1/fc2 FP32 file produced by\n"
+    << "                        extract_lmhead_predictor.py\n"
+    << "  --predictor_unit <N> Predictor hidden size (default: 128)\n"
+    << "  --predictor_threshold <F> Candidate threshold (default: -2)\n"
+    << "  --predictor_topk_floor <N> Minimum predictor candidates "
+       "(default: 0)\n"
     << "  --config <path>       Use a target nntr_config.json instead of\n"
     << "                        individual dtype options. The fc_layer_dtype,\n"
     << "                        embedding_dtype, and lmhead_dtype fields\n"
@@ -463,6 +472,12 @@ void printUsage(const char *prog) {
     << "\n"
     << "  # Quantize to a different output directory:\n"
     << "  " << prog << " /path/to/qwen3-4b -o /output/qwen3-4b-q4\n"
+    << "\n"
+    << "  # Add the SmallThinker sparse LM-head predictor:\n"
+    << "  " << prog
+    << " /path/to/smallthinker-fp32 --sparse_lmhead "
+       "--predictor_fp32 /path/to/lmhead_predictor_fp32.bin "
+       "--lmhead_dtype Q4_0 --isa X86\n"
     << "\n"
     << "  # Use a target nntr_config.json:\n"
     << "  " << prog
@@ -614,6 +629,139 @@ void addSentenceTransformerLayerDtypes(std::map<std::string, DataType> &map,
   }
 }
 
+constexpr size_t Q4_0_BLOCK_ELEMENTS = 32;
+constexpr size_t Q4_0_BLOCK_BYTES = 18;
+
+size_t checkedMatrixElements(size_t rows, size_t columns,
+                             const std::string &name) {
+  if (rows == 0 || columns == 0 ||
+      rows > std::numeric_limits<size_t>::max() / columns)
+    throw std::invalid_argument(name + " has invalid dimensions");
+  return rows * columns;
+}
+
+void appendRepackedQ40(std::ofstream &output, const float *source, size_t rows,
+                       size_t columns, ml::train::ISA target_isa,
+                       const std::string &name) {
+  const size_t elements = checkedMatrixElements(rows, columns, name);
+  if (columns % Q4_0_BLOCK_ELEMENTS != 0)
+    throw std::invalid_argument(name +
+                                " columns must be divisible by Q4_0 block "
+                                "size");
+
+  const size_t blocks = elements / Q4_0_BLOCK_ELEMENTS;
+  if (blocks > std::numeric_limits<size_t>::max() / Q4_0_BLOCK_BYTES)
+    throw std::overflow_error(name + " Q4_0 size overflow");
+  const size_t bytes = blocks * Q4_0_BLOCK_BYTES;
+  std::vector<char> plain(bytes);
+  std::vector<char> repacked(bytes);
+
+  const size_t written =
+    nntrainer::quantize_q4_0(source, plain.data(), static_cast<int64_t>(rows),
+                             static_cast<int64_t>(columns), nullptr);
+  if (written != bytes)
+    throw std::runtime_error(name + " produced an unexpected Q4_0 size");
+  nntrainer::repack_q4_0(repacked.data(), plain.data(), bytes,
+                         static_cast<unsigned int>(rows),
+                         static_cast<unsigned int>(columns), target_isa);
+  output.write(repacked.data(), static_cast<std::streamsize>(repacked.size()));
+  if (!output.good())
+    throw std::runtime_error("Failed to append " + name);
+}
+
+std::vector<float> readFp32Matrix(std::ifstream &input, size_t rows,
+                                  size_t columns, const std::string &name) {
+  const size_t elements = checkedMatrixElements(rows, columns, name);
+  if (elements > std::numeric_limits<size_t>::max() / sizeof(float))
+    throw std::overflow_error(name + " FP32 size overflow");
+
+  std::vector<float> values(elements);
+  const size_t bytes = elements * sizeof(float);
+  input.read(reinterpret_cast<char *>(values.data()),
+             static_cast<std::streamsize>(bytes));
+  if (static_cast<size_t>(input.gcount()) != bytes)
+    throw std::runtime_error("Predictor file is truncated while reading " +
+                             name);
+  return values;
+}
+
+void appendSparseLmHeadWeights(const std::string &weight_path,
+                               causallm::Transformer &model,
+                               const std::string &predictor_path,
+                               size_t hidden_size, size_t vocab_size,
+                               size_t predictor_unit, bool tied_embeddings,
+                               ml::train::ISA target_isa) {
+  if (hidden_size % Q4_0_BLOCK_ELEMENTS != 0 ||
+      predictor_unit % Q4_0_BLOCK_ELEMENTS != 0 ||
+      vocab_size % Q4_0_BLOCK_ELEMENTS != 0)
+    throw std::invalid_argument(
+      "Sparse LM-head dimensions must be divisible by 32");
+
+  nntrainer::Tensor *embedding = nullptr;
+  if (tied_embeddings) {
+    embedding = model.getTensor("embedding0:Embedding");
+    if (embedding == nullptr)
+      throw std::runtime_error(
+        "Could not find embedding0:Embedding for tied LM-head");
+    if (embedding->getDataType() != DataType::FP32 ||
+        embedding->size() !=
+          checkedMatrixElements(vocab_size, hidden_size, "tied LM-head"))
+      throw std::runtime_error(
+        "Tied LM-head source embedding must be FP32 [vocab, hidden]");
+  }
+
+  const size_t fc1_elements =
+    checkedMatrixElements(predictor_unit, hidden_size, "output_profiler_w1");
+  const size_t fc2_elements =
+    checkedMatrixElements(vocab_size, predictor_unit, "output_profiler_w2");
+  if (fc1_elements > std::numeric_limits<size_t>::max() - fc2_elements ||
+      fc1_elements + fc2_elements >
+        std::numeric_limits<size_t>::max() / sizeof(float))
+    throw std::overflow_error("Sparse LM-head predictor size overflow");
+  const size_t expected_predictor_bytes =
+    (fc1_elements + fc2_elements) * sizeof(float);
+
+  if (!std::filesystem::exists(predictor_path))
+    throw std::runtime_error("Predictor FP32 file does not exist: " +
+                             predictor_path);
+  if (std::filesystem::file_size(predictor_path) != expected_predictor_bytes)
+    throw std::runtime_error(
+      "Predictor FP32 file size does not match configured dimensions");
+  std::ifstream predictor(predictor_path, std::ios::binary);
+  if (!predictor.is_open())
+    throw std::runtime_error("Failed to open predictor FP32 file: " +
+                             predictor_path);
+
+  std::ofstream output(weight_path, std::ios::binary | std::ios::app);
+  if (!output.is_open())
+    throw std::runtime_error("Failed to append sparse LM-head weights to " +
+                             weight_path);
+
+  if (embedding != nullptr)
+    appendRepackedQ40(output, embedding->getData<float>(), vocab_size,
+                      hidden_size, target_isa, "output_of_causallm");
+
+  {
+    auto fc1 = readFp32Matrix(predictor, predictor_unit, hidden_size,
+                              "output_profiler_w1");
+    appendRepackedQ40(output, fc1.data(), predictor_unit, hidden_size,
+                      target_isa, "output_profiler_w1");
+  }
+
+  auto fc2 =
+    readFp32Matrix(predictor, vocab_size, predictor_unit, "output_profiler_w2");
+  appendRepackedQ40(output, fc2.data(), vocab_size, predictor_unit, target_isa,
+                    "output_profiler_w2");
+
+  if (predictor.peek() != std::char_traits<char>::eof())
+    throw std::runtime_error("Predictor FP32 file has trailing bytes");
+
+  std::cout << "  Sparse LM-head weights appended:"
+            << (tied_embeddings ? " explicit tied head +" : "")
+            << " predictor [" << hidden_size << ", " << predictor_unit << ", "
+            << vocab_size << "]\n";
+}
+
 } // anonymous namespace
 
 int main(int argc, char *argv[]) {
@@ -638,6 +786,11 @@ int main(int argc, char *argv[]) {
   std::string output_bin_name = "";
   std::string target_config_path = "";
   std::string output_format = "bin";
+  bool sparse_lmhead = false;
+  std::string predictor_fp32_path;
+  unsigned int predictor_unit = 128;
+  float predictor_threshold = -2.0f;
+  unsigned int predictor_topk_floor = 0;
 
   for (int i = 2; i < argc; ++i) {
     std::string arg = argv[i];
@@ -662,6 +815,16 @@ int main(int argc, char *argv[]) {
       }
     } else if (arg == "--config" && i + 1 < argc) {
       target_config_path = argv[++i];
+    } else if (arg == "--sparse_lmhead") {
+      sparse_lmhead = true;
+    } else if (arg == "--predictor_fp32" && i + 1 < argc) {
+      predictor_fp32_path = argv[++i];
+    } else if (arg == "--predictor_unit" && i + 1 < argc) {
+      predictor_unit = static_cast<unsigned int>(std::stoul(argv[++i]));
+    } else if (arg == "--predictor_threshold" && i + 1 < argc) {
+      predictor_threshold = std::stof(argv[++i]);
+    } else if (arg == "--predictor_topk_floor" && i + 1 < argc) {
+      predictor_topk_floor = static_cast<unsigned int>(std::stoul(argv[++i]));
     } else if (arg == "--help" || arg == "-h") {
       printUsage(argv[0]);
       return EXIT_SUCCESS;
@@ -685,6 +848,7 @@ int main(int argc, char *argv[]) {
     json generation_cfg =
       causallm::LoadJsonFile(model_path + "/generation_config.json");
     json nntr_cfg = causallm::LoadJsonFile(model_path + "/nntr_config.json");
+    const bool source_sparse_lmhead = nntr_cfg.value("sparse_lmhead", false);
 
     // If a target config is specified, read dtypes from it
     if (!target_config_path.empty()) {
@@ -698,6 +862,16 @@ int main(int argc, char *argv[]) {
         lmhead_dtype_str = target_cfg["lmhead_dtype"].get<std::string>();
       if (target_cfg.contains("model_file_name") && output_bin_name.empty())
         output_bin_name = target_cfg["model_file_name"].get<std::string>();
+      if (target_cfg.contains("sparse_lmhead"))
+        sparse_lmhead = target_cfg["sparse_lmhead"].get<bool>();
+      if (target_cfg.contains("predictor_unit"))
+        predictor_unit = target_cfg["predictor_unit"].get<unsigned int>();
+      if (target_cfg.contains("lmhead_predictor_threshold"))
+        predictor_threshold =
+          target_cfg["lmhead_predictor_threshold"].get<float>();
+      if (target_cfg.contains("lmhead_predictor_topk_floor"))
+        predictor_topk_floor =
+          target_cfg["lmhead_predictor_topk_floor"].get<unsigned int>();
     }
 
     // Default lmhead_dtype to embd_dtype if not specified
@@ -712,10 +886,30 @@ int main(int argc, char *argv[]) {
     DataType embd_dtype = strToDataType(embd_dtype_str);
     DataType lmhead_dtype = strToDataType(lmhead_dtype_str);
 
+    if (sparse_lmhead) {
+      if (predictor_fp32_path.empty())
+        throw std::invalid_argument(
+          "--sparse_lmhead requires --predictor_fp32");
+      if (source_sparse_lmhead)
+        throw std::invalid_argument(
+          "Sparse LM-head packaging requires a standard FP32 source model");
+      if (lmhead_dtype != DataType::Q4_0)
+        throw std::invalid_argument(
+          "Sparse LM-head currently requires --lmhead_dtype Q4_0");
+      if (output_format != "bin")
+        throw std::invalid_argument(
+          "Sparse LM-head packaging only supports BIN output");
+    } else if (!predictor_fp32_path.empty()) {
+      throw std::invalid_argument("--predictor_fp32 requires --sparse_lmhead");
+    }
+
     // Validate source model is FP32
     std::string src_tensor_type =
       nntr_cfg["model_tensor_type"].get<std::string>();
     if (src_tensor_type != "FP32-FP32") {
+      if (sparse_lmhead)
+        throw std::invalid_argument(
+          "Sparse LM-head packaging requires model_tensor_type FP32-FP32");
       std::cerr << "[WARNING] Source model_tensor_type is '" << src_tensor_type
                 << "', not 'FP32-FP32'.\n"
                 << "  Quantization from non-FP32 models may produce unexpected "
@@ -733,6 +927,12 @@ int main(int argc, char *argv[]) {
       output_bin_name =
         generateOutputBinName(original_bin, dataTypeToStr(fc_dtype),
                               dataTypeToStr(embd_dtype), isa_str);
+      if (sparse_lmhead) {
+        const auto extension = output_bin_name.rfind(".bin");
+        output_bin_name.insert(
+          extension == std::string::npos ? output_bin_name.size() : extension,
+          "_sparse_lmhead");
+      }
     }
     if (output_format == "safetensors") {
       // The output format is decided by the file extension on save, so make
@@ -761,6 +961,8 @@ int main(int argc, char *argv[]) {
     std::cout << "  Embed dtype:  " << dataTypeToStr(embd_dtype) << "\n";
     std::cout << "  LMHead dtype: " << dataTypeToStr(lmhead_dtype) << "\n";
     std::cout << "  Target ISA:   " << isaToStr(target_isa) << "\n";
+    std::cout << "  Sparse head:  " << (sparse_lmhead ? "enabled" : "disabled")
+              << "\n";
     std::cout << "\n";
 
     // =========================================================================
@@ -774,6 +976,10 @@ int main(int argc, char *argv[]) {
       std::string model_type = nntr_cfg["model_type"].get<std::string>();
       architecture = resolve_architecture(model_type, architecture);
     }
+    if (sparse_lmhead && architecture.find("SmallThinker") == std::string::npos)
+      throw std::invalid_argument(
+        "Sparse LM-head predictor packaging is only supported for "
+        "SmallThinker");
 
     // Resolve paths in nntr_cfg against the model directory.
     // Relative paths are anchored to model_path (existing behaviour).
@@ -792,6 +998,9 @@ int main(int argc, char *argv[]) {
           (std::filesystem::path(model_path) / p.filename()).string();
       }
     }
+
+    if (sparse_lmhead)
+      nntr_cfg["sparse_lmhead"] = false;
 
     auto model = causallm::Factory::Instance().create(architecture, cfg,
                                                       generation_cfg, nntr_cfg);
@@ -836,6 +1045,13 @@ int main(int argc, char *argv[]) {
     model->save_weight(dst_weight_path, DataType::NONE, layer_dtype_map,
                        target_isa);
 
+    if (sparse_lmhead) {
+      appendSparseLmHeadWeights(
+        dst_weight_path, *model, predictor_fp32_path,
+        cfg["hidden_size"].get<size_t>(), cfg["vocab_size"].get<size_t>(),
+        predictor_unit, cfg.value("tie_word_embeddings", true), target_isa);
+    }
+
     // Report file size
     auto src_size = std::filesystem::file_size(src_weight_path);
     auto dst_size = std::filesystem::file_size(dst_weight_path);
@@ -856,6 +1072,12 @@ int main(int argc, char *argv[]) {
     new_nntr_cfg["fc_layer_dtype"] = dataTypeToStr(fc_dtype);
     new_nntr_cfg["embedding_dtype"] = dataTypeToStr(embd_dtype);
     new_nntr_cfg["lmhead_dtype"] = dataTypeToStr(lmhead_dtype);
+    new_nntr_cfg["sparse_lmhead"] = sparse_lmhead;
+    if (sparse_lmhead) {
+      new_nntr_cfg["predictor_unit"] = predictor_unit;
+      new_nntr_cfg["lmhead_predictor_threshold"] = predictor_threshold;
+      new_nntr_cfg["lmhead_predictor_topk_floor"] = predictor_topk_floor;
+    }
     new_nntr_cfg["model_tensor_type"] =
       buildModelTensorType(dataTypeToStr(fc_dtype));
 

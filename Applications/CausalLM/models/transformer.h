@@ -251,6 +251,15 @@ public:
   unsigned int getVocabSize() const { return NUM_VOCAB; }
 
   /**
+   * @brief Look up a tensor owned by the compiled NNTrainer graph
+   * @param name Fully-qualified graph tensor name
+   * @return Tensor pointer, or nullptr when the tensor does not exist
+   */
+  nntrainer::Tensor *getTensor(const std::string &name) {
+    return model == nullptr ? nullptr : model->getTensor(name);
+  }
+
+  /**
    * @brief Get tokenizer owned by this model, or nullptr if no tokenizer exists
    */
   tokenizers::Tokenizer *getTokenizer() { return tokenizer.get(); }
