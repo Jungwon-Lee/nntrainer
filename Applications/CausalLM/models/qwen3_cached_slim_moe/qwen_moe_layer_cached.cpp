@@ -44,6 +44,7 @@ namespace causallm {
 
 static constexpr size_t SINGLE_INOUT_IDX = 0;
 static constexpr size_t MAX_CACHED_EXPERTS = 32;
+static constexpr size_t PREFETCH_LOOKAHEAD = 2;
 
 namespace {
 
@@ -78,6 +79,12 @@ void activateExpert(const ExpertWeights &weights) {
     }
     throw;
   }
+}
+
+void prefetchExpert(const ExpertWeights &weights) {
+  weights.gate->prefetch();
+  weights.up->prefetch();
+  weights.down->prefetch();
 }
 
 void deactivateExpert(const ExpertWeights &weights) {
@@ -458,6 +465,7 @@ void CachedSlimMoELayer::incremental_forwarding(
     if (total_tokens > 1 && !compute_order.empty()) {
       std::condition_variable cache_condition;
       std::vector<bool> pending_expert(num_experts, false);
+      std::vector<bool> prefetch_ready(num_experts, false);
       std::vector<size_t> job_rank(num_experts, compute_order.size());
       for (size_t rank = 0; rank < compute_order.size(); ++rank) {
         pending_expert[compute_order[rank]] = true;
@@ -478,10 +486,18 @@ void CachedSlimMoELayer::incremental_forwarding(
               int eviction_target = -1;
               {
                 std::unique_lock<std::mutex> lock(cache_mutex);
+                cache_condition.wait(lock, [&]() {
+                  return cancel_prefetch ||
+                         rank <= next_compute_rank + PREFETCH_LOOKAHEAD;
+                });
                 if (cancel_prefetch)
                   return;
 
                 if (!need_load[expert_idx]) {
+                  lock.unlock();
+                  prefetchExpert(expert_weights[expert_idx]);
+                  lock.lock();
+                  prefetch_ready[expert_idx] = true;
                   ++hit_count;
                   cache_condition.notify_all();
                   break;
@@ -490,10 +506,17 @@ void CachedSlimMoELayer::incremental_forwarding(
                 if (loaded_expert_deque.size() < MAX_CACHED_EXPERTS) {
                   lock.unlock();
                   activateExpert(expert_weights[expert_idx]);
+                  try {
+                    prefetchExpert(expert_weights[expert_idx]);
+                  } catch (...) {
+                    deactivateExpert(expert_weights[expert_idx]);
+                    throw;
+                  }
                   lock.lock();
                   loaded_expert_deque.push_back(expert_idx);
                   iteration_map[expert_idx] = --loaded_expert_deque.end();
                   need_load[expert_idx] = false;
+                  prefetch_ready[expert_idx] = true;
                   ++miss_count;
                   cache_condition.notify_all();
                   break;
@@ -549,7 +572,7 @@ void CachedSlimMoELayer::incremental_forwarding(
           {
             std::unique_lock<std::mutex> lock(cache_mutex);
             cache_condition.wait(lock, [&]() {
-              return !need_load[expert_idx] || prefetch_error != nullptr;
+              return prefetch_ready[expert_idx] || prefetch_error != nullptr;
             });
             if (prefetch_error != nullptr)
               std::rethrow_exception(prefetch_error);
