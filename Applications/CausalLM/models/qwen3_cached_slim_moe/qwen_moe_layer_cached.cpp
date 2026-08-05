@@ -44,7 +44,7 @@ namespace causallm {
 
 static constexpr size_t SINGLE_INOUT_IDX = 0;
 static constexpr size_t MAX_CACHED_EXPERTS = 32;
-static constexpr size_t PREFETCH_LOOKAHEAD = 2;
+static constexpr size_t PREFETCH_LOOKAHEAD = 1;
 
 namespace {
 
@@ -494,9 +494,6 @@ void CachedSlimMoELayer::incremental_forwarding(
                   return;
 
                 if (!need_load[expert_idx]) {
-                  lock.unlock();
-                  prefetchExpert(expert_weights[expert_idx]);
-                  lock.lock();
                   prefetch_ready[expert_idx] = true;
                   ++hit_count;
                   cache_condition.notify_all();

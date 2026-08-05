@@ -1718,25 +1718,21 @@ void Tensor::prefetch() {
   const size_t page_size = getSystemPageSize();
   const size_t page_offset = file_offset % page_size;
   const size_t len = getMemoryBytes() + page_offset;
-
-#ifdef MADV_POPULATE_READ
-  // MADV_POPULATE_READ is synchronous and prefaults the page tables. Fall
-  // back when either the headers or the running kernel do not support it.
-  if (madvise(mapped_ptr, len, MADV_POPULATE_READ) == 0)
-    return;
-#endif
-
   (void)madvise(mapped_ptr, len, MADV_WILLNEED);
 
-  const auto *data =
-    reinterpret_cast<const volatile uint8_t *>(mapped_ptr) + page_offset;
-  const size_t data_size = getMemoryBytes();
+  const size_t page_count = (len + page_size - 1) / page_size;
+  std::vector<unsigned char> residency(page_count, 0);
+  const bool residency_available =
+    mincore(mapped_ptr, len, residency.data()) == 0;
+
+  const auto *mapping = reinterpret_cast<const volatile uint8_t *>(mapped_ptr);
   uint8_t residency_probe = 0;
-  for (size_t offset = 0; offset < data_size; offset += page_size)
-    residency_probe = static_cast<uint8_t>(residency_probe ^ data[offset]);
-  if (data_size > 0)
+  for (size_t page = 0; page < page_count; ++page) {
+    if (residency_available && (residency[page] & 1U) != 0)
+      continue;
     residency_probe =
-      static_cast<uint8_t>(residency_probe ^ data[data_size - 1]);
+      static_cast<uint8_t>(residency_probe ^ mapping[page * page_size]);
+  }
   (void)residency_probe;
 #endif
 }
