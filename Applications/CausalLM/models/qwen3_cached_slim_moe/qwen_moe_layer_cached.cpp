@@ -26,7 +26,10 @@
 #include <algorithm>
 #include <atomic>
 #include <cmath>
+#include <condition_variable>
 #include <deque>
+#include <exception>
+#include <future>
 #include <node_exporter.h>
 #include <qwen_moe_layer_cached.h>
 #include <stdexcept>
@@ -40,6 +43,67 @@ using std::chrono::nanoseconds;
 namespace causallm {
 
 static constexpr size_t SINGLE_INOUT_IDX = 0;
+static constexpr size_t MAX_CACHED_EXPERTS = 32;
+
+namespace {
+
+struct ExpertWeights {
+  nntrainer::Tensor *gate;
+  nntrainer::Tensor *up;
+  nntrainer::Tensor *down;
+};
+
+void activateExpert(const ExpertWeights &weights) {
+  bool gate_activated = false;
+  bool up_activated = false;
+
+  try {
+    weights.gate->activate();
+    gate_activated = true;
+    weights.up->activate();
+    up_activated = true;
+    weights.down->activate();
+  } catch (...) {
+    if (up_activated) {
+      try {
+        weights.up->deactivate();
+      } catch (...) {
+      }
+    }
+    if (gate_activated) {
+      try {
+        weights.gate->deactivate();
+      } catch (...) {
+      }
+    }
+    throw;
+  }
+}
+
+void deactivateExpert(const ExpertWeights &weights) {
+  std::exception_ptr error;
+  try {
+    weights.gate->deactivate();
+  } catch (...) {
+    error = std::current_exception();
+  }
+  try {
+    weights.up->deactivate();
+  } catch (...) {
+    if (error == nullptr)
+      error = std::current_exception();
+  }
+  try {
+    weights.down->deactivate();
+  } catch (...) {
+    if (error == nullptr)
+      error = std::current_exception();
+  }
+  if (error != nullptr)
+    std::rethrow_exception(error);
+}
+
+} // namespace
 
 CachedSlimMoELayer::CachedSlimMoELayer() :
   LayerImpl(),
@@ -298,21 +362,26 @@ void CachedSlimMoELayer::incremental_forwarding(
     input.dot(gate_weights, router_logits);
     router_logits.apply(nntrainer::ActiFunc::softmax<float>, router_logits);
 
-    // get extra topK
-    auto extra_topk_result = router_logits.topK(topk + 5);
-    auto extra_topk_values = std::get<0>(extra_topk_result);
+    // Get additional candidates used to keep likely decode experts resident.
+    const unsigned int extra_topk_count = std::min(num_experts, topk + 5);
+    auto extra_topk_result = router_logits.topK(extra_topk_count);
     auto extra_topk_indices = std::get<1>(extra_topk_result);
     std::deque<int> extra_top_k = {};
-    extra_topk_values.divide_i(extra_topk_values.sum(3));
     const uint32_t *extra_indices_data = extra_topk_indices.getData<uint32_t>();
 
-    // get extra topk
+    // Store oldest tokens first and the latest token last in LRU update order.
     for (int i = static_cast<int>(total_tokens) - 1; i >= 0; --i) {
-      for (int k = 0; k < static_cast<int>(topk + 5); ++k) {
-        unsigned expert_idx = extra_indices_data[i * topk + k];
+      for (int k = 0; k < static_cast<int>(extra_topk_count); ++k) {
+        unsigned expert_idx = extra_indices_data[i * extra_topk_count + k];
         extra_top_k.push_back(expert_idx);
       }
     }
+
+    std::vector<bool> retain_expert(num_experts, false);
+    const size_t latest_token_offset =
+      static_cast<size_t>(total_tokens - 1) * extra_topk_count;
+    for (unsigned int k = 0; k < extra_topk_count; ++k)
+      retain_expert[extra_indices_data[latest_token_offset + k]] = true;
 
     auto topk_result = router_logits.topK(topk);
     auto topk_values = std::get<0>(topk_result);
@@ -349,6 +418,24 @@ void CachedSlimMoELayer::incremental_forwarding(
                           hidden_size, output.getTensorType());
     }
 
+    std::vector<int> compute_order = target_idx_vector;
+    if (total_tokens > 1) {
+      std::stable_sort(compute_order.begin(), compute_order.end(),
+                       [&](int lhs, int rhs) {
+                         return expert_assignments[lhs].size() >
+                                expert_assignments[rhs].size();
+                       });
+    }
+
+    std::vector<ExpertWeights> expert_weights;
+    expert_weights.reserve(num_experts);
+    for (unsigned int expert_idx = 0; expert_idx < num_experts; ++expert_idx) {
+      expert_weights.push_back(
+        {&context.getWeight(expert_gate_proj_indices[expert_idx]),
+         &context.getWeight(expert_up_proj_indices[expert_idx]),
+         &context.getWeight(expert_down_proj_indices[expert_idx])});
+    }
+
     int hit_count = 0;
     int miss_count = 0;
 
@@ -359,65 +446,208 @@ void CachedSlimMoELayer::incremental_forwarding(
     auto t2_hit = t1_hit;
 #endif
 
-    // Serial outer loop: the expert GEMV/GEMM parallelizes internally via
-    // ThreadManager (dot() calls parallel_for), and nesting parallel_for
-    // deadlocks because ThreadManager::parallelize() uses a non-recursive
-    // execution_mutex_.
-    for (int expert_idx : target_idx_vector) {
-      const auto &assignments = expert_assignments[expert_idx];
-      if (need_load[expert_idx]) {
+    auto remove_from_cache = [&](int expert_idx) {
+      loaded_expert_deque.erase(iteration_map.at(expert_idx));
+      iteration_map.erase(expert_idx);
+      need_load[expert_idx] = true;
+    };
 
-#ifdef DEBUG
-        t1_miss = high_resolution_clock::now();
-#endif
+    // Serial expert computation is intentional: dot() parallelizes internally.
+    // During prefill, a separate storage worker fills the bounded expert cache
+    // in workload order while the current expert performs its batched GEMMs.
+    if (total_tokens > 1 && !compute_order.empty()) {
+      std::condition_variable cache_condition;
+      std::vector<bool> pending_expert(num_experts, false);
+      std::vector<size_t> job_rank(num_experts, compute_order.size());
+      for (size_t rank = 0; rank < compute_order.size(); ++rank) {
+        pending_expert[compute_order[rank]] = true;
+        job_rank[compute_order[rank]] = rank;
+      }
 
-        context.getWeight(expert_gate_proj_indices[expert_idx]).activate();
-        context.getWeight(expert_up_proj_indices[expert_idx]).activate();
-        context.getWeight(expert_down_proj_indices[expert_idx]).activate();
+      bool cancel_prefetch = false;
+      int computing_expert = -1;
+      size_t next_compute_rank = 0;
+      std::exception_ptr prefetch_error;
 
+      auto prefetch_task = std::async(std::launch::async, [&]() {
+        try {
+          for (size_t rank = 0; rank < compute_order.size(); ++rank) {
+            const int expert_idx = compute_order[rank];
+
+            while (true) {
+              int eviction_target = -1;
+              {
+                std::unique_lock<std::mutex> lock(cache_mutex);
+                if (cancel_prefetch)
+                  return;
+
+                if (!need_load[expert_idx]) {
+                  ++hit_count;
+                  cache_condition.notify_all();
+                  break;
+                }
+
+                if (loaded_expert_deque.size() < MAX_CACHED_EXPERTS) {
+                  lock.unlock();
+                  activateExpert(expert_weights[expert_idx]);
+                  lock.lock();
+                  loaded_expert_deque.push_back(expert_idx);
+                  iteration_map[expert_idx] = --loaded_expert_deque.end();
+                  need_load[expert_idx] = false;
+                  ++miss_count;
+                  cache_condition.notify_all();
+                  break;
+                }
+
+                auto find_candidate = [&](bool allow_retained,
+                                          bool allow_future) {
+                  return std::find_if(
+                    loaded_expert_deque.begin(), loaded_expert_deque.end(),
+                    [&](int candidate) {
+                      if (candidate == computing_expert)
+                        return false;
+                      if (!allow_retained && retain_expert[candidate])
+                        return false;
+                      if (!pending_expert[candidate])
+                        return true;
+                      return allow_future && job_rank[candidate] >= rank;
+                    });
+                };
+
+                auto candidate = find_candidate(false, false);
+                if (candidate == loaded_expert_deque.end() &&
+                    rank == next_compute_rank)
+                  candidate = find_candidate(false, true);
+                if (candidate == loaded_expert_deque.end() &&
+                    rank == next_compute_rank)
+                  candidate = find_candidate(true, false);
+                if (candidate == loaded_expert_deque.end() &&
+                    rank == next_compute_rank)
+                  candidate = find_candidate(true, true);
+
+                if (candidate == loaded_expert_deque.end()) {
+                  cache_condition.wait(lock);
+                  continue;
+                }
+
+                eviction_target = *candidate;
+                remove_from_cache(eviction_target);
+              }
+
+              deactivateExpert(expert_weights[eviction_target]);
+            }
+          }
+        } catch (...) {
+          std::lock_guard<std::mutex> lock(cache_mutex);
+          prefetch_error = std::current_exception();
+          cache_condition.notify_all();
+        }
+      });
+
+      try {
+        for (int expert_idx : compute_order) {
+          {
+            std::unique_lock<std::mutex> lock(cache_mutex);
+            cache_condition.wait(lock, [&]() {
+              return !need_load[expert_idx] || prefetch_error != nullptr;
+            });
+            if (prefetch_error != nullptr)
+              std::rethrow_exception(prefetch_error);
+            computing_expert = expert_idx;
+          }
+
+          compute_expert_forward(
+            input, expert_outputs[expert_idx], expert_assignments[expert_idx],
+            *expert_weights[expert_idx].gate, *expert_weights[expert_idx].up,
+            *expert_weights[expert_idx].down, hidden_size);
+
+          {
+            std::lock_guard<std::mutex> lock(cache_mutex);
+            computing_expert = -1;
+            pending_expert[expert_idx] = false;
+            ++next_compute_rank;
+          }
+          cache_condition.notify_all();
+        }
+      } catch (...) {
         {
           std::lock_guard<std::mutex> lock(cache_mutex);
-          loaded_expert_deque.push_back(expert_idx);
-          iteration_map[expert_idx] = --loaded_expert_deque.end();
-          need_load[expert_idx] = false;
-          miss_count += 1;
+          cancel_prefetch = true;
+          computing_expert = -1;
+          std::fill(pending_expert.begin(), pending_expert.end(), false);
+        }
+        cache_condition.notify_all();
+        if (prefetch_task.valid()) {
+          try {
+            prefetch_task.get();
+          } catch (...) {
+          }
+        }
+        throw;
+      }
+
+      prefetch_task.get();
+    } else {
+      for (int expert_idx : compute_order) {
+        const auto &assignments = expert_assignments[expert_idx];
+        if (need_load[expert_idx]) {
+#ifdef DEBUG
+          t1_miss = high_resolution_clock::now();
+#endif
+          int eviction_target = -1;
+          {
+            std::lock_guard<std::mutex> lock(cache_mutex);
+            if (loaded_expert_deque.size() >= MAX_CACHED_EXPERTS) {
+              auto candidate = std::find_if(
+                loaded_expert_deque.begin(), loaded_expert_deque.end(),
+                [&](int current) { return !retain_expert[current]; });
+              if (candidate == loaded_expert_deque.end())
+                candidate = loaded_expert_deque.begin();
+              eviction_target = *candidate;
+              remove_from_cache(eviction_target);
+            }
+          }
+          if (eviction_target >= 0)
+            deactivateExpert(expert_weights[eviction_target]);
+
+          activateExpert(expert_weights[expert_idx]);
+          {
+            std::lock_guard<std::mutex> lock(cache_mutex);
+            loaded_expert_deque.push_back(expert_idx);
+            iteration_map[expert_idx] = --loaded_expert_deque.end();
+            need_load[expert_idx] = false;
+            ++miss_count;
+          }
+#ifdef DEBUG
+          t2_miss = high_resolution_clock::now();
+#endif
+        } else {
+#ifdef DEBUG
+          t1_hit = high_resolution_clock::now();
+#endif
+          ++hit_count;
+#ifdef DEBUG
+          t2_hit = high_resolution_clock::now();
+#endif
         }
 
-        compute_expert_forward(
-          input, expert_outputs[expert_idx], assignments,
-          context.getWeight(expert_gate_proj_indices[expert_idx]),
-          context.getWeight(expert_up_proj_indices[expert_idx]),
-          context.getWeight(expert_down_proj_indices[expert_idx]), hidden_size);
-#ifdef DEBUG
-        t2_miss = high_resolution_clock::now();
-#endif
-      } else {
-
-#ifdef DEBUG
-        t1_hit = high_resolution_clock::now();
-#endif
-        {
-          std::lock_guard<std::mutex> lock(cache_mutex);
-          hit_count += 1;
-        }
-
-        compute_expert_forward(
-          input, expert_outputs[expert_idx], assignments,
-          context.getWeight(expert_gate_proj_indices[expert_idx]),
-          context.getWeight(expert_up_proj_indices[expert_idx]),
-          context.getWeight(expert_down_proj_indices[expert_idx]), hidden_size);
-
-#ifdef DEBUG
-        t2_hit = high_resolution_clock::now();
-#endif
+        compute_expert_forward(input, expert_outputs[expert_idx], assignments,
+                               *expert_weights[expert_idx].gate,
+                               *expert_weights[expert_idx].up,
+                               *expert_weights[expert_idx].down, hidden_size);
       }
     }
 
-    for (int i = extra_top_k.size() - 1; i >= 0; i--) {
-      if (iteration_map.find(extra_top_k[i]) != iteration_map.end()) {
-        loaded_expert_deque.erase(iteration_map[extra_top_k[i]]);
-        loaded_expert_deque.push_back(extra_top_k[i]);
-        iteration_map[extra_top_k[i]] = --loaded_expert_deque.end();
+    {
+      std::lock_guard<std::mutex> lock(cache_mutex);
+      for (auto iter = extra_top_k.rbegin(); iter != extra_top_k.rend();
+           ++iter) {
+        auto found = iteration_map.find(*iter);
+        if (found != iteration_map.end()) {
+          loaded_expert_deque.erase(found->second);
+          loaded_expert_deque.push_back(*iter);
+          iteration_map[*iter] = --loaded_expert_deque.end();
+        }
       }
     }
 
@@ -427,7 +657,7 @@ void CachedSlimMoELayer::incremental_forwarding(
 
     // Evict experts
     /// @todo apply multi thread loop
-    while (loaded_expert_deque.size() > 32) {
+    while (loaded_expert_deque.size() > MAX_CACHED_EXPERTS) {
       int target_idx;
       {
         std::lock_guard<std::mutex> lock(cache_mutex);
