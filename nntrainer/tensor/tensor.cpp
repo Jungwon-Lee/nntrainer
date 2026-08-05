@@ -44,6 +44,18 @@
 
 namespace nntrainer {
 
+namespace {
+
+#if !defined(_WIN32)
+size_t getSystemPageSize() {
+  const long configured_page_size = sysconf(_SC_PAGESIZE);
+  return configured_page_size > 0 ? static_cast<size_t>(configured_page_size)
+                                  : static_cast<size_t>(4096);
+}
+#endif
+
+} // namespace
+
 Tensor::Tensor(
   std::vector<std::vector<std::vector<std::vector<int16_t>>>> const &d,
   std::vector<float> const &scales, ml::train::TensorDim::TensorType t_type,
@@ -1663,7 +1675,8 @@ void Tensor::activate() {
 #else
 
   auto file_offset = getFileOffset();
-  size_t off = (file_offset / 4096) * 4096;
+  const size_t page_size = getSystemPageSize();
+  size_t off = (file_offset / page_size) * page_size;
   size_t diff = file_offset - off;
   size_t len = getMemoryBytes() + diff;
 
@@ -1676,14 +1689,55 @@ void Tensor::activate() {
        "read-time";
 
   mapped_ptr = mmap(NULL, len, PROT_READ, MAP_PRIVATE, this->fd, off);
-#ifdef __ANDROID__
+#if defined(__linux__)
+  // Best-effort page-cache prefetch for Linux, including Android. Correctness
+  // still relies on demand paging if the kernel declines the advice.
   if (mapped_ptr != MAP_FAILED)
-    madvise(mapped_ptr, len, MADV_WILLNEED);
+    (void)madvise(mapped_ptr, len, MADV_WILLNEED);
 #endif
   NNTR_THROW_IF(mapped_ptr == MAP_FAILED, std::runtime_error)
     << "[activate] mmap failed for virtual tensor '" << getName()
     << "': " << strerror(errno);
   itensor_->activate((void *)&((uint8_t *)mapped_ptr)[diff]);
+#endif
+}
+
+void Tensor::prefetch() {
+
+  NNTR_THROW_IF(!is_virtual, std::invalid_argument)
+    << "non-virtual tensor cannot call prefetch()";
+#if defined(_WIN32)
+  NNTR_THROW_IF(true, std::invalid_argument)
+    << "[Error/VirtualTensor] virtual tensor is not supported on Windows";
+#elif defined(__linux__)
+  NNTR_THROW_IF(mapped_ptr == nullptr || mapped_ptr == MAP_FAILED,
+                std::runtime_error)
+    << "[prefetch] virtual tensor '" << getName() << "' is not activated";
+
+  const auto file_offset = getFileOffset();
+  const size_t page_size = getSystemPageSize();
+  const size_t page_offset = file_offset % page_size;
+  const size_t len = getMemoryBytes() + page_offset;
+
+#ifdef MADV_POPULATE_READ
+  // MADV_POPULATE_READ is synchronous and prefaults the page tables. Fall
+  // back when either the headers or the running kernel do not support it.
+  if (madvise(mapped_ptr, len, MADV_POPULATE_READ) == 0)
+    return;
+#endif
+
+  (void)madvise(mapped_ptr, len, MADV_WILLNEED);
+
+  const auto *data =
+    reinterpret_cast<const volatile uint8_t *>(mapped_ptr) + page_offset;
+  const size_t data_size = getMemoryBytes();
+  uint8_t residency_probe = 0;
+  for (size_t offset = 0; offset < data_size; offset += page_size)
+    residency_probe = static_cast<uint8_t>(residency_probe ^ data[offset]);
+  if (data_size > 0)
+    residency_probe =
+      static_cast<uint8_t>(residency_probe ^ data[data_size - 1]);
+  (void)residency_probe;
 #endif
 }
 
@@ -1701,7 +1755,8 @@ void Tensor::deactivate() {
   };
 
   auto file_offset = getFileOffset();
-  size_t off = (file_offset / 4096) * 4096;
+  const size_t page_size = getSystemPageSize();
+  size_t off = (file_offset / page_size) * page_size;
   size_t diff = file_offset - off;
   size_t len = getMemoryBytes() + diff;
 

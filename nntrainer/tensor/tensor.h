@@ -2016,6 +2016,13 @@ public:
   void activate();
 
   /**
+   * @brief Prefetch all pages of an activated virtual tensor
+   * @note On Linux this method does not return until every backing page has
+   * been faulted in. Other platforms retain demand-paging behavior.
+   */
+  void prefetch();
+
+  /**
    * @brief deactivate virtual tensor
    * @note if the tensor is virtual and already activated, the tensor is
    * deallocated.
