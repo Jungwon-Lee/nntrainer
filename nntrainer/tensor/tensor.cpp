@@ -1702,7 +1702,9 @@ void Tensor::activate() {
 #endif
 }
 
-void Tensor::prefetch() {
+Tensor::PrefetchStats Tensor::prefetch() {
+
+  PrefetchStats stats;
 
   NNTR_THROW_IF(!is_virtual, std::invalid_argument)
     << "non-virtual tensor cannot call prefetch()";
@@ -1724,17 +1726,22 @@ void Tensor::prefetch() {
   std::vector<unsigned char> residency(page_count, 0);
   const bool residency_available =
     mincore(mapped_ptr, len, residency.data()) == 0;
+  stats.total_pages = page_count;
+  stats.residency_available = residency_available;
 
   const auto *mapping = reinterpret_cast<const volatile uint8_t *>(mapped_ptr);
   uint8_t residency_probe = 0;
   for (size_t page = 0; page < page_count; ++page) {
-    if (residency_available && (residency[page] & 1U) != 0)
+    if (residency_available && (residency[page] & 1U) != 0) {
+      ++stats.resident_pages;
       continue;
+    }
     residency_probe =
       static_cast<uint8_t>(residency_probe ^ mapping[page * page_size]);
   }
   (void)residency_probe;
 #endif
+  return stats;
 }
 
 void Tensor::deactivate() {

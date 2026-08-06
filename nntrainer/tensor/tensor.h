@@ -2016,11 +2016,21 @@ public:
   void activate();
 
   /**
+   * @brief Page residency observed before prefetching a virtual tensor
+   */
+  struct PrefetchStats {
+    size_t total_pages = 0;
+    size_t resident_pages = 0;
+    bool residency_available = false;
+  };
+
+  /**
    * @brief Prefetch all pages of an activated virtual tensor
    * @note On Linux this method does not return until every backing page has
    * been faulted in. Other platforms retain demand-paging behavior.
+   * @return page residency observed before prefetching
    */
-  void prefetch();
+  PrefetchStats prefetch();
 
   /**
    * @brief deactivate virtual tensor

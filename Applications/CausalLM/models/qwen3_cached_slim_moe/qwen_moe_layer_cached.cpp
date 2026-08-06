@@ -27,11 +27,14 @@
 #include <atomic>
 #include <cmath>
 #include <condition_variable>
+#include <cstdlib>
 #include <deque>
 #include <exception>
 #include <future>
+#include <iostream>
 #include <node_exporter.h>
 #include <qwen_moe_layer_cached.h>
+#include <sstream>
 #include <stdexcept>
 #include <thread_manager.h>
 
@@ -39,12 +42,14 @@
 using std::chrono::duration_cast;
 using std::chrono::high_resolution_clock;
 using std::chrono::nanoseconds;
+using std::chrono::steady_clock;
 
 namespace causallm {
 
 static constexpr size_t SINGLE_INOUT_IDX = 0;
 static constexpr size_t MAX_CACHED_EXPERTS = 32;
-static constexpr size_t PREFETCH_LOOKAHEAD = 1;
+static constexpr size_t DEFAULT_PREFETCH_LOOKAHEAD = 1;
+static constexpr size_t MAX_PROFILE_PREFETCH_LOOKAHEAD = 1024;
 
 namespace {
 
@@ -53,6 +58,50 @@ struct ExpertWeights {
   nntrainer::Tensor *up;
   nntrainer::Tensor *down;
 };
+
+struct ExpertPrefetchStats {
+  size_t total_pages = 0;
+  size_t resident_pages = 0;
+  bool residency_available = true;
+};
+
+struct PrefetchProfile {
+  long long stage_ns = 0;
+  long long prefetch_ns = 0;
+  long long max_prefetch_ns = 0;
+  long long compute_ns = 0;
+  long long wait_ns = 0;
+  long long max_wait_ns = 0;
+  size_t waited_experts = 0;
+  size_t max_ready_lead = 0;
+  size_t total_pages = 0;
+  size_t resident_pages = 0;
+  bool residency_available = true;
+};
+
+bool isPrefetchProfileEnabled() {
+  static const bool enabled = []() {
+    const char *value = std::getenv("NNTR_QWEN_MOE_PREFETCH_PROFILE");
+    return value != nullptr && value[0] == '1' && value[1] == '\0';
+  }();
+  return enabled;
+}
+
+size_t getPrefetchLookahead() {
+  static const size_t lookahead = []() {
+    const char *value = std::getenv("NNTR_QWEN_MOE_PREFETCH_LOOKAHEAD");
+    if (value == nullptr || value[0] == '\0' || value[0] == '-')
+      return DEFAULT_PREFETCH_LOOKAHEAD;
+
+    char *end = nullptr;
+    const unsigned long parsed = std::strtoul(value, &end, 10);
+    if (end == value || end == nullptr || end[0] != '\0')
+      return DEFAULT_PREFETCH_LOOKAHEAD;
+    return std::min(static_cast<size_t>(parsed),
+                    MAX_PROFILE_PREFETCH_LOOKAHEAD);
+  }();
+  return lookahead;
+}
 
 void activateExpert(const ExpertWeights &weights) {
   bool gate_activated = false;
@@ -81,10 +130,17 @@ void activateExpert(const ExpertWeights &weights) {
   }
 }
 
-void prefetchExpert(const ExpertWeights &weights) {
-  weights.gate->prefetch();
-  weights.up->prefetch();
-  weights.down->prefetch();
+ExpertPrefetchStats prefetchExpert(const ExpertWeights &weights) {
+  const auto gate_stats = weights.gate->prefetch();
+  const auto up_stats = weights.up->prefetch();
+  const auto down_stats = weights.down->prefetch();
+
+  return {gate_stats.total_pages + up_stats.total_pages +
+            down_stats.total_pages,
+          gate_stats.resident_pages + up_stats.resident_pages +
+            down_stats.resident_pages,
+          gate_stats.residency_available && up_stats.residency_available &&
+            down_stats.residency_available};
 }
 
 void deactivateExpert(const ExpertWeights &weights) {
@@ -476,6 +532,21 @@ void CachedSlimMoELayer::incremental_forwarding(
       int computing_expert = -1;
       size_t next_compute_rank = 0;
       std::exception_ptr prefetch_error;
+      const bool prefetch_profile_enabled = isPrefetchProfileEnabled();
+      const size_t prefetch_lookahead = getPrefetchLookahead();
+      PrefetchProfile prefetch_profile;
+      steady_clock::time_point profile_stage_started;
+      if (prefetch_profile_enabled)
+        profile_stage_started = steady_clock::now();
+
+      auto record_ready_lead = [&](size_t rank) {
+        if (!prefetch_profile_enabled)
+          return;
+        const size_t ready_lead =
+          rank > next_compute_rank ? rank - next_compute_rank : 0;
+        prefetch_profile.max_ready_lead =
+          std::max(prefetch_profile.max_ready_lead, ready_lead);
+      };
 
       auto prefetch_task = std::async(std::launch::async, [&]() {
         try {
@@ -488,13 +559,14 @@ void CachedSlimMoELayer::incremental_forwarding(
                 std::unique_lock<std::mutex> lock(cache_mutex);
                 cache_condition.wait(lock, [&]() {
                   return cancel_prefetch ||
-                         rank <= next_compute_rank + PREFETCH_LOOKAHEAD;
+                         rank <= next_compute_rank + prefetch_lookahead;
                 });
                 if (cancel_prefetch)
                   return;
 
                 if (!need_load[expert_idx]) {
                   prefetch_ready[expert_idx] = true;
+                  record_ready_lead(rank);
                   ++hit_count;
                   cache_condition.notify_all();
                   break;
@@ -502,18 +574,40 @@ void CachedSlimMoELayer::incremental_forwarding(
 
                 if (loaded_expert_deque.size() < MAX_CACHED_EXPERTS) {
                   lock.unlock();
+                  steady_clock::time_point prefetch_started;
+                  if (prefetch_profile_enabled)
+                    prefetch_started = steady_clock::now();
+                  ExpertPrefetchStats expert_prefetch_stats;
                   activateExpert(expert_weights[expert_idx]);
                   try {
-                    prefetchExpert(expert_weights[expert_idx]);
+                    expert_prefetch_stats =
+                      prefetchExpert(expert_weights[expert_idx]);
                   } catch (...) {
                     deactivateExpert(expert_weights[expert_idx]);
                     throw;
                   }
                   lock.lock();
+                  if (prefetch_profile_enabled) {
+                    const long long prefetch_ns =
+                      duration_cast<nanoseconds>(steady_clock::now() -
+                                                 prefetch_started)
+                        .count();
+                    prefetch_profile.prefetch_ns += prefetch_ns;
+                    prefetch_profile.max_prefetch_ns =
+                      std::max(prefetch_profile.max_prefetch_ns, prefetch_ns);
+                    prefetch_profile.total_pages +=
+                      expert_prefetch_stats.total_pages;
+                    prefetch_profile.resident_pages +=
+                      expert_prefetch_stats.resident_pages;
+                    prefetch_profile.residency_available =
+                      prefetch_profile.residency_available &&
+                      expert_prefetch_stats.residency_available;
+                  }
                   loaded_expert_deque.push_back(expert_idx);
                   iteration_map[expert_idx] = --loaded_expert_deque.end();
                   need_load[expert_idx] = false;
                   prefetch_ready[expert_idx] = true;
+                  record_ready_lead(rank);
                   ++miss_count;
                   cache_condition.notify_all();
                   break;
@@ -568,18 +662,39 @@ void CachedSlimMoELayer::incremental_forwarding(
         for (int expert_idx : compute_order) {
           {
             std::unique_lock<std::mutex> lock(cache_mutex);
+            const bool wait_required =
+              !prefetch_ready[expert_idx] && prefetch_error == nullptr;
+            steady_clock::time_point wait_started;
+            if (prefetch_profile_enabled && wait_required)
+              wait_started = steady_clock::now();
             cache_condition.wait(lock, [&]() {
               return prefetch_ready[expert_idx] || prefetch_error != nullptr;
             });
+            if (prefetch_profile_enabled && wait_required) {
+              const long long wait_ns =
+                duration_cast<nanoseconds>(steady_clock::now() - wait_started)
+                  .count();
+              prefetch_profile.wait_ns += wait_ns;
+              prefetch_profile.max_wait_ns =
+                std::max(prefetch_profile.max_wait_ns, wait_ns);
+              ++prefetch_profile.waited_experts;
+            }
             if (prefetch_error != nullptr)
               std::rethrow_exception(prefetch_error);
             computing_expert = expert_idx;
           }
 
+          steady_clock::time_point compute_started;
+          if (prefetch_profile_enabled)
+            compute_started = steady_clock::now();
           compute_expert_forward(
             input, expert_outputs[expert_idx], expert_assignments[expert_idx],
             *expert_weights[expert_idx].gate, *expert_weights[expert_idx].up,
             *expert_weights[expert_idx].down, hidden_size);
+          if (prefetch_profile_enabled)
+            prefetch_profile.compute_ns +=
+              duration_cast<nanoseconds>(steady_clock::now() - compute_started)
+                .count();
 
           {
             std::lock_guard<std::mutex> lock(cache_mutex);
@@ -607,6 +722,39 @@ void CachedSlimMoELayer::incremental_forwarding(
       }
 
       prefetch_task.get();
+      if (prefetch_profile_enabled) {
+        prefetch_profile.stage_ns =
+          duration_cast<nanoseconds>(steady_clock::now() -
+                                     profile_stage_started)
+            .count();
+        const long long resident_pct =
+          prefetch_profile.residency_available &&
+              prefetch_profile.total_pages > 0
+            ? static_cast<long long>(100 * prefetch_profile.resident_pages /
+                                     prefetch_profile.total_pages)
+            : -1;
+        std::ostringstream profile_log;
+        profile_log << "[QWEN_MOE_PREFETCH_PROFILE]"
+                    << " layer=" << context.getName()
+                    << " tokens=" << total_tokens
+                    << " active_experts=" << compute_order.size()
+                    << " hits=" << hit_count << " misses=" << miss_count
+                    << " cache=" << MAX_CACHED_EXPERTS
+                    << " lookahead=" << prefetch_lookahead
+                    << " max_ready_lead=" << prefetch_profile.max_ready_lead
+                    << " waited_experts=" << prefetch_profile.waited_experts
+                    << " stage_us=" << prefetch_profile.stage_ns / 1'000
+                    << " prefetch_us=" << prefetch_profile.prefetch_ns / 1'000
+                    << " max_prefetch_us="
+                    << prefetch_profile.max_prefetch_ns / 1'000
+                    << " compute_us=" << prefetch_profile.compute_ns / 1'000
+                    << " wait_us=" << prefetch_profile.wait_ns / 1'000
+                    << " max_wait_us=" << prefetch_profile.max_wait_ns / 1'000
+                    << " resident_pages=" << prefetch_profile.resident_pages
+                    << " total_pages=" << prefetch_profile.total_pages
+                    << " resident_pct=" << resident_pct;
+        std::cerr << profile_log.str() << '\n';
+      }
     } else {
       for (int expert_idx : compute_order) {
         const auto &assignments = expert_assignments[expert_idx];
