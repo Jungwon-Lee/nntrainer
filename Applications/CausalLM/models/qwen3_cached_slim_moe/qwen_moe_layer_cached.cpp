@@ -62,6 +62,8 @@ struct ExpertWeights {
 struct ExpertPrefetchStats {
   size_t total_pages = 0;
   size_t resident_pages = 0;
+  size_t requested_pages = 0;
+  size_t readahead_requests = 0;
   bool residency_available = true;
 };
 
@@ -76,6 +78,8 @@ struct PrefetchProfile {
   size_t max_ready_lead = 0;
   size_t total_pages = 0;
   size_t resident_pages = 0;
+  size_t requested_pages = 0;
+  size_t readahead_requests = 0;
   bool residency_available = true;
 };
 
@@ -103,16 +107,16 @@ size_t getPrefetchLookahead() {
   return lookahead;
 }
 
-void activateExpert(const ExpertWeights &weights) {
+void activateExpert(const ExpertWeights &weights, bool advise_willneed = true) {
   bool gate_activated = false;
   bool up_activated = false;
 
   try {
-    weights.gate->activate();
+    weights.gate->activate(advise_willneed);
     gate_activated = true;
-    weights.up->activate();
+    weights.up->activate(advise_willneed);
     up_activated = true;
-    weights.down->activate();
+    weights.down->activate(advise_willneed);
   } catch (...) {
     if (up_activated) {
       try {
@@ -139,6 +143,11 @@ ExpertPrefetchStats prefetchExpert(const ExpertWeights &weights) {
             down_stats.total_pages,
           gate_stats.resident_pages + up_stats.resident_pages +
             down_stats.resident_pages,
+          gate_stats.requested_pages + up_stats.requested_pages +
+            down_stats.requested_pages,
+          static_cast<size_t>(gate_stats.readahead_submitted) +
+            static_cast<size_t>(up_stats.readahead_submitted) +
+            static_cast<size_t>(down_stats.readahead_submitted),
           gate_stats.residency_available && up_stats.residency_available &&
             down_stats.residency_available};
 }
@@ -578,7 +587,7 @@ void CachedSlimMoELayer::incremental_forwarding(
                   if (prefetch_profile_enabled)
                     prefetch_started = steady_clock::now();
                   ExpertPrefetchStats expert_prefetch_stats;
-                  activateExpert(expert_weights[expert_idx]);
+                  activateExpert(expert_weights[expert_idx], false);
                   try {
                     expert_prefetch_stats =
                       prefetchExpert(expert_weights[expert_idx]);
@@ -599,6 +608,10 @@ void CachedSlimMoELayer::incremental_forwarding(
                       expert_prefetch_stats.total_pages;
                     prefetch_profile.resident_pages +=
                       expert_prefetch_stats.resident_pages;
+                    prefetch_profile.requested_pages +=
+                      expert_prefetch_stats.requested_pages;
+                    prefetch_profile.readahead_requests +=
+                      expert_prefetch_stats.readahead_requests;
                     prefetch_profile.residency_available =
                       prefetch_profile.residency_available &&
                       expert_prefetch_stats.residency_available;
@@ -752,6 +765,9 @@ void CachedSlimMoELayer::incremental_forwarding(
                     << " max_wait_us=" << prefetch_profile.max_wait_ns / 1'000
                     << " resident_pages=" << prefetch_profile.resident_pages
                     << " total_pages=" << prefetch_profile.total_pages
+                    << " requested_pages=" << prefetch_profile.requested_pages
+                    << " readahead_requests="
+                    << prefetch_profile.readahead_requests
                     << " resident_pct=" << resident_pct;
         std::cerr << profile_log.str() << '\n';
       }

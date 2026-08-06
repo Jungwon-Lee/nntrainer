@@ -1665,7 +1665,7 @@ Tensor Tensor::getSharedDataTensor(const TensorDim dim_, size_t offset,
   return ret;
 }
 
-void Tensor::activate() {
+void Tensor::activate(bool advise_willneed) {
 
   NNTR_THROW_IF(!is_virtual, std::invalid_argument)
     << "non-virtual tensor cannot call activate()";
@@ -1692,7 +1692,7 @@ void Tensor::activate() {
 #if defined(__linux__)
   // Best-effort page-cache prefetch for Linux, including Android. Correctness
   // still relies on demand paging if the kernel declines the advice.
-  if (mapped_ptr != MAP_FAILED)
+  if (advise_willneed && mapped_ptr != MAP_FAILED)
     (void)madvise(mapped_ptr, len, MADV_WILLNEED);
 #endif
   NNTR_THROW_IF(mapped_ptr == MAP_FAILED, std::runtime_error)
@@ -1720,7 +1720,6 @@ Tensor::PrefetchStats Tensor::prefetch() {
   const size_t page_size = getSystemPageSize();
   const size_t page_offset = file_offset % page_size;
   const size_t len = getMemoryBytes() + page_offset;
-  (void)madvise(mapped_ptr, len, MADV_WILLNEED);
 
   const size_t page_count = (len + page_size - 1) / page_size;
   std::vector<unsigned char> residency(page_count, 0);
@@ -1729,17 +1728,23 @@ Tensor::PrefetchStats Tensor::prefetch() {
   stats.total_pages = page_count;
   stats.residency_available = residency_available;
 
-  const auto *mapping = reinterpret_cast<const volatile uint8_t *>(mapped_ptr);
-  uint8_t residency_probe = 0;
   for (size_t page = 0; page < page_count; ++page) {
     if (residency_available && (residency[page] & 1U) != 0) {
       ++stats.resident_pages;
-      continue;
     }
-    residency_probe =
-      static_cast<uint8_t>(residency_probe ^ mapping[page * page_size]);
   }
-  (void)residency_probe;
+  stats.requested_pages =
+    residency_available ? page_count - stats.resident_pages : page_count;
+
+  if (stats.requested_pages > 0) {
+    if (::readahead(this->fd, static_cast<off_t>(file_offset),
+                    getMemoryBytes()) == 0) {
+      stats.readahead_submitted = true;
+    } else {
+      (void)posix_fadvise(this->fd, static_cast<off_t>(file_offset),
+                          getMemoryBytes(), POSIX_FADV_WILLNEED);
+    }
+  }
 #endif
   return stats;
 }

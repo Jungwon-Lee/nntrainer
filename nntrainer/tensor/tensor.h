@@ -2011,9 +2011,10 @@ public:
    * @note if the tensor is virtual, this method activates virtual tensor, which
    * means allocate the tensor memory and read the corresponding value from the
    * file descriptor
+   * @param advise_willneed whether to submit MADV_WILLNEED after mmap
    * @todo it is not supported on Windows yet
    */
-  void activate();
+  void activate(bool advise_willneed = true);
 
   /**
    * @brief Page residency observed before prefetching a virtual tensor
@@ -2021,13 +2022,16 @@ public:
   struct PrefetchStats {
     size_t total_pages = 0;
     size_t resident_pages = 0;
+    size_t requested_pages = 0;
+    bool readahead_submitted = false;
     bool residency_available = false;
   };
 
   /**
-   * @brief Prefetch all pages of an activated virtual tensor
-   * @note On Linux this method does not return until every backing page has
-   * been faulted in. Other platforms retain demand-paging behavior.
+   * @brief Request asynchronous file readahead for an activated virtual tensor
+   * @note On Linux, non-resident pages are requested with readahead(). If the
+   * request is unavailable, POSIX_FADV_WILLNEED is used as a fallback. Other
+   * platforms retain demand-paging behavior.
    * @return page residency observed before prefetching
    */
   PrefetchStats prefetch();
