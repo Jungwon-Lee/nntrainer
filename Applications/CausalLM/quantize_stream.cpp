@@ -3,7 +3,7 @@
  * Copyright (C) 2026 Samsung Electronics Co., Ltd. All Rights Reserved.
  *
  * @file   quantize_stream.cpp
- * @brief  Bounded-memory weight quantizer for Qwen3 MoE models.
+ * @brief  Bounded-memory weight quantizer for supported CausalLM models.
  */
 
 #include <cpu_backend.h>
@@ -19,6 +19,7 @@
 #include <limits>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 #if defined(__clang__)
@@ -59,6 +60,25 @@ struct Qwen3MoePlan {
   size_t head_dim;
   size_t intermediate_size;
   size_t num_experts;
+  bool tied_embeddings;
+};
+
+struct Gemma4MoePlan {
+  size_t hidden_size;
+  size_t vocab_size;
+  size_t num_layers;
+  size_t num_attention_heads;
+  size_t num_key_value_heads;
+  size_t head_dim;
+  size_t global_head_dim;
+  size_t num_global_key_value_heads;
+  size_t intermediate_size;
+  size_t moe_intermediate_size;
+  size_t num_experts;
+  size_t per_layer_input_size;
+  size_t per_layer_vocab_size;
+  std::vector<std::string> layer_types;
+  bool attention_k_eq_v;
   bool tied_embeddings;
 };
 
@@ -109,13 +129,16 @@ size_t getSize(const json &cfg, const std::string &key) {
   return cfg[key].get<size_t>();
 }
 
-Qwen3MoePlan makeModelPlan(const json &cfg) {
+std::string getArchitecture(const json &cfg) {
   if (!cfg.contains("architectures") || !cfg["architectures"].is_array() ||
       cfg["architectures"].empty()) {
     throw std::runtime_error("config.json is missing architectures[0]");
   }
+  return cfg["architectures"][0].get<std::string>();
+}
 
-  const std::string architecture = cfg["architectures"][0].get<std::string>();
+Qwen3MoePlan makeQwen3MoePlan(const json &cfg) {
+  const std::string architecture = getArchitecture(cfg);
   if (architecture != "Qwen3MoeForCausalLM") {
     throw std::runtime_error(
       "nntr_quantize_stream only supports Qwen3MoeForCausalLM, but got " +
@@ -150,6 +173,98 @@ Qwen3MoePlan makeModelPlan(const json &cfg) {
     getSize(cfg, "moe_intermediate_size"),
     getSize(cfg, "num_experts"),
     cfg.value("tie_word_embeddings", false),
+  };
+}
+
+Gemma4MoePlan makeGemma4MoePlan(const json &root_cfg) {
+  const std::string architecture = getArchitecture(root_cfg);
+  if (architecture != "Gemma4ForCausalLM" &&
+      architecture != "Gemma4ForConditionalGeneration") {
+    throw std::runtime_error("Unsupported Gemma4 architecture: " +
+                             architecture);
+  }
+
+  const json &cfg =
+    root_cfg.contains("text_config") ? root_cfg.at("text_config") : root_cfg;
+  if (!cfg.is_object())
+    throw std::runtime_error("Gemma4 text_config must be an object");
+  if (!cfg.value("enable_moe_block", false)) {
+    throw std::runtime_error(
+      "Gemma4 streaming quantization requires enable_moe_block=true");
+  }
+
+  const size_t hidden_size = getSize(cfg, "hidden_size");
+  const size_t num_layers = getSize(cfg, "num_hidden_layers");
+  const size_t num_attention_heads = getSize(cfg, "num_attention_heads");
+  if (num_attention_heads == 0)
+    throw std::runtime_error("num_attention_heads must be greater than zero");
+
+  const size_t head_dim = cfg.contains("head_dim")
+                            ? getSize(cfg, "head_dim")
+                            : hidden_size / num_attention_heads;
+  const size_t num_key_value_heads = cfg.contains("num_key_value_heads")
+                                       ? getSize(cfg, "num_key_value_heads")
+                                       : num_attention_heads;
+  const size_t global_head_dim =
+    cfg.contains("global_head_dim") && !cfg["global_head_dim"].is_null()
+      ? getSize(cfg, "global_head_dim")
+      : head_dim;
+  const size_t num_global_key_value_heads =
+    cfg.contains("num_global_key_value_heads") &&
+        !cfg["num_global_key_value_heads"].is_null()
+      ? getSize(cfg, "num_global_key_value_heads")
+      : num_key_value_heads;
+
+  const size_t num_kv_shared_layers =
+    cfg.value("num_kv_shared_layers", size_t{0});
+  if (num_kv_shared_layers != 0) {
+    throw std::runtime_error(
+      "Gemma4 MoE streaming quantization does not support shared KV layers");
+  }
+
+  std::vector<std::string> layer_types(num_layers,
+                                       std::string("sliding_attention"));
+  if (cfg.contains("layer_types")) {
+    layer_types = cfg["layer_types"].get<std::vector<std::string>>();
+    if (layer_types.size() != num_layers) {
+      throw std::runtime_error(
+        "Gemma4 layer_types size must match num_hidden_layers");
+    }
+  }
+  for (const auto &type : layer_types) {
+    if (type != "sliding_attention" && type != "full_attention")
+      throw std::runtime_error("Unsupported Gemma4 layer type: " + type);
+  }
+
+  const size_t per_layer_input_size =
+    cfg.value("hidden_size_per_layer_input", size_t{0});
+  const size_t per_layer_vocab_size =
+    cfg.value("vocab_size_per_layer_input", getSize(cfg, "vocab_size"));
+  if (per_layer_input_size != 0 && per_layer_vocab_size == 0) {
+    throw std::runtime_error(
+      "vocab_size_per_layer_input must be greater than zero");
+  }
+
+  const bool tied_embeddings = cfg.contains("tie_word_embeddings")
+                                 ? cfg["tie_word_embeddings"].get<bool>()
+                                 : root_cfg.value("tie_word_embeddings", true);
+  return {
+    hidden_size,
+    getSize(cfg, "vocab_size"),
+    num_layers,
+    num_attention_heads,
+    num_key_value_heads,
+    head_dim,
+    global_head_dim,
+    num_global_key_value_heads,
+    getSize(cfg, "intermediate_size"),
+    getSize(cfg, "moe_intermediate_size"),
+    getSize(cfg, "num_experts"),
+    per_layer_input_size,
+    per_layer_vocab_size,
+    std::move(layer_types),
+    cfg.value("attention_k_eq_v", false),
+    tied_embeddings,
   };
 }
 
@@ -261,6 +376,17 @@ public:
     copyBytes(checkedMultiply(elements, sizeof(float), name), name);
   }
 
+  void discardFp32(size_t elements, const std::string &name) {
+    discardBytes(checkedMultiply(elements, sizeof(float), name), name);
+  }
+
+  bool hasRemainingBytes() {
+    input_.peek();
+    const bool remaining = !input_.eof();
+    input_.clear();
+    return remaining;
+  }
+
   void writeEmbedding(size_t rows, size_t columns, DType dtype,
                       const std::string &name) {
     if (dtype == DType::FP32) {
@@ -350,6 +476,17 @@ private:
       const size_t chunk = std::min(buffer.size(), remaining);
       readExact(buffer.data(), chunk, name);
       writeBytes(buffer.data(), chunk, name);
+      remaining -= chunk;
+    }
+  }
+
+  void discardBytes(size_t bytes, const std::string &name) {
+    constexpr size_t DISCARD_BUFFER_BYTES = 16U * 1024U * 1024U;
+    std::vector<char> buffer(std::min(DISCARD_BUFFER_BYTES, bytes));
+    size_t remaining = bytes;
+    while (remaining != 0) {
+      const size_t chunk = std::min(buffer.size(), remaining);
+      readExact(buffer.data(), chunk, name);
       remaining -= chunk;
     }
   }
@@ -555,6 +692,108 @@ void writeQwen3Moe(TensorWriter &writer, const Qwen3MoePlan &model,
   writer.requireEndOfFile();
 }
 
+void writeGemma4Moe(TensorWriter &writer, const Gemma4MoePlan &model,
+                    const QuantizationPlan &quant) {
+  writer.writeEmbedding(model.vocab_size, model.hidden_size,
+                        quant.embedding_dtype, "embedding0");
+
+  for (size_t layer = 0; layer < model.num_layers; ++layer) {
+    const std::string prefix = "layer" + std::to_string(layer);
+    const bool is_sliding = model.layer_types[layer] == "sliding_attention";
+    const size_t head_dim = is_sliding ? model.head_dim : model.global_head_dim;
+    const size_t kv_heads = is_sliding || !model.attention_k_eq_v
+                              ? model.num_key_value_heads
+                              : model.num_global_key_value_heads;
+    const size_t query_width = checkedMultiply(
+      model.num_attention_heads, head_dim, prefix + " query width");
+    const size_t kv_width =
+      checkedMultiply(kv_heads, head_dim, prefix + " KV width");
+
+    writer.copyFp32(model.hidden_size, prefix + "_attention_norm");
+    writer.writeFc(model.hidden_size, query_width, quant.fc_dtype,
+                   prefix + "_wq");
+    writer.copyFp32(head_dim, prefix + "_q_norm");
+    writer.writeFc(model.hidden_size, kv_width, quant.fc_dtype, prefix + "_wk");
+    writer.copyFp32(head_dim, prefix + "_k_norm");
+    if (!model.attention_k_eq_v || is_sliding) {
+      writer.writeFc(model.hidden_size, kv_width, quant.fc_dtype,
+                     prefix + "_wv");
+    }
+    writer.writeFc(query_width, model.hidden_size, quant.fc_dtype,
+                   prefix + "_attention_out");
+
+    writer.copyFp32(model.hidden_size, prefix + "_post_attention_norm");
+    writer.copyFp32(model.hidden_size, prefix + "_pre_ffn_norm");
+    writer.writeFc(model.hidden_size, model.intermediate_size, quant.fc_dtype,
+                   prefix + "_ffn_gate");
+    writer.writeFc(model.hidden_size, model.intermediate_size, quant.fc_dtype,
+                   prefix + "_ffn_up");
+    writer.writeFc(model.intermediate_size, model.hidden_size, quant.fc_dtype,
+                   prefix + "_ffn_down");
+
+    writer.copyFp32(model.hidden_size, prefix + "_post_ffn_norm_1");
+    writer.copyFp32(model.hidden_size, prefix + "_pre_ffn_norm_2");
+    writer.copyFp32(tensorElements(model.hidden_size, model.num_experts,
+                                   prefix + "_sparse_moe router"),
+                    prefix + "_sparse_moe router");
+    writer.copyFp32(model.hidden_size, prefix + "_sparse_moe router_scale");
+    writer.copyFp32(model.num_experts,
+                    prefix + "_sparse_moe router_per_expert_scale");
+
+    for (size_t expert = 0; expert < model.num_experts; ++expert) {
+      const std::string expert_prefix =
+        prefix + "_expert" + std::to_string(expert);
+      writer.writeFc(model.hidden_size, model.moe_intermediate_size,
+                     quant.fc_dtype, expert_prefix + "_gate");
+      writer.writeFc(model.hidden_size, model.moe_intermediate_size,
+                     quant.fc_dtype, expert_prefix + "_up");
+      writer.writeFc(model.moe_intermediate_size, model.hidden_size,
+                     quant.fc_dtype, expert_prefix + "_down");
+    }
+
+    writer.copyFp32(model.hidden_size, prefix + "_post_ffn_norm_2");
+    writer.copyFp32(model.hidden_size, prefix + "_post_ffn_norm");
+
+    if (model.per_layer_input_size != 0) {
+      writer.writeFc(model.hidden_size, model.per_layer_input_size,
+                     quant.fc_dtype, prefix + "_per_layer_input_gate");
+      if (layer == 0) {
+        const size_t total_per_layer_size =
+          checkedMultiply(model.num_layers, model.per_layer_input_size,
+                          "per-layer input total size");
+        writer.writeEmbedding(model.per_layer_vocab_size, total_per_layer_size,
+                              quant.fc_dtype, "per_layer_input_embedding");
+        writer.writeFc(model.hidden_size, total_per_layer_size, quant.fc_dtype,
+                       "per_layer_input_projection");
+        writer.copyFp32(model.per_layer_input_size,
+                        "per_layer_projection_norm");
+      }
+      writer.writeFc(model.per_layer_input_size, model.hidden_size,
+                     quant.fc_dtype, prefix + "_per_layer_input_proj");
+      writer.copyFp32(model.hidden_size, prefix + "_post_per_layer_input_norm");
+    }
+    writer.copyFp32(1, prefix + "_layer_scalar");
+
+    std::cout << "  Quantized layer " << layer + 1 << "/" << model.num_layers
+              << '\n';
+  }
+
+  writer.copyFp32(model.hidden_size, "output_norm");
+  if (model.tied_embeddings) {
+    // The Gemma4 converter retains a legacy trailing shared embedding, while
+    // NNTrainer model saving emits only embedding0. Accept either FP32 source.
+    if (writer.hasRemainingBytes()) {
+      writer.discardFp32(tensorElements(model.vocab_size, model.hidden_size,
+                                        "tied output_of_causallm"),
+                         "tied output_of_causallm");
+    }
+  } else {
+    writer.writeFc(model.hidden_size, model.vocab_size, quant.lmhead_dtype,
+                   "output_of_causallm");
+  }
+  writer.requireEndOfFile();
+}
+
 std::string stripKnownDtypeSuffix(std::string base) {
   const std::vector<std::string> suffixes = {"_fp32", "_fp16", "_q40", "_q4_0",
                                              "_q4k",  "_q4_k", "_q6k", "_q6_k"};
@@ -631,8 +870,8 @@ void writeOutputConfig(const std::filesystem::path &model_dir,
 void printUsage(const char *program) {
   std::cout
     << "Usage: " << program << " <model_path> [options]\n\n"
-    << "Stream-quantize an FP32 Qwen3MoeForCausalLM .bin model without "
-       "loading the full model.\n\n"
+    << "Stream-quantize a supported FP32 CausalLM .bin model without loading "
+       "the full model.\n\n"
     << "Options:\n"
     << "  --output, -o <path>   Output directory (default: dtype/ISA "
        "subdirectory)\n"
@@ -644,7 +883,10 @@ void printUsage(const char *program) {
     << "  --config <path>       Read target dtype fields and filename from an "
        "nntr config\n"
     << "  -h, --help            Show this help\n\n"
-    << "Supported dtypes: FP32, Q4_0, Q4_K, Q6_K\n";
+    << "Architectures: Qwen3MoeForCausalLM, Gemma4ForCausalLM, "
+       "Gemma4ForConditionalGeneration\n"
+    << "Supported dtypes: FP32, Q4_0, Q4_K, Q6_K\n"
+    << "Gemma4 MoE FC/expert weights currently support FP32 or Q4_0.\n";
 }
 
 int run(int argc, char **argv) {
@@ -699,7 +941,26 @@ int run(int argc, char **argv) {
   const json cfg = readJson(model_dir / "config.json");
   json nntr_cfg = readJson(model_dir / "nntr_config.json");
   validateSourceConfig(nntr_cfg);
-  const Qwen3MoePlan model = makeModelPlan(cfg);
+  const std::string architecture = getArchitecture(cfg);
+  const bool is_qwen3_moe = architecture == "Qwen3MoeForCausalLM";
+  const bool is_gemma4_moe = architecture == "Gemma4ForCausalLM" ||
+                             architecture == "Gemma4ForConditionalGeneration";
+  if (!is_qwen3_moe && !is_gemma4_moe)
+    throw std::runtime_error("Unsupported architecture: " + architecture);
+
+  Qwen3MoePlan qwen3_model{};
+  Gemma4MoePlan gemma4_model{};
+  if (is_qwen3_moe)
+    qwen3_model = makeQwen3MoePlan(cfg);
+  else
+    gemma4_model = makeGemma4MoePlan(cfg);
+
+  const bool tied_embeddings =
+    is_qwen3_moe ? qwen3_model.tied_embeddings : gemma4_model.tied_embeddings;
+  const size_t num_layers =
+    is_qwen3_moe ? qwen3_model.num_layers : gemma4_model.num_layers;
+  const size_t num_experts =
+    is_qwen3_moe ? qwen3_model.num_experts : gemma4_model.num_experts;
 
   if (!target_config.empty()) {
     const json requested = readJson(target_config);
@@ -711,6 +972,8 @@ int run(int argc, char **argv) {
       lmhead_dtype = requested["lmhead_dtype"].get<std::string>();
     if (requested.contains("model_file_name") && output_bin.empty())
       output_bin = requested["model_file_name"].get<std::string>();
+    if (requested.contains("moe_cache_size"))
+      nntr_cfg["moe_cache_size"] = requested["moe_cache_size"];
   }
 
   if (lmhead_dtype.empty())
@@ -719,9 +982,14 @@ int run(int argc, char **argv) {
                                parseDType(embedding_dtype),
                                parseDType(lmhead_dtype), parseIsa(target_isa)};
 
-  if (model.tied_embeddings && quant.embedding_dtype != quant.lmhead_dtype) {
+  if (tied_embeddings && quant.embedding_dtype != quant.lmhead_dtype) {
     throw std::invalid_argument(
-      "A tied Qwen3 MoE model requires matching embedding and LM head dtypes");
+      "A tied model requires matching embedding and LM head dtypes");
+  }
+  if (is_gemma4_moe && quant.fc_dtype != DType::FP32 &&
+      quant.fc_dtype != DType::Q4_0) {
+    throw std::invalid_argument(
+      "Gemma4 MoE FC/expert dtype must be FP32 or Q4_0");
   }
   const std::string input_bin =
     nntr_cfg.at("model_file_name").get<std::string>();
@@ -752,18 +1020,22 @@ int run(int argc, char **argv) {
   if (!output.is_open())
     throw std::runtime_error("Failed to open " + output_path.string());
 
-  std::cout << "NNTrainer Qwen3 MoE streaming quantizer\n"
+  std::cout << "NNTrainer CausalLM streaming quantizer\n"
+            << "  Architecture: " << architecture << '\n'
             << "  Source: " << input_path << '\n'
             << "  Target: " << output_path << '\n'
-            << "  Layers: " << model.num_layers << '\n'
-            << "  Experts per layer: " << model.num_experts << '\n'
+            << "  Layers: " << num_layers << '\n'
+            << "  Experts per layer: " << num_experts << '\n'
             << "  FC dtype: " << dtypeName(quant.fc_dtype) << '\n'
             << "  Embedding dtype: " << dtypeName(quant.embedding_dtype) << '\n'
             << "  LM head dtype: " << dtypeName(quant.lmhead_dtype) << '\n'
             << "  Target ISA: " << isaName(quant.target_isa) << '\n';
 
   TensorWriter writer(input, output, quant.target_isa);
-  writeQwen3Moe(writer, model, quant);
+  if (is_qwen3_moe)
+    writeQwen3Moe(writer, qwen3_model, quant);
+  else
+    writeGemma4Moe(writer, gemma4_model, quant);
   output.close();
   if (!output)
     throw std::runtime_error("Failed to finalize " + output_path.string());
