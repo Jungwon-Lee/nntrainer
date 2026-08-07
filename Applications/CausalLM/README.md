@@ -384,6 +384,25 @@ nntr_causallm /path/to/model
 nntr_causallm /output/dir
 ```
 
+### Streaming Qwen3-MoE FP32 conversion
+
+The Qwen3-MoE converter can read a local HuggingFace safetensors checkpoint
+without constructing the full FP32 model. It opens one shard at a time and
+writes large tensors in bounded chunks. This requires Python packages `torch`
+and `safetensors`.
+
+```bash
+python3 Applications/CausalLM/res/qwen3/qwen3-30b-a3b/weight_converter_stream.py \
+  --model_path /path/to/Qwen3-30B-A3B \
+  --output_name /path/to/Qwen3-30B-A3B/nntr_qwen3_moe_fp32.bin
+```
+
+The input directory must contain `config.json` and either
+`model.safetensors` or `model.safetensors.index.json` with all referenced
+shards. The default FP32 chunk size is 64 MiB and can be changed with
+`--chunk_size_mib`. Set the resulting filename as `model_file_name` in an FP32
+`nntr_config.json` before quantization or inference.
+
 ## Quantized Safetensors Format
 
 NNTrainer can store quantized weights (`Q4_0` / `Q4_K` / `Q6_K`) in the
