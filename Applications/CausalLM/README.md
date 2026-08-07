@@ -384,6 +384,29 @@ nntr_causallm /path/to/model
 nntr_causallm /output/dir
 ```
 
+### Streaming Qwen3-MoE quantization
+
+`nntr_quantize_stream` converts an FP32 `Qwen3MoeForCausalLM` binary without
+initializing the model or loading all expert weights into memory. Router and
+normalization weights remain FP32; attention, expert, embedding, and LM-head
+dtypes follow the command-line options. Large untied LM heads are transposed in
+64 MiB blocks.
+
+```bash
+# Q4_0 attention and experts, with FP32 embedding/LM head:
+nntr_quantize_stream /path/to/Qwen3-30B-A3B --isa ARM
+
+# Select an explicit output directory and filename:
+nntr_quantize_stream /path/to/Qwen3-30B-A3B \
+  -o /output/qwen3-moe-q4 --output_bin qwen3-moe-q40-arm.bin --isa ARM
+```
+
+The streaming path currently accepts NNTrainer FP32 `.bin` input and supports
+`FP32`, `Q4_0`, `Q4_K`, and `Q6_K`. QS4CX is intentionally deferred and
+returns an explicit unsupported error. The tool rejects Slim/CachedSlim
+architectures and safetensors input because their storage layouts differ from
+the full Qwen3-MoE model.
+
 ## Quantized Safetensors Format
 
 NNTrainer can store quantized weights (`Q4_0` / `Q4_K` / `Q6_K`) in the
