@@ -4,6 +4,8 @@
  *
  * @file   quantize_stream.cpp
  * @brief  Bounded-memory weight quantizer for supported CausalLM models.
+ * @author Jungwon-Lee <jungone.lee@samsung.com>
+ * @bug    No known bugs except for NYI items
  */
 
 #include <cpu_backend.h>

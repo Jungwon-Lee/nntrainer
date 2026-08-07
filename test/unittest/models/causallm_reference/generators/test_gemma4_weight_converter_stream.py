@@ -1,4 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
+## @file test_gemma4_weight_converter_stream.py
+## @brief Unit tests for the bounded-memory Gemma4 FP32 converter
+
 """Unit tests for the bounded-memory Gemma4 FP32 converter."""
 
 import importlib.util
