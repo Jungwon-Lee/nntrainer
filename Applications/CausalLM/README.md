@@ -426,6 +426,48 @@ returns an explicit unsupported error. The tool rejects Slim/CachedSlim
 architectures and safetensors input because their storage layouts differ from
 the full Qwen3-MoE model.
 
+### Streaming Gemma4-MoE FP32 conversion
+
+`weight_converter_stream.py` reads a local Hugging Face safetensors checkpoint
+with bounded memory. It keeps one input shard open at a time and writes large
+FP32 tensors in chunks, including transposed dense and per-expert MoE matrices.
+The default chunk size is 64 MiB. The existing `weight_converter.py` remains
+the general converter and retains its Hugging Face loading and NNTrainer
+safetensors-output paths.
+
+```bash
+python3 Applications/CausalLM/res/gemma4/weight_converter_stream.py \
+  --model_path /path/to/gemma-4-26b-a4b-it \
+  --output_name /path/to/gemma-4-26b-a4b-it/nntr_gemma4_fp32.bin
+```
+
+Use `--chunk_size_mib <size>` to change the chunk size and `--overwrite` to
+replace an existing output. The streaming script requires a local
+`model.safetensors` or `model.safetensors.index.json` checkpoint and produces
+an FP32 `.bin`. Use `weight_converter.py` for a Hub model ID, a legacy PyTorch
+checkpoint, or NNTrainer safetensors output.
+
+### Streaming Gemma4-MoE quantization
+
+`nntr_quantize_stream` converts the generated FP32 `.bin` without constructing
+the Gemma 4 graph or loading all expert weights. Dense attention/MLP and expert
+weights support `Q4_0`; router, router-scale, normalization, and scalar weights
+remain FP32. Embedding and tied LM-head weights remain FP32 by default.
+
+```bash
+# Build with -Denable-transformer=true first.
+build/Applications/CausalLM/nntr_quantize_stream \
+  /path/to/gemma-4-26b-a4b-it \
+  --fc_dtype Q4_0 --embd_dtype FP32 --isa ARM \
+  -o /output/gemma-4-26b-a4b-it-q40
+```
+
+The input directory must contain `config.json`, `nntr_config.json`, and the
+FP32 `.bin` referenced by `model_file_name`. The tool writes a self-contained
+output directory and an updated `nntr_config.json`. Gemma 4 MoE FC/expert
+weights currently support `FP32` and `Q4_0`; embedding/LM-head options also
+support `Q6_K`. Tied embedding and LM-head dtypes must match.
+
 ## Quantized Safetensors Format
 
 NNTrainer can store quantized weights (`Q4_0` / `Q4_K` / `Q6_K`) in the
