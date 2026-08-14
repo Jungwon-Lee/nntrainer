@@ -492,93 +492,222 @@ void nntr_dequantize_row_q4_0(const void *__restrict x, float *__restrict y,
   dequantize_row_q4_0_impl((const block_q4_0 *)x, y, k);
 }
 
-void nntr_vec_dot_q4_0_q8_0(int n, float *__restrict s,
-                            const void *__restrict vx,
-                            const void *__restrict vy) {
-  assert(n % QK4_0 == 0);
-  static_assert(QK4_0 == QK8_0, "Q4_0 and Q8_0 block sizes must match");
-
-  const int nb = n / QK4_0;
-  const block_q4_0 *x = static_cast<const block_q4_0 *>(vx);
-  const block_q8_0 *y = static_cast<const block_q8_0 *>(vy);
+static inline float q4_0_scale_to_float(nntr_fp16_t value) {
+#if defined(__ARM_NEON) && (!ARMV7)
+  __fp16 result;
+  std::memcpy(&result, &value, sizeof(value));
+  return static_cast<float>(result);
+#elif defined(__AVX2__) && defined(__F16C__)
+  return _cvtsh_ss(value);
+#else
+  return nntr_compute_fp16_to_fp32(value);
+#endif
+}
 
 #if defined(__ARM_NEON) && (!ARMV7)
-  float32x4_t acc = vdupq_n_f32(0.0f);
+static inline float32x4_t
+accumulate_q4_0_q8_0_neon(const block_q4_0 &x, const int8x16_t q8_low,
+                          const int8x16_t q8_high, const float q8_scale,
+                          const uint8x16_t low_mask, const uint8x16_t offset,
+                          float32x4_t acc) {
+  const uint8x16_t packed = vld1q_u8(x.qs);
+  const int8x16_t q4_low =
+    vreinterpretq_s8_u8(vsubq_u8(vandq_u8(packed, low_mask), offset));
+  const int8x16_t q4_high =
+    vreinterpretq_s8_u8(vsubq_u8(vshrq_n_u8(packed, 4), offset));
+
+#if defined(__ARM_FEATURE_DOTPROD)
+  int32x4_t sumi = vdotq_s32(vdupq_n_s32(0), q4_low, q8_low);
+  sumi = vdotq_s32(sumi, q4_high, q8_high);
+#else
+  int32x4_t sumi =
+    vpaddlq_s16(vmull_s8(vget_low_s8(q4_low), vget_low_s8(q8_low)));
+  sumi = vaddq_s32(
+    sumi, vpaddlq_s16(vmull_s8(vget_high_s8(q4_low), vget_high_s8(q8_low))));
+  sumi = vaddq_s32(
+    sumi, vpaddlq_s16(vmull_s8(vget_low_s8(q4_high), vget_low_s8(q8_high))));
+  sumi = vaddq_s32(
+    sumi, vpaddlq_s16(vmull_s8(vget_high_s8(q4_high), vget_high_s8(q8_high))));
+#endif
+
+  const float scale = q4_0_scale_to_float(x.d) * q8_scale;
+  return vmlaq_n_f32(acc, vcvtq_f32_s32(sumi), scale);
+}
+#elif defined(__AVX2__)
+static inline __m256
+accumulate_q4_0_q8_0_avx2(const block_q4_0 &x, const __m256i q8_low,
+                          const __m256i q8_high, const float q8_scale,
+                          const __m128i low_mask, const __m128i offset,
+                          __m256 acc) {
+  const __m128i packed =
+    _mm_loadu_si128(reinterpret_cast<const __m128i *>(x.qs));
+  const __m128i q4_low = _mm_sub_epi8(_mm_and_si128(packed, low_mask), offset);
+  const __m128i q4_high =
+    _mm_sub_epi8(_mm_and_si128(_mm_srli_epi16(packed, 4), low_mask), offset);
+  __m256i sumi = _mm256_madd_epi16(_mm256_cvtepi8_epi16(q4_low), q8_low);
+  sumi = _mm256_add_epi32(
+    sumi, _mm256_madd_epi16(_mm256_cvtepi8_epi16(q4_high), q8_high));
+
+  const float scale = q4_0_scale_to_float(x.d) * q8_scale;
+  return _mm256_add_ps(
+    acc, _mm256_mul_ps(_mm256_cvtepi32_ps(sumi), _mm256_set1_ps(scale)));
+}
+#endif
+
+void nntr_gemv_q4_0_q8_0_canonical_rows(int k, float *__restrict output,
+                                        const void *__restrict q4_weight,
+                                        const void *__restrict q8_activation,
+                                        size_t num_rows) {
+  assert(k % QK4_0 == 0);
+  static_assert(QK4_0 == QK8_0, "Q4_0 and Q8_0 block sizes must match");
+
+  const int nb = k / QK4_0;
+  const block_q4_0 *x = static_cast<const block_q4_0 *>(q4_weight);
+  const block_q8_0 *y = static_cast<const block_q8_0 *>(q8_activation);
+  constexpr size_t rows_per_group = 4;
+
+#if defined(__ARM_NEON) && (!ARMV7)
   const uint8x16_t low_mask = vdupq_n_u8(0x0f);
   const uint8x16_t offset = vdupq_n_u8(8);
 
-  for (int i = 0; i < nb; ++i) {
-    const uint8x16_t packed = vld1q_u8(x[i].qs);
-    const int8x16_t q4_low =
-      vreinterpretq_s8_u8(vsubq_u8(vandq_u8(packed, low_mask), offset));
-    const int8x16_t q4_high =
-      vreinterpretq_s8_u8(vsubq_u8(vshrq_n_u8(packed, 4), offset));
-    const int8x16_t q8_low = vld1q_s8(y[i].qs);
-    const int8x16_t q8_high = vld1q_s8(y[i].qs + 16);
+  size_t row = 0;
+  for (; row + rows_per_group <= num_rows; row += rows_per_group) {
+    const block_q4_0 *x0 = x + row * nb;
+    const block_q4_0 *x1 = x0 + nb;
+    const block_q4_0 *x2 = x1 + nb;
+    const block_q4_0 *x3 = x2 + nb;
+    float32x4_t acc0 = vdupq_n_f32(0.0f);
+    float32x4_t acc1 = vdupq_n_f32(0.0f);
+    float32x4_t acc2 = vdupq_n_f32(0.0f);
+    float32x4_t acc3 = vdupq_n_f32(0.0f);
 
-#if defined(__ARM_FEATURE_DOTPROD)
-    int32x4_t sumi = vdotq_s32(vdupq_n_s32(0), q4_low, q8_low);
-    sumi = vdotq_s32(sumi, q4_high, q8_high);
-#else
-    int32x4_t sumi =
-      vpaddlq_s16(vmull_s8(vget_low_s8(q4_low), vget_low_s8(q8_low)));
-    sumi = vaddq_s32(
-      sumi, vpaddlq_s16(vmull_s8(vget_high_s8(q4_low), vget_high_s8(q8_low))));
-    sumi = vaddq_s32(
-      sumi, vpaddlq_s16(vmull_s8(vget_low_s8(q4_high), vget_low_s8(q8_high))));
-    sumi = vaddq_s32(sumi, vpaddlq_s16(vmull_s8(vget_high_s8(q4_high),
-                                                vget_high_s8(q8_high))));
-#endif
+    for (int i = 0; i < nb; ++i) {
+      const int8x16_t q8_low = vld1q_s8(y[i].qs);
+      const int8x16_t q8_high = vld1q_s8(y[i].qs + 16);
+      const float q8_scale = q4_0_scale_to_float(y[i].d);
+      acc0 = accumulate_q4_0_q8_0_neon(x0[i], q8_low, q8_high, q8_scale,
+                                       low_mask, offset, acc0);
+      acc1 = accumulate_q4_0_q8_0_neon(x1[i], q8_low, q8_high, q8_scale,
+                                       low_mask, offset, acc1);
+      acc2 = accumulate_q4_0_q8_0_neon(x2[i], q8_low, q8_high, q8_scale,
+                                       low_mask, offset, acc2);
+      acc3 = accumulate_q4_0_q8_0_neon(x3[i], q8_low, q8_high, q8_scale,
+                                       low_mask, offset, acc3);
+    }
 
-    const float d =
-      nntr_compute_fp16_to_fp32(x[i].d) * nntr_compute_fp16_to_fp32(y[i].d);
-    acc = vmlaq_n_f32(acc, vcvtq_f32_s32(sumi), d);
+    output[row] = vaddvq_f32(acc0);
+    output[row + 1] = vaddvq_f32(acc1);
+    output[row + 2] = vaddvq_f32(acc2);
+    output[row + 3] = vaddvq_f32(acc3);
   }
 
-  *s = vaddvq_f32(acc);
+  for (; row < num_rows; ++row) {
+    const block_q4_0 *xr = x + row * nb;
+    float32x4_t acc = vdupq_n_f32(0.0f);
+    for (int i = 0; i < nb; ++i) {
+      const int8x16_t q8_low = vld1q_s8(y[i].qs);
+      const int8x16_t q8_high = vld1q_s8(y[i].qs + 16);
+      const float q8_scale = q4_0_scale_to_float(y[i].d);
+      acc = accumulate_q4_0_q8_0_neon(xr[i], q8_low, q8_high, q8_scale,
+                                      low_mask, offset, acc);
+    }
+    output[row] = vaddvq_f32(acc);
+  }
 #elif defined(__AVX2__)
-  __m256 acc = _mm256_setzero_ps();
   const __m128i low_mask = _mm_set1_epi8(0x0f);
   const __m128i offset = _mm_set1_epi8(8);
 
-  for (int i = 0; i < nb; ++i) {
-    const __m128i packed =
-      _mm_loadu_si128(reinterpret_cast<const __m128i *>(x[i].qs));
-    const __m128i q4_low =
-      _mm_sub_epi8(_mm_and_si128(packed, low_mask), offset);
-    const __m128i q4_high =
-      _mm_sub_epi8(_mm_and_si128(_mm_srli_epi16(packed, 4), low_mask), offset);
-    const __m128i q8_low =
-      _mm_loadu_si128(reinterpret_cast<const __m128i *>(y[i].qs));
-    const __m128i q8_high =
-      _mm_loadu_si128(reinterpret_cast<const __m128i *>(y[i].qs + 16));
+  size_t row = 0;
+  for (; row + rows_per_group <= num_rows; row += rows_per_group) {
+    const block_q4_0 *x0 = x + row * nb;
+    const block_q4_0 *x1 = x0 + nb;
+    const block_q4_0 *x2 = x1 + nb;
+    const block_q4_0 *x3 = x2 + nb;
+    __m256 acc0 = _mm256_setzero_ps();
+    __m256 acc1 = _mm256_setzero_ps();
+    __m256 acc2 = _mm256_setzero_ps();
+    __m256 acc3 = _mm256_setzero_ps();
 
-    __m256i sumi = _mm256_madd_epi16(_mm256_cvtepi8_epi16(q4_low),
-                                     _mm256_cvtepi8_epi16(q8_low));
-    sumi =
-      _mm256_add_epi32(sumi, _mm256_madd_epi16(_mm256_cvtepi8_epi16(q4_high),
-                                               _mm256_cvtepi8_epi16(q8_high)));
-
-    const float d =
-      nntr_compute_fp16_to_fp32(x[i].d) * nntr_compute_fp16_to_fp32(y[i].d);
-    acc = _mm256_add_ps(
-      acc, _mm256_mul_ps(_mm256_cvtepi32_ps(sumi), _mm256_set1_ps(d)));
-  }
-
-  *s = hsum_float_8(acc);
-#else
-  float sumf = 0.0f;
-  for (int i = 0; i < nb; ++i) {
-    int sumi = 0;
-    for (int j = 0; j < QK4_0 / 2; ++j) {
-      const int q4_low = (x[i].qs[j] & 0x0f) - 8;
-      const int q4_high = (x[i].qs[j] >> 4) - 8;
-      sumi += q4_low * y[i].qs[j] + q4_high * y[i].qs[j + QK4_0 / 2];
+    for (int i = 0; i < nb; ++i) {
+      const __m128i q8_low =
+        _mm_loadu_si128(reinterpret_cast<const __m128i *>(y[i].qs));
+      const __m128i q8_high =
+        _mm_loadu_si128(reinterpret_cast<const __m128i *>(y[i].qs + 16));
+      const __m256i q8_low_16 = _mm256_cvtepi8_epi16(q8_low);
+      const __m256i q8_high_16 = _mm256_cvtepi8_epi16(q8_high);
+      const float q8_scale = q4_0_scale_to_float(y[i].d);
+      acc0 = accumulate_q4_0_q8_0_avx2(x0[i], q8_low_16, q8_high_16, q8_scale,
+                                       low_mask, offset, acc0);
+      acc1 = accumulate_q4_0_q8_0_avx2(x1[i], q8_low_16, q8_high_16, q8_scale,
+                                       low_mask, offset, acc1);
+      acc2 = accumulate_q4_0_q8_0_avx2(x2[i], q8_low_16, q8_high_16, q8_scale,
+                                       low_mask, offset, acc2);
+      acc3 = accumulate_q4_0_q8_0_avx2(x3[i], q8_low_16, q8_high_16, q8_scale,
+                                       low_mask, offset, acc3);
     }
-    sumf += static_cast<float>(sumi) * nntr_compute_fp16_to_fp32(x[i].d) *
-            nntr_compute_fp16_to_fp32(y[i].d);
+
+    output[row] = hsum_float_8(acc0);
+    output[row + 1] = hsum_float_8(acc1);
+    output[row + 2] = hsum_float_8(acc2);
+    output[row + 3] = hsum_float_8(acc3);
   }
-  *s = sumf;
+
+  for (; row < num_rows; ++row) {
+    const block_q4_0 *xr = x + row * nb;
+    __m256 acc = _mm256_setzero_ps();
+    for (int i = 0; i < nb; ++i) {
+      const __m128i q8_low =
+        _mm_loadu_si128(reinterpret_cast<const __m128i *>(y[i].qs));
+      const __m128i q8_high =
+        _mm_loadu_si128(reinterpret_cast<const __m128i *>(y[i].qs + 16));
+      const __m256i q8_low_16 = _mm256_cvtepi8_epi16(q8_low);
+      const __m256i q8_high_16 = _mm256_cvtepi8_epi16(q8_high);
+      const float q8_scale = q4_0_scale_to_float(y[i].d);
+      acc = accumulate_q4_0_q8_0_avx2(xr[i], q8_low_16, q8_high_16, q8_scale,
+                                      low_mask, offset, acc);
+    }
+    output[row] = hsum_float_8(acc);
+  }
+#else
+  size_t row = 0;
+  for (; row + rows_per_group <= num_rows; row += rows_per_group) {
+    float sumf[rows_per_group] = {};
+    for (int i = 0; i < nb; ++i) {
+      int sumi[rows_per_group] = {};
+      for (int j = 0; j < QK4_0 / 2; ++j) {
+        for (size_t r = 0; r < rows_per_group; ++r) {
+          const block_q4_0 &xr = x[(row + r) * nb + i];
+          const int q4_low = (xr.qs[j] & 0x0f) - 8;
+          const int q4_high = (xr.qs[j] >> 4) - 8;
+          sumi[r] += q4_low * y[i].qs[j] + q4_high * y[i].qs[j + QK4_0 / 2];
+        }
+      }
+      const float q8_scale = q4_0_scale_to_float(y[i].d);
+      for (size_t r = 0; r < rows_per_group; ++r) {
+        sumf[r] += static_cast<float>(sumi[r]) *
+                   q4_0_scale_to_float(x[(row + r) * nb + i].d) * q8_scale;
+      }
+    }
+    for (size_t r = 0; r < rows_per_group; ++r) {
+      output[row + r] = sumf[r];
+    }
+  }
+
+  for (; row < num_rows; ++row) {
+    float sumf = 0.0f;
+    const block_q4_0 *xr = x + row * nb;
+    for (int i = 0; i < nb; ++i) {
+      int sumi = 0;
+      for (int j = 0; j < QK4_0 / 2; ++j) {
+        const int q4_low = (xr[i].qs[j] & 0x0f) - 8;
+        const int q4_high = (xr[i].qs[j] >> 4) - 8;
+        sumi += q4_low * y[i].qs[j] + q4_high * y[i].qs[j + QK4_0 / 2];
+      }
+      sumf += static_cast<float>(sumi) * q4_0_scale_to_float(xr[i].d) *
+              q4_0_scale_to_float(y[i].d);
+    }
+    output[row] = sumf;
+  }
 #endif
 }
 

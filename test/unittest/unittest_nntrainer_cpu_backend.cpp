@@ -424,6 +424,17 @@ TEST(nntrainer_cpu_backend_standalone, q4_0_rowwise_gemv) {
   nntrainer::gemv_q4_0_rowwise_range(row_split, N, K, q8_activation.data(),
                                      q4_weight.data(), output.data());
 
+  constexpr float sentinel = 12345.0f;
+  std::vector<float> ranged_output(N, sentinel);
+  const unsigned int range_begin = 2;
+  const unsigned int range_end = N - 2;
+  nntrainer::gemv_q4_0_rowwise_range(range_begin, range_end, K,
+                                     q8_activation.data(), q4_weight.data(),
+                                     ranged_output.data());
+  nntrainer::gemv_q4_0_rowwise_range(range_begin, range_begin, K,
+                                     q8_activation.data(), q4_weight.data(),
+                                     ranged_output.data());
+
   std::vector<float> dequant_activation(K);
   nntr_dequantize_row_q8_0(q8_activation.data(), dequant_activation.data(), K);
 
@@ -435,6 +446,11 @@ TEST(nntrainer_cpu_backend_standalone, q4_0_rowwise_gemv) {
     const float expected = nntrainer::sdot(K, dequant_weight.data(), 1,
                                            dequant_activation.data(), 1);
     EXPECT_NEAR(output[row], expected, 1.0e-3f) << "row=" << row;
+    if (row >= range_begin && row < range_end) {
+      EXPECT_NEAR(ranged_output[row], expected, 1.0e-3f) << "row=" << row;
+    } else {
+      EXPECT_EQ(ranged_output[row], sentinel) << "row=" << row;
+    }
   }
 }
 

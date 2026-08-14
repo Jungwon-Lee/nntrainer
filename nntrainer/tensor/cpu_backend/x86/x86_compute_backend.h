@@ -850,9 +850,31 @@ void gemm_q4_0(const unsigned int M, const unsigned int N, const unsigned int K,
                const T *A, const unsigned int lda, const void *B,
                const unsigned int ldb, T *C, const unsigned int ldc);
 
+/**
+ * @brief Return storage required for one Q8_0 activation row
+ * @param K Number of elements; must be a non-zero multiple of QK4_0
+ * @return Size of the Q8_0 activation buffer in bytes
+ */
 size_t q4_0_gemv_activation_size(const unsigned int K);
+
+/**
+ * @brief Quantize one FP32 activation row to Q8_0 for Q4_0 GEMV
+ * @param K Number of activation elements
+ * @param A FP32 activation row
+ * @param quantized_A Preallocated Q8_0 destination
+ */
 void quantize_q4_0_gemv_activation(const unsigned int K, const float *A,
                                    void *quantized_A);
+
+/**
+ * @brief Compute canonical Q4_0 weight rows against one Q8_0 row
+ * @param row_begin First output row
+ * @param row_end One-past-last output row
+ * @param K Number of elements per weight row
+ * @param quantized_A Q8_0 activation row
+ * @param B Canonical row-major Q4_0 weights
+ * @param C FP32 output vector indexed by the absolute weight row
+ */
 void gemv_q4_0_rowwise_range(const unsigned int row_begin,
                              const unsigned int row_end, const unsigned int K,
                              const void *quantized_A, const void *B, float *C);

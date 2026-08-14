@@ -130,10 +130,9 @@ void __ggml_gemv_q4_0_rowwise_range(const unsigned int row_begin,
   const size_t blocks_per_row = K / QK4_0;
   const size_t weight_row_size = sizeof(block_q4_0) * blocks_per_row;
   const char *weight_data = static_cast<const char *>(B);
-  for (size_t row = row_begin; row < row_end; ++row) {
-    nntr_vec_dot_q4_0_q8_0(K, C + row, weight_data + row * weight_row_size,
-                           quantized_A);
-  }
+  nntr_gemv_q4_0_q8_0_canonical_rows(K, C + row_begin,
+                                     weight_data + row_begin * weight_row_size,
+                                     quantized_A, row_end - row_begin);
 }
 
 void __ggml_repack_q4_0_to_q4_0_4(void *dst, void *src, size_t data_size,

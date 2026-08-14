@@ -280,8 +280,14 @@ void __ggml_gemm_q6_K(const unsigned int M, const unsigned int N,
                       const void *B, const unsigned int ldb, T *C,
                       const unsigned int ldc);
 
+/**
+ * @brief Return the Q8_0 buffer size for one Q4_0 GEMV activation row
+ */
 size_t __ggml_q4_0_gemv_activation_size(const unsigned int K);
 
+/**
+ * @brief Quantize one FP32 activation row to Q8_0 for Q4_0 GEMV
+ */
 void __ggml_quantize_q4_0_gemv_activation(const unsigned int K, const float *A,
                                           void *quantized_A);
 
