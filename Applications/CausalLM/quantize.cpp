@@ -88,6 +88,7 @@
 #include "qwen3_cached_slim_moe_causallm.h"
 #endif
 #include "qwen3_5_causallm.h"
+#include "qwen3_5_moe_causallm.h"
 #include "qwen3_causallm.h"
 #include "qwen3_embedding.h"
 #include "qwen3_moe_causallm.h"
@@ -318,6 +319,11 @@ void registerAllModels() {
                           return std::make_unique<causallm::Qwen3MoECausalLM>(
                             cfg, generation_cfg, nntr_cfg);
                         });
+  factory.registerModel("Qwen3_5MoeForConditionalGeneration",
+                        [](json cfg, json generation_cfg, json nntr_cfg) {
+                          return std::make_unique<causallm::Qwen3_5MoeCausalLM>(
+                            cfg, generation_cfg, nntr_cfg);
+                        });
   factory.registerModel("Qwen3_5ForConditionalGeneration",
                         [](json cfg, json generation_cfg, json nntr_cfg) {
                           return std::make_unique<causallm::Qwen3_5CausalLM>(
@@ -326,6 +332,11 @@ void registerAllModels() {
   factory.registerModel("Qwen3_5ForCausalLM",
                         [](json cfg, json generation_cfg, json nntr_cfg) {
                           return std::make_unique<causallm::Qwen3_5CausalLM>(
+                            cfg, generation_cfg, nntr_cfg);
+                        });
+  factory.registerModel("Qwen3_5MoeForCausalLM",
+                        [](json cfg, json generation_cfg, json nntr_cfg) {
+                          return std::make_unique<causallm::Qwen3_5MoeCausalLM>(
                             cfg, generation_cfg, nntr_cfg);
                         });
   factory.registerModel("Qwen3SlimMoeForCausalLM", [](json cfg,

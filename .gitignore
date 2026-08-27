@@ -49,6 +49,12 @@ Applications/CausalLM/res/lfm2_vl/*
 Applications/CausalLM/res/qwen3_5/*
 !Applications/CausalLM/res/qwen3_5/README.md
 !Applications/CausalLM/res/qwen3_5/*.py
+!Applications/CausalLM/res/qwen3_5_moe/
+Applications/CausalLM/res/qwen3_5_moe/*
+!Applications/CausalLM/res/qwen3_5_moe/qwen3.6-35b-a3b/
+Applications/CausalLM/res/qwen3_5_moe/qwen3.6-35b-a3b/*
+!Applications/CausalLM/res/qwen3_5_moe/qwen3.6-35b-a3b/README.md
+!Applications/CausalLM/res/qwen3_5_moe/qwen3.6-35b-a3b/weight_converter.py
 Applications/**/tokenizers-cpp-build/*
 
 # CTag

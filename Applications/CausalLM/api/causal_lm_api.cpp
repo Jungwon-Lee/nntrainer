@@ -38,6 +38,7 @@
 #include "qwen3_cached_slim_moe_causallm.h"
 #endif
 #include "qwen3_5_causallm.h"
+#include "qwen3_5_moe_causallm.h"
 #include "qwen3_causallm.h"
 #include "qwen3_moe_causallm.h"
 #include "qwen3_slim_moe_causallm.h"
@@ -251,6 +252,18 @@ static void register_models() {
                                                            nntr_cfg);
       });
     causallm::Factory::Instance().registerModel(
+      "Qwen3_5MoeForConditionalGeneration",
+      [](json cfg, json generation_cfg, json nntr_cfg) {
+        return std::make_unique<causallm::Qwen3_5MoeCausalLM>(
+          cfg, generation_cfg, nntr_cfg);
+      });
+    causallm::Factory::Instance().registerModel(
+      "Qwen3_5MoeForCausalLM",
+      [](json cfg, json generation_cfg, json nntr_cfg) {
+        return std::make_unique<causallm::Qwen3_5MoeCausalLM>(
+          cfg, generation_cfg, nntr_cfg);
+      });
+    causallm::Factory::Instance().registerModel(
       "Qwen3SlimMoeForCausalLM",
       [](json cfg, json generation_cfg, json nntr_cfg) {
         return std::make_unique<causallm::Qwen3SlimMoECausalLM>(
@@ -320,6 +333,8 @@ static std::string apply_chat_template(const std::string &architecture,
              architecture == "Qwen3MoeForCausalLM" ||
              architecture == "Qwen3_5ForConditionalGeneration" ||
              architecture == "Qwen3_5ForCausalLM" ||
+             architecture == "Qwen3_5MoeForConditionalGeneration" ||
+             architecture == "Qwen3_5MoeForCausalLM" ||
              architecture == "Qwen3SlimMoeForCausalLM" ||
              architecture == "Qwen3CachedSlimMoeForCausalLM") {
     return "<|im_start|>user\n" + input + "<|im_end|>\n<|im_start|>assistant\n";

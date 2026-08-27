@@ -1,6 +1,6 @@
 # CausalLM Model Unit Test Guide
 
-`unittest_causallm_models` is the CausalLM reference test suite — 87 tests covering:
+`unittest_causallm_models` is the CausalLM reference test suite — 97 tests covering:
 
 - **Tiny-model deterministic tests**: argmax, logit, and weight round-trip checks with random weights
 - **FP32 differential tests**: compare nntrainer outputs against HuggingFace reference logits
