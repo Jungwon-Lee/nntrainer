@@ -465,6 +465,7 @@ private:
 
   std::string getRopeCacheKey(int head_dim, unsigned int seq_len,
                               float theta) const;
+  unsigned int getRotaryDimension(unsigned int head_dim) const;
 
   /**
    * @brief     apply rotary embedding

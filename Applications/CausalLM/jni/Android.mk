@@ -32,6 +32,7 @@ CAUSALLM_COMMON_INCLUDES := \
     $(LOCAL_PATH)/../models/qwen2 \
     $(LOCAL_PATH)/../models/qwen3 \
     $(LOCAL_PATH)/../models/qwen3_moe \
+    $(LOCAL_PATH)/../models/qwen3_5 \
     $(LOCAL_PATH)/../models/qwen3_slim_moe \
     $(LOCAL_PATH)/../models/qwen3_cached_slim_moe \
     $(LOCAL_PATH)/../models/gemma3 \
@@ -84,6 +85,8 @@ LOCAL_SRC_FILES := \
     ../models/qwen3/qwen3_causallm.cpp \
     ../models/qwen3/qwen3_embedding.cpp \
     ../models/qwen3_moe/qwen3_moe_causallm.cpp \
+    ../models/qwen3_5/qwen3_5_causallm.cpp \
+    ../models/qwen3_5/qwen3_5_delta_layer.cpp \
     ../models/qwen3_slim_moe/qwen3_slim_moe_causallm.cpp \
     ../models/qwen3_cached_slim_moe/qwen3_cached_slim_moe_causallm.cpp \
     ../models/gpt_oss/gptoss_causallm.cpp \
@@ -202,6 +205,8 @@ LOCAL_SRC_FILES := ../quantize.cpp \
     ../models/qwen3/qwen3_causallm.cpp \
     ../models/qwen3/qwen3_embedding.cpp \
     ../models/qwen3_moe/qwen3_moe_causallm.cpp \
+    ../models/qwen3_5/qwen3_5_causallm.cpp \
+    ../models/qwen3_5/qwen3_5_delta_layer.cpp \
     ../models/qwen3_slim_moe/qwen3_slim_moe_causallm.cpp \
     ../models/qwen3_cached_slim_moe/qwen3_cached_slim_moe_causallm.cpp \
     ../models/gpt_oss/gptoss_causallm.cpp \
@@ -312,6 +317,7 @@ LOCAL_SRC_FILES := \
     $(UNITTEST_MODELS_DIR)/unittest_causallm_gemma4.cpp \
     $(UNITTEST_MODELS_DIR)/unittest_causallm_gemma4_reference.cpp \
     $(UNITTEST_MODELS_DIR)/unittest_causallm_qwen3_moe.cpp \
+    $(UNITTEST_MODELS_DIR)/unittest_causallm_qwen3_5_reference.cpp \
     $(UNITTEST_MODELS_DIR)/unittest_causallm_qwen3_moe_reference.cpp \
     $(UNITTEST_MODELS_DIR)/unittest_causallm_qwen3_slim_moe.cpp \
     $(UNITTEST_MODELS_DIR)/unittest_causallm_qwen3_cached_slim_moe.cpp \

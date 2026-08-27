@@ -45,6 +45,10 @@ Applications/CausalLM/res/qwen3/test/*
 Applications/CausalLM/res/lfm2_vl/*
 !Applications/CausalLM/res/lfm2_vl/README.md
 !Applications/CausalLM/res/lfm2_vl/*.py
+!Applications/CausalLM/res/qwen3_5/
+Applications/CausalLM/res/qwen3_5/*
+!Applications/CausalLM/res/qwen3_5/README.md
+!Applications/CausalLM/res/qwen3_5/*.py
 Applications/**/tokenizers-cpp-build/*
 
 # CTag
@@ -95,4 +99,3 @@ nntrainer_for_android.tar.gz
 ctre-unicode.hpp
 encoder.hpp
 json.hpp
-

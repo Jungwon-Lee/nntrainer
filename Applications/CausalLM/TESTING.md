@@ -1,6 +1,6 @@
 # CausalLM Model Unit Test Guide
 
-`unittest_causallm_models` is the CausalLM reference test suite — 55 tests covering:
+`unittest_causallm_models` is the CausalLM reference test suite — 87 tests covering:
 
 - **Tiny-model deterministic tests**: argmax, logit, and weight round-trip checks with random weights
 - **FP32 differential tests**: compare nntrainer outputs against HuggingFace reference logits
@@ -181,4 +181,3 @@ the nntrainer build and ndk-build when only the test execution needs to be re-ru
 | All differential tests SKIP | `NNTRAINER_CAUSALLM_FIXTURE_DIR` not set or fixtures not pushed | Verify `adb shell ls $INSTALL/causallm_reference/` |
 | All Q4_0 tests SKIP | `NNTR_QUANTIZE_BIN` not set or binary not pushed | Verify `adb shell ls $INSTALL/nntr_quantize` |
 | Linker error: `libcausallm_core.so` not found | Libraries not in `LD_LIBRARY_PATH` | Ensure all `.so` files are in `$INSTALL` |
-

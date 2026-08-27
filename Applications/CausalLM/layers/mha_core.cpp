@@ -871,9 +871,10 @@ void MHACoreLayer::one_batch_incremental_forwarding(
 void MHACoreLayer::precompute_freqs(int head_dim, unsigned int seq_len,
                                     float theta, bool is_fp16) {
   const std::string rope_cache_key = getRopeCacheKey(head_dim, seq_len, theta);
+  const unsigned int rotary_dim = getRotaryDimension(head_dim);
   thetas.clear();
   if (rope_scaling_type == "default")
-    _compute_default_parameters(head_dim, theta);
+    _compute_default_parameters(rotary_dim, theta);
   else if (rope_scaling_type == "yarn")
     _compute_yarn_parameters(head_dim, theta);
   else if (rope_scaling_type == "proportional")
@@ -881,7 +882,7 @@ void MHACoreLayer::precompute_freqs(int head_dim, unsigned int seq_len,
   else
     NNTR_THROW_IF(true, std::invalid_argument) << "Unsupported rope type!";
 
-  unsigned int half_ = head_dim / 2;
+  unsigned int half_ = rotary_dim / 2;
 
   if (!is_fp16) {
     auto it = rope_cache_fp32.find(rope_cache_key);
@@ -940,6 +941,25 @@ std::string MHACoreLayer::getRopeCacheKey(int head_dim, unsigned int seq_len,
      << "|" << scale << "|" << rope_partial_rotary_factor << "|"
      << original_max_position_embeddings;
   return ss.str();
+}
+
+unsigned int MHACoreLayer::getRotaryDimension(unsigned int head_dim) const {
+  // The proportional implementation already interprets this property while
+  // building its frequency table. Default RoPE instead follows Transformers:
+  // rotate only the leading head_dim * factor features and leave the rest as
+  // an unmodified pass-through suffix.
+  if (rope_scaling_type != "default")
+    return head_dim;
+
+  NNTR_THROW_IF(rope_partial_rotary_factor <= 0.0f ||
+                  rope_partial_rotary_factor > 1.0f,
+                std::invalid_argument)
+    << "rope_partial_rotary_factor must be in (0, 1]";
+  const unsigned int rotary_dim =
+    static_cast<unsigned int>(head_dim * rope_partial_rotary_factor);
+  NNTR_THROW_IF(rotary_dim == 0 || rotary_dim % 2 != 0, std::invalid_argument)
+    << "partial rotary dimension must be a positive even number";
+  return rotary_dim;
 }
 
 void MHACoreLayer::_compute_default_parameters(int head_dim, float theta) {
@@ -1082,7 +1102,8 @@ void MHACoreLayer::apply_rotary_emb_tensor_v2(nntrainer::Tensor &in,
     }
     return;
   }
-  unsigned int half_ = dim / 2;
+  const unsigned int rotary_dim = getRotaryDimension(dim);
+  const unsigned int half_ = rotary_dim / 2;
   unsigned int max_timestep =
     std::get<nntrainer::props::MaxTimestep>(mha_core_props).get();
 
@@ -1116,9 +1137,10 @@ void MHACoreLayer::apply_rotary_emb_tensor_v2(nntrainer::Tensor &in,
               std::memcpy(out_ptr, in_ptr, sizeof(float) * in.width());
             }
             if (!convert_only) {
-              nntrainer::compute_rotary_emb_value(
-                in.width(), dim, half_, out_ptr, nullptr, cos_->data(),
-                sin_->data(), false);
+              for (unsigned int offset = 0; offset < in.width(); offset += dim)
+                nntrainer::compute_rotary_emb_value(
+                  rotary_dim, rotary_dim, half_, out_ptr + offset, nullptr,
+                  cos_->data(), sin_->data(), false);
             }
           } else if (out.getDataType() ==
                        ml::train::TensorDim::DataType::UINT16 ||
@@ -1129,9 +1151,17 @@ void MHACoreLayer::apply_rotary_emb_tensor_v2(nntrainer::Tensor &in,
                                 c * out.height() * out.width() +
                                 h * out.width();
 
-            nntrainer::compute_rotary_emb_value(in.width(), dim, half_, in_ptr,
-                                                out_ptr, cos_->data(),
-                                                sin_->data(), convert_only);
+            // Convert the complete head first so the non-rotary suffix is
+            // preserved, then overwrite only its rotary prefix when needed.
+            nntrainer::compute_rotary_emb_value(in.width(), dim, dim / 2,
+                                                in_ptr, out_ptr, cos_->data(),
+                                                sin_->data(), true);
+            if (!convert_only) {
+              for (unsigned int offset = 0; offset < in.width(); offset += dim)
+                nntrainer::compute_rotary_emb_value(
+                  rotary_dim, rotary_dim, half_, in_ptr + offset,
+                  out_ptr + offset, cos_->data(), sin_->data(), false);
+            }
           }
         }
       }
@@ -1161,9 +1191,13 @@ void MHACoreLayer::apply_rotary_emb_tensor_v2(nntrainer::Tensor &in,
                            b * out.channel() * out.height() * out.width() +
                            c * out.height() * out.width() + h * out.width();
 
-          nntrainer::compute_rotary_emb_value(in.width(), dim, half_, in_ptr,
-                                              out_ptr, cos_->data(),
-                                              sin_->data());
+          if (out_ptr != in_ptr) {
+            std::memcpy(out_ptr, in_ptr, sizeof(_FP16) * in.width());
+          }
+          for (unsigned int offset = 0; offset < in.width(); offset += dim)
+            nntrainer::compute_rotary_emb_value(
+              rotary_dim, rotary_dim, half_, in_ptr + offset, out_ptr + offset,
+              cos_->data(), sin_->data());
         }
       }
     }

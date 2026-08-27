@@ -87,6 +87,7 @@
 #if !defined(_WIN32)
 #include "qwen3_cached_slim_moe_causallm.h"
 #endif
+#include "qwen3_5_causallm.h"
 #include "qwen3_causallm.h"
 #include "qwen3_embedding.h"
 #include "qwen3_moe_causallm.h"
@@ -317,6 +318,16 @@ void registerAllModels() {
                           return std::make_unique<causallm::Qwen3MoECausalLM>(
                             cfg, generation_cfg, nntr_cfg);
                         });
+  factory.registerModel("Qwen3_5ForConditionalGeneration",
+                        [](json cfg, json generation_cfg, json nntr_cfg) {
+                          return std::make_unique<causallm::Qwen3_5CausalLM>(
+                            cfg, generation_cfg, nntr_cfg);
+                        });
+  factory.registerModel("Qwen3_5ForCausalLM",
+                        [](json cfg, json generation_cfg, json nntr_cfg) {
+                          return std::make_unique<causallm::Qwen3_5CausalLM>(
+                            cfg, generation_cfg, nntr_cfg);
+                        });
   factory.registerModel("Qwen3SlimMoeForCausalLM", [](json cfg,
                                                       json generation_cfg,
                                                       json nntr_cfg) {
@@ -518,6 +529,17 @@ buildLayerDtypeMap(int num_layers, DataType fc_dtype, DataType embd_dtype,
       // in/out projections follow fc_layer_dtype like any other FC layer).
       dtype_map[prefix + "_conv_in_proj"] = fc_dtype;
       dtype_map[prefix + "_conv_out_proj"] = fc_dtype;
+
+      // Qwen3.5/Qwen3.6 Gated DeltaNet projections. The recurrent core keeps
+      // only its small convolution/state parameters in FP32.
+      dtype_map[prefix + "_linear_qkv"] = fc_dtype;
+      dtype_map[prefix + "_linear_z"] = fc_dtype;
+      // These per-head projections are too narrow for Q4_0 on the dense
+      // variants (16/48 outputs), so keep them in FP32 for all Qwen3.5/3.6
+      // models and share one weight layout with the MoE implementation.
+      dtype_map[prefix + "_linear_b"] = DataType::FP32;
+      dtype_map[prefix + "_linear_a"] = DataType::FP32;
+      dtype_map[prefix + "_linear_out"] = fc_dtype;
 
       // FFN FC layers - BERT (BertTransformer)
       dtype_map[prefix + "_ffn_fc1"] = fc_dtype;
@@ -727,7 +749,11 @@ int main(int argc, char *argv[]) {
     std::string src_weight_path = model_path + "/" + original_bin;
     std::string dst_weight_path = output_dir + "/" + output_bin_name;
 
-    int num_layers = cfg["num_hidden_layers"].get<int>();
+    const json &backbone_cfg =
+      cfg.contains("text_config") && cfg["text_config"].is_object()
+        ? cfg["text_config"]
+        : cfg;
+    int num_layers = backbone_cfg["num_hidden_layers"].get<int>();
     std::string architecture =
       cfg["architectures"].get<std::vector<std::string>>()[0];
 
