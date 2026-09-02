@@ -63,7 +63,7 @@ void HalfTensor::allocate() {
     /// allocate new memory for the tensor data
     MemoryData *mem_data;
 
-    mem_data = new MemoryData((void *)(new _FP16[dim.getDataLen()]{}));
+    mem_data = new MemoryData((void *)(new _FP16[dim.getDataLen()]));
     data = std::shared_ptr<MemoryData>(mem_data, [](auto *mem_data) {
       delete[] mem_data->template getAddr<_FP16>();
       delete mem_data;
@@ -716,6 +716,8 @@ Tensor &HalfTensor::dot(Tensor const &input, Tensor &output, bool trans,
     dotHalf(input, output, trans, trans_in, beta);
     break;
   case Tdatatype::Q4_0:
+  case Tdatatype::Q6_K:
+    dotQnK(input, output, trans, trans_in, beta, input.getDataType());
     break;
   default:
     throw std::invalid_argument("Error: unsupported datatype");
@@ -737,6 +739,9 @@ Tensor &HalfTensor::dotQnK(Tensor const &input, Tensor &output, bool trans,
   switch (dtype) {
   case Tdatatype::Q4_0:
     o->gemm_q4_0_fp16(M, N, K, data, K, (void *)mdata, N, rdata, N);
+    break;
+  case Tdatatype::Q6_K:
+    o->gemm_q6_K_fp16(M, N, K, data, K, (void *)mdata, N, rdata, N);
     break;
   default:
     throw std::invalid_argument("Error: unsupported datatype");

@@ -69,6 +69,7 @@
 #include <tensor_dim.h>
 
 #include "causal_lm.h"
+#include "deberta_v2.h"
 #include "embedding_gemma.h"
 #include "gemma3_causallm.h"
 #include "gemma4_causallm.h"
@@ -76,8 +77,13 @@
 #include "gptoss_cached_slim_causallm.h"
 #endif
 #include "gptoss_causallm.h"
+#include "lfm2_causallm.h"
+#if !defined(_WIN32) && !defined(__ANDROID__)
+#include "multilingual_tinybert_16mb.h"
+#endif
 #include "qwen2_causallm.h"
 #include "qwen2_embedding.h"
+#include "xlm_roberta/xlm_roberta.h"
 #if !defined(_WIN32)
 #include "qwen3_cached_slim_moe_causallm.h"
 #endif
@@ -96,9 +102,10 @@ namespace {
  * @brief Map of string data type names to DataType enum values
  */
 const std::map<std::string, DataType> dtype_str_map = {
-  {"FP32", DataType::FP32}, {"FP16", DataType::FP16}, {"Q4_0", DataType::Q4_0},
-  {"Q6_K", DataType::Q6_K}, {"Q4_K", DataType::Q4_K}, {"NONE", DataType::NONE},
-};
+  {"FP32", DataType::FP32}, {"FP16", DataType::FP16},
+  {"Q4_0", DataType::Q4_0}, {"Q6_K", DataType::Q6_K},
+  {"Q4_K", DataType::Q4_K}, {"QS4CX", DataType::QS4CX},
+  {"NONE", DataType::NONE}};
 
 /**
  * @brief Map of string ISA names to ISA enum values
@@ -195,8 +202,9 @@ std::string generateOutputBinName(const std::string &original_bin,
 
   // Remove old dtype suffix patterns (e.g., _fp32, _q40_fp32)
   // Common patterns: _fp32, _fp16, _q40, _q6k, _q4k, etc.
-  std::vector<std::string> dtype_suffixes = {"_fp32", "_fp16", "_q40", "_q4_0",
-                                             "_q6k",  "_q6_k", "_q4k", "_q4_k"};
+  std::vector<std::string> dtype_suffixes = {"_fp32", "_fp16",  "_q40",
+                                             "_q4_0", "_q6k",   "_q6_k",
+                                             "_q4k",  "_qs4cx", "_q4_k"};
   for (const auto &suffix : dtype_suffixes) {
     auto pos = base.rfind(suffix);
     if (pos != std::string::npos && pos + suffix.size() == base.size()) {
@@ -237,6 +245,13 @@ std::string resolve_architecture(std::string model_type,
                  [](unsigned char c) { return std::tolower(c); });
 
   if (model_type == "embedding") {
+    // Already-resolved nntrainer class names — pass through
+    if (architecture == "Qwen3Embedding" || architecture == "Qwen2Embedding" ||
+        architecture == "EmbeddingGemma" ||
+        architecture == "MultilingualTinyBert" || architecture == "DebertaV2" ||
+        architecture == "XLMRobertaForMaskedLM")
+      return architecture;
+
     if (architecture == "Qwen3ForCausalLM")
       return "Qwen3Embedding";
     else if (architecture == "Gemma3ForCausalLM" ||
@@ -244,6 +259,12 @@ std::string resolve_architecture(std::string model_type,
       return "EmbeddingGemma";
     else if (architecture == "Qwen2Model")
       return "Qwen2Embedding";
+    else if (architecture == "BertForMaskedLM")
+      return "MultilingualTinyBert";
+    else if (architecture == "XLMRobertaModel")
+      return "XLMRobertaForMaskedLM";
+    else if (architecture == "DebertaV2ForMaskedLM")
+      return "DebertaV2";
     else
       throw std::invalid_argument(
         "Unsupported architecture for embedding model: " + architecture);
@@ -344,12 +365,34 @@ void registerAllModels() {
                           return std::make_unique<causallm::EmbeddingGemma>(
                             cfg, generation_cfg, nntr_cfg);
                         });
+  factory.registerModel("Lfm2ForCausalLM",
+                        [](json cfg, json generation_cfg, json nntr_cfg) {
+                          return std::make_unique<causallm::Lfm2CausalLM>(
+                            cfg, generation_cfg, nntr_cfg);
+                        });
+  factory.registerModel("DebertaV2", [](json cfg, json generation_cfg,
+                                        json nntr_cfg) {
+    return std::make_unique<causallm::DebertaV2>(cfg, generation_cfg, nntr_cfg);
+  });
+#if !defined(_WIN32) && !defined(__ANDROID__)
+  factory.registerModel(
+    "MultilingualTinyBert", [](json cfg, json generation_cfg, json nntr_cfg) {
+      return std::make_unique<causallm::MultilingualTinyBert>(
+        cfg, generation_cfg, nntr_cfg);
+    });
+#endif
+#if !defined(_WIN32)
+  factory.registerModel(
+    "XLMRobertaForMaskedLM", [](json cfg, json generation_cfg, json nntr_cfg) {
+      return std::make_unique<causallm::XLMRobertaForMaskedLM>(
+        cfg, generation_cfg, nntr_cfg);
+    });
+#endif
   factory.registerModel(
     "SmallThinkerForCausalLM",
     [](json cfg, json generation_cfg, json nntr_cfg) {
-      return std::make_unique<causallm::SmallThinkerCausalLM>(cfg,
-                                                              generation_cfg,
-                                                              nntr_cfg);
+      return std::make_unique<causallm::SmallThinkerCausalLM>(
+        cfg, generation_cfg, nntr_cfg);
     });
   factory.registerModel(
     "SmallThinkerSlimForCausalLM",
@@ -452,6 +495,8 @@ buildLayerDtypeMap(int num_layers, DataType fc_dtype, DataType embd_dtype,
   // Embedding layer
   if (embd_dtype != DataType::FP32 && embd_dtype != DataType::NONE) {
     dtype_map["embedding0"] = embd_dtype;
+    dtype_map["position_embedding"] = embd_dtype;
+    dtype_map["token_type_embedding"] = embd_dtype;
   }
 
   // Gemma4 PLE layers - set to Q4_0 first
@@ -483,12 +528,24 @@ buildLayerDtypeMap(int num_layers, DataType fc_dtype, DataType embd_dtype,
       dtype_map[prefix + "_ffn_gate_down"] = fc_dtype;
       dtype_map[prefix + "_ffn_linear_up"] = fc_dtype;
 
-      // FFN FC layers - version3
+      // FFN FC layers - version3 (Qwen/Gemma LLMs)
       dtype_map[prefix + "_ffn_gate"] = fc_dtype;
       dtype_map[prefix + "_ffn_up"] = fc_dtype;
       dtype_map[prefix + "_ffn_down"] = fc_dtype;
 
       dtype_map[prefix + "_ffn_output"] = fc_dtype;
+
+      // LFM2 conv-block projections (causal_conv1d core stays FP32, but the
+      // in/out projections follow fc_layer_dtype like any other FC layer).
+      dtype_map[prefix + "_conv_in_proj"] = fc_dtype;
+      dtype_map[prefix + "_conv_out_proj"] = fc_dtype;
+
+      // FFN FC layers - BERT (BertTransformer)
+      dtype_map[prefix + "_ffn_fc1"] = fc_dtype;
+
+      // FFN FC layers - DeBERTa V2
+      dtype_map[prefix + "_intermediate"] = fc_dtype;
+      dtype_map[prefix + "_output_dense"] = fc_dtype;
 
       // for PLE
       dtype_map[prefix + "_per_layer_input_gate"] = fc_dtype;
@@ -715,6 +772,24 @@ int main(int argc, char *argv[]) {
     if (nntr_cfg.contains("model_type")) {
       std::string model_type = nntr_cfg["model_type"].get<std::string>();
       architecture = resolve_architecture(model_type, architecture);
+    }
+
+    // Resolve paths in nntr_cfg against the model directory.
+    // Relative paths are anchored to model_path (existing behaviour).
+    // Absolute paths that don't exist in the current environment (e.g. a path
+    // baked in on the build host but running on an Android device) fall back to
+    // the bare filename resolved against model_path, so the file is found as
+    // long as it lives next to nntr_config.json.
+    for (const char *key : {"module_config_path", "tokenizer_file"}) {
+      if (!nntr_cfg.contains(key))
+        continue;
+      std::filesystem::path p = nntr_cfg[key].get<std::string>();
+      if (p.is_relative()) {
+        nntr_cfg[key] = (std::filesystem::path(model_path) / p).string();
+      } else if (!std::filesystem::exists(p)) {
+        nntr_cfg[key] =
+          (std::filesystem::path(model_path) / p.filename()).string();
+      }
     }
 
     auto model = causallm::Factory::Instance().create(architecture, cfg,

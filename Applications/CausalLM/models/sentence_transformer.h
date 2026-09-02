@@ -3,6 +3,7 @@
  * Copyright (C) 2025 Eunju Yang <ej.yang@samsung.com>
  *
  * @file    sentence_transformer.h
+ * @brief   Base class for SentenceTransformer-style embedding (encoder) models.
  * @date    02 Jan 2026
  * @see     https://github.com/nntrainer/nntrainer
  * @author  Eunju Yang <ej.yang@samsung.com>
@@ -58,6 +59,12 @@ public:
   virtual std::vector<float *> encode(const WSTR prompt,
                                       const WSTR system_prompt = "",
                                       const WSTR tail_prompt = "");
+
+  /**
+   * @brief Get embedding output dimensionality
+   * @return number of floats per encoded embedding row
+   */
+  int getEmbeddingDim() const { return DIM; }
 
 protected:
   /**

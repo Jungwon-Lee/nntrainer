@@ -6,6 +6,7 @@
  * Copyright (C) 2025 Eunju Yang <ej.yang@samsung.com>
  *
  * @file   causal_lm.h
+ * @brief  Base class for Transformer-based Causal Language Models (CausalLM).
  * @date   10 July 2025
  * @see    https://github.com/nntrainer/nntrainer
  * @author Jijoong Moon <jijoong.moon@samsung.com>
@@ -42,6 +43,12 @@
 #include <kv_cache_manager.h>
 #include <transformer.h>
 
+#include <atomic>
+
+extern "C" {
+struct BaseStreamer;
+}
+
 namespace causallm {
 
 /**
@@ -58,6 +65,16 @@ public:
    * @param nntr_cfg Configuration for nntrainer (nntrainer_config.json)
    */
   CausalLM(json &cfg, json &generation_cfg, json &nntr_cfg);
+
+#ifdef ENABLE_TEST
+protected:
+  /**
+   * @brief Construct a lightweight CausalLM test double base.
+   */
+  CausalLM() : Transformer() { output_list.push_back(""); }
+
+public:
+#endif
 
   /**
    * @brief Destroy the CausalLM object
@@ -80,6 +97,33 @@ public:
    * @return Generated text string
    */
   std::string getOutput(int batch_idx = 0) const;
+
+  /**
+   * @brief Attach or detach a non-owning streamer for decoded output deltas.
+   * @param streamer Streamer owned by the caller, or nullptr to detach
+   */
+  void setStreamer(::BaseStreamer *streamer) { streamer_ = streamer; }
+
+  /**
+   * @brief Cooperatively request the active generation loop to stop.
+   */
+  void requestStop() { stop_requested_.store(true, std::memory_order_release); }
+
+  /**
+   * @brief Clear stale stop requests before publishing a new cancellable run.
+   */
+  void prepareForRun();
+
+  /**
+   * @brief Attach a non-owning logits processor
+   * @param processor Processor pointer, or nullptr to detach
+   */
+  void setLogitsProcessor(LogitsProcessor *processor) override;
+
+  /**
+   * @brief Reset attached logits processor state
+   */
+  void resetLogitsProcessor() override;
 
 protected:
   /**
@@ -125,12 +169,22 @@ protected:
    */
   void registerCustomLayers() override;
 
+  /**
+   * @brief Clear stale stop state at run start unless caller prepared it.
+   */
+  void prepareStopRequestForRun();
+
   /** internal buffer */
   std::vector<std::string>
-    output_list;             /**< List of output names for the model */
-  unsigned int *ids_history; /**< History of input IDs for the model */
+    output_list; /**< List of output names for the model */
+  unsigned int *ids_history =
+    nullptr; /**< History of input IDs for the model */
 
   std::vector<int> pending_ids_;
+
+  ::BaseStreamer *streamer_ = nullptr;
+  std::atomic<bool> stop_requested_{false};
+  std::atomic<bool> stop_prepared_for_run_{false};
 
   std::string LMHEAD_DTYPE; /** embedding dtype */
   std::vector<unsigned int> EOS_TOKEN_ID;
@@ -152,6 +206,8 @@ protected:
   unsigned int global_token_len;
 
   std::mt19937 rng; /**< Random Number Gen */
+
+  LogitsProcessor *logits_processor = nullptr; /**< Non-owning processor */
 
   /**
    * @brief Externalized KV cache (host-owned). Allocated by allocateKVCache()

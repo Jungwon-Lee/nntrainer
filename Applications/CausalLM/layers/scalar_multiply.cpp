@@ -30,11 +30,16 @@ void ScalarMultiplyLayer::finalize(nntrainer::InitLayerContext &context) {
   bool use_weight = std::get<props::UseWeight>(scalar_multiply_props).get();
 
   if (use_weight) {
-    // Request weight for scalar value (single element)
+    // Request weight for scalar value (single element).
+    // @note The multiplier is a single un-quantized scalar coefficient and is
+    // read back as float at the multiply site. Store it FP32 regardless of the
+    // activation dtype: an FP16 scalar weight is both lossy and unreliable to
+    // read here (getValue<float> on the FP16 slot returns garbage for some
+    // layers), which silently zeroed the hidden state under FP16 activation.
     nntrainer::TensorDim scalar_dim(
       1, 1, 1, 1,
       nntrainer::TensorDim::TensorType(context.getFormat(),
-                                       context.getWeightDataType()));
+                                       nntrainer::TensorDim::DataType::FP32));
     wt_idx[0] = context.requestWeight(
       scalar_dim, nntrainer::props::InitializerInfo::Enum::NONE,
       nntrainer::WeightRegularizer::NONE, 1.0f, 0.0f, "scalar_multiplier",
@@ -64,7 +69,7 @@ void ScalarMultiplyLayer::forwarding(nntrainer::RunLayerContext &context,
 void ScalarMultiplyLayer::incremental_forwarding(
   nntrainer::RunLayerContext &context, unsigned int from, unsigned int to,
   bool training) {
-  bool is_prefill = !from;
+  bool is_prefill = !from || (to - from) > 1;
   if (skip_prefill && is_prefill)
     return;
 

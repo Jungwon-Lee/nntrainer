@@ -3,6 +3,7 @@
  * Copyright (C) 2026 Seunghui Lee <shsh1004.lee@samsung.com>
  *
  * @file   bert_transformer.h
+ * @brief  BERT-style encoder-only transformer implementation.
  * @date   29 April 2026
  * @see    https://github.com/nntrainer/nntrainer
  * @author Seunghui Lee <shsh1004.lee@samsung.com>
@@ -210,6 +211,7 @@ Tensor BertTransformer::createAttention(const int layer_id, int seq_len,
     withKey("num_heads_kv", n_heads / GQA_SIZE),
     withKey("max_timestep", std::to_string(INIT_SEQ_LEN)),
     withKey("rope_theta", ROPE_THETA),
+    withKey("use_rope", "false"),
     withKey("is_causal", "false")};
   LayerHandle mha(createLayer("mha_core", a_params));
   Tensor a = mha({q, k, v});

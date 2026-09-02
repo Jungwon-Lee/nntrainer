@@ -10,7 +10,7 @@
  * @bug    No known bugs except for NYI items
  */
 
-#include <gemma4_causallm.h>
+#include "gemma4_causallm.h"
 
 #include <algorithm>
 #include <cmath>
@@ -252,24 +252,25 @@ std::pair<Tensor, Tensor> Gemma4Transformer::constructModel() {
   const std::string embedding_type =
     TIE_WORD_EMBEDDINGS ? "tie_word_embeddings" : "embedding_layer";
 
+  NNTR_THROW_IF(TIE_WORD_EMBEDDINGS && !EMBEDDING_FILE_NAME.empty(),
+                std::invalid_argument)
+    << "embedding_file_name requires untied embedding_layer";
   LayerHandle embedding(createLayer(
     embedding_type,
-    {"name=embedding0", "in_dim=" + std::to_string(NUM_VOCAB),
-     "weight_dtype=" + EMBEDDING_DTYPE, "out_dim=" + std::to_string(DIM),
-     "scale=" + std::to_string(EMBEDDING_SCALE)}));
+    buildEmbeddingLayerProperties("embedding0", NUM_VOCAB, DIM, EMBEDDING_DTYPE,
+                                  EMBEDDING_SCALE, EMBEDDING_FILE_NAME)));
   Tensor h = embedding(x);
 
   const unsigned int per_layer_total_dim =
     NUM_LAYERS * HIDDEN_SIZE_PER_LAYER_INPUT;
 
   // try using same low bit precision as fc layers
-  LayerHandle per_layer_embedding(
-    createLayer("embedding_layer",
-                {withKey("name", "per_layer_input_embedding"),
-                 withKey("in_dim", std::to_string(VOCAB_SIZE_PER_LAYER_INPUT)),
-                 withKey("out_dim", std::to_string(per_layer_total_dim)),
-                 withKey("weight_dtype", FC_LAYER_DTYPE),
-                 withKey("scale", EMBEDDING_PER_LAYER_SCALE)}));
+  LayerHandle per_layer_embedding(createLayer(
+    "embedding_layer",
+    buildEmbeddingLayerProperties("per_layer_input_embedding",
+                                  VOCAB_SIZE_PER_LAYER_INPUT,
+                                  per_layer_total_dim, FC_LAYER_DTYPE,
+                                  EMBEDDING_PER_LAYER_SCALE, PLE_FILE_NAME)));
   Tensor per_layer_embedding_out = per_layer_embedding(x);
 
   LayerHandle per_layer_projection(createLayer(
@@ -786,20 +787,19 @@ void Gemma4Transformer::registerCustomLayers() {
   auto app_context =
     static_cast<nntrainer::AppContext *>(ct_engine.getRegisteredContext("cpu"));
 
-  try {
-    app_context->registerFactory(
-      nntrainer::createLayer<causallm::ReshapedRMSNormLayer>);
-    app_context->registerFactory(
-      nntrainer::createLayer<causallm::PerLayerSliceLayer>);
-    app_context->registerFactory(
-      nntrainer::createLayer<causallm::ScalarMultiplyLayer>);
-    app_context->registerFactory(
-      nntrainer::createLayer<causallm::LogitSoftCappingLayer>);
+  auto tryRegister = [&](auto factory_fn) {
+    try {
+      app_context->registerFactory(factory_fn);
+    } catch (std::invalid_argument &e) {
+      std::cerr << "failed to register factory, reason: " << e.what()
+                << std::endl;
+    }
+  };
 
-  } catch (std::invalid_argument &e) {
-    std::cerr << "failed to register factory, reason: " << e.what()
-              << std::endl;
-  }
+  tryRegister(nntrainer::createLayer<causallm::ReshapedRMSNormLayer>);
+  tryRegister(nntrainer::createLayer<causallm::PerLayerSliceLayer>);
+  tryRegister(nntrainer::createLayer<causallm::ScalarMultiplyLayer>);
+  tryRegister(nntrainer::createLayer<causallm::LogitSoftCappingLayer>);
 }
 
 void Gemma4CausalLM::registerCustomLayers() {

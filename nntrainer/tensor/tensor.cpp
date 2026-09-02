@@ -20,6 +20,7 @@
 #include <q4_0_tensor.h>
 #include <q4_k_tensor.h>
 #include <q6_k_tensor.h>
+#include <qs4cx_tensor.h>
 #include <short_tensor.h>
 #include <tensor.h>
 #include <uint4_tensor.h>
@@ -133,6 +134,8 @@ Tensor::Tensor(std::string name_, Tformat fm, Tdatatype d_type) {
     itensor_ = std::make_unique<Q6_K_Tensor>(name_, fm);
   } else if (d_type == Tdatatype::Q4_0) {
     itensor_ = std::make_unique<Q4_0_Tensor>(name_, fm);
+  } else if (d_type == Tdatatype::QS4CX) {
+    itensor_ = std::make_unique<QS4CX_Tensor>(name_, fm);
   } else if (d_type == Tdatatype::UINT4) {
     itensor_ = std::make_unique<Uint4QTensor>(name_, fm);
   } else if (d_type == Tdatatype::UINT8) {
@@ -181,6 +184,8 @@ Tensor::Tensor(const TensorDim &d, bool alloc_now, Initializer init,
     itensor_ = std::make_unique<Q6_K_Tensor>(d, alloc_now, init, name);
   } else if (d.getDataType() == Tdatatype::Q4_0) {
     itensor_ = std::make_unique<Q4_0_Tensor>(d, alloc_now, init, name);
+  } else if (d.getDataType() == Tdatatype::QS4CX) {
+    itensor_ = std::make_unique<QS4CX_Tensor>(d, alloc_now, init, name);
   } else if (d.getDataType() == Tdatatype::UINT4) {
     if (qscheme != QScheme::Q4_Kx8) {
       itensor_ =
@@ -233,6 +238,8 @@ Tensor::Tensor(const TensorDim &d, const void *buf, QScheme qscheme) {
     itensor_ = std::make_unique<Q6_K_Tensor>(d, buf);
   } else if (d.getDataType() == Tdatatype::Q4_0) {
     itensor_ = std::make_unique<Q4_0_Tensor>(d, buf);
+  } else if (d.getDataType() == Tdatatype::QS4CX) {
+    itensor_ = std::make_unique<QS4CX_Tensor>(d, buf);
   } else if (d.getDataType() == Tdatatype::UINT4) {
     if (qscheme != QScheme::Q4_Kx8)
       itensor_ = std::make_unique<Uint4QTensor>(d, buf, qscheme);
@@ -280,6 +287,8 @@ Tensor::Tensor(const Tensor &rhs) {
     itensor_ = std::make_unique<Q6_K_Tensor>(*rhs.itensor_);
   } else if (rhs.getDataType() == Tdatatype::Q4_0) {
     itensor_ = std::make_unique<Q4_0_Tensor>(*rhs.itensor_);
+  } else if (rhs.getDataType() == Tdatatype::QS4CX) {
+    itensor_ = std::make_unique<QS4CX_Tensor>(*rhs.itensor_);
   } else if (rhs.getDataType() == Tdatatype::UINT4) {
     itensor_ = std::make_unique<Uint4QTensor>(*rhs.itensor_);
   } else if (rhs.getDataType() == Tdatatype::UINT8) {
@@ -1654,7 +1663,11 @@ void Tensor::activate() {
 #else
 
   auto file_offset = getFileOffset();
-  size_t off = (file_offset / 4096) * 4096;
+  const long system_page_size = sysconf(_SC_PAGESIZE);
+  NNTR_THROW_IF(system_page_size <= 0, std::runtime_error)
+    << "[activate] failed to query the system page size";
+  const size_t page_size = static_cast<size_t>(system_page_size);
+  size_t off = (file_offset / page_size) * page_size;
   size_t diff = file_offset - off;
   size_t len = getMemoryBytes() + diff;
 
@@ -1666,12 +1679,15 @@ void Tensor::activate() {
     << "' has no backing fd; the model file fd was not propagated at "
        "read-time";
 
-  mapped_ptr = mmap(NULL, len, PROT_READ, MAP_PRIVATE, this->fd, off);
-  if (mapped_ptr != MAP_FAILED)
-    madvise(mapped_ptr, len, MADV_WILLNEED);
-  NNTR_THROW_IF(mapped_ptr == MAP_FAILED, std::runtime_error)
+  void *new_mapped_ptr = mmap(NULL, len, PROT_READ, MAP_PRIVATE, this->fd, off);
+#if defined(__ANDROID__) || defined(__linux__)
+  if (new_mapped_ptr != MAP_FAILED)
+    madvise(new_mapped_ptr, len, MADV_WILLNEED);
+#endif
+  NNTR_THROW_IF(new_mapped_ptr == MAP_FAILED, std::runtime_error)
     << "[activate] mmap failed for virtual tensor '" << getName()
     << "': " << strerror(errno);
+  mapped_ptr = new_mapped_ptr;
   itensor_->activate((void *)&((uint8_t *)mapped_ptr)[diff]);
 #endif
 }
@@ -1690,7 +1706,11 @@ void Tensor::deactivate() {
   };
 
   auto file_offset = getFileOffset();
-  size_t off = (file_offset / 4096) * 4096;
+  const long system_page_size = sysconf(_SC_PAGESIZE);
+  NNTR_THROW_IF(system_page_size <= 0, std::runtime_error)
+    << "[deactivate] failed to query the system page size";
+  const size_t page_size = static_cast<size_t>(system_page_size);
+  size_t off = (file_offset / page_size) * page_size;
   size_t diff = file_offset - off;
   size_t len = getMemoryBytes() + diff;
 

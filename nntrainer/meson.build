@@ -37,6 +37,15 @@ if get_option('enable-opencl')
   nntrainer_base_deps += clblast_dep
 endif
 
+if get_option('enable-htp')
+  nntrainer_base_deps += hexkl_dep
+endif
+
+if host_machine.system() == 'android'
+  nntrainer_base_deps += meson.get_compiler('cpp').find_library('log')
+  nntrainer_base_deps += meson.get_compiler('cpp').find_library('android')
+endif
+
 if get_option('platform') == 'tizen'
   nntrainer_base_deps += dependency('dlog')
 endif
@@ -87,7 +96,7 @@ nntrainer_common_sources = [
 # and loaded dynamically by Engine. See qnn/jni/meson.build for the
 # shared_library target. The header is still needed for type definitions.
 if get_option('enable-npu')
-  nntrainer_headers += meson.current_source_dir() / 'qnn_context.h'
+  nntrainer_headers += meson.current_source_dir() / 'qnn' / 'qnn_context.h'
 endif
 
 nntrainer_inc_abs += meson.source_root() / 'subprojects' / 'ruy'
@@ -97,6 +106,11 @@ if get_option('enable-opencl')
   nntrainer_headers += meson.current_source_dir() / 'cl_svm_allocator.h'
   nntrainer_common_sources += 'cl_context.cpp'
   nntrainer_common_sources += 'cl_svm_allocator.cpp'
+endif
+
+if get_option('enable-htp')
+  nntrainer_headers += meson.current_source_dir() / 'htp_context.h'
+  nntrainer_common_sources += 'htp_context.cpp'
 endif
 
 foreach s : nntrainer_common_sources

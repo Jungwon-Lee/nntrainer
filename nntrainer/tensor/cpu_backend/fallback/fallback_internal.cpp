@@ -412,9 +412,17 @@ void __fallback_calc_trigonometric_vals_dup(unsigned int N_half, float *angle,
                                             float *cos_, float *sin_,
                                             unsigned int from,
                                             float attention_scaling) {
-  throw std::runtime_error(
-    "Error: No implementation of rotary embedding layer incremental_forwarding "
-    "with SIMD acceleration except for NEON!");
+  for (unsigned int i = 0; i < N_half; ++i) {
+    float a = from * angle[i];
+    float cos_val = std::cos(a) * attention_scaling;
+    float sin_val = std::sin(a) * attention_scaling;
+
+    cos_[i] = cos_val;
+    cos_[i + N_half] = cos_val;
+
+    sin_[i] = sin_val;
+    sin_[i + N_half] = sin_val;
+  }
 }
 
 void __fallback_swiglu(const unsigned int N, float *X, float *Y, float *Z) {
@@ -821,6 +829,159 @@ void __fallback_quant_kxn_qs4cx_f32(size_t n, size_t k, const float *rhs_f32,
     }
 
     rhs_scales_f32[n_idx] = recip_scale0;
+  }
+}
+
+void __fallback_dequantize_row_qs4cx_f32(size_t n_idx, size_t k,
+                                         const uint8_t *rhs_qs4cx,
+                                         const float *rhs_scales_f32,
+                                         float *rhs_f32) {
+  const size_t rhs_qs4cx_stride = (roundup(k, 2) / 2);
+  const uint8_t *src_ptr = rhs_qs4cx + n_idx * rhs_qs4cx_stride;
+  const float recip_scale = rhs_scales_f32[n_idx];
+
+  for (size_t k_idx = 0; k_idx < k; ++k_idx) {
+    const uint8_t packed = src_ptr[k_idx / 2];
+
+    uint8_t v_u8;
+    if ((k_idx % 2) == 0) {
+      v_u8 = packed & 0x0F;
+    } else {
+      v_u8 = (packed >> 4) & 0x0F;
+    }
+
+    int32_t v_s32 = (int32_t)v_u8 - 8;
+    rhs_f32[k_idx] = (float)v_s32 * recip_scale;
+  }
+}
+
+void __fallback_dequant_nxk_qs4cx_f32(size_t n, size_t k,
+                                      const uint8_t *rhs_qs4cx,
+                                      const float *rhs_scales_f32,
+                                      float *rhs_f32) {
+  const size_t rhs_qs4cx_stride = (roundup(k, 2) / 2);
+
+  for (size_t n_idx = 0; n_idx < n; ++n_idx) {
+    float *dst_ptr = rhs_f32 + n_idx * k;
+    const float recip_scale = rhs_scales_f32[n_idx];
+
+    for (size_t k_idx = 0; k_idx < k; ++k_idx) {
+      const size_t src_addr = (k_idx / 2) + n_idx * rhs_qs4cx_stride;
+      const uint8_t packed = rhs_qs4cx[src_addr];
+
+      uint8_t v_u8;
+      if ((k_idx % 2) == 0) {
+        v_u8 = packed & 0x0F;
+      } else {
+        v_u8 = (packed >> 4) & 0x0F;
+      }
+
+      int32_t v_s32 = (int32_t)v_u8 - 8;
+      dst_ptr[k_idx] = (float)v_s32 * recip_scale;
+    }
+  }
+}
+
+void __fallback_dequant_kxn_qs4cx_f32(size_t n, size_t k,
+                                      const uint8_t *rhs_qs4cx,
+                                      const float *rhs_scales_f32,
+                                      float *rhs_f32) {
+  const size_t rhs_qs4cx_stride = (roundup(n, 2) / 2);
+
+  for (size_t n_idx = 0; n_idx < n; ++n_idx) {
+    float *dst_ptr = rhs_f32 + n_idx * k;
+    const float recip_scale = rhs_scales_f32[n_idx];
+
+    for (size_t k_idx = 0; k_idx < k; ++k_idx) {
+      const size_t src_addr = (n_idx / 2) + k_idx * rhs_qs4cx_stride;
+      const uint8_t packed = rhs_qs4cx[src_addr];
+
+      uint8_t v_u8;
+      if ((n_idx % 2) == 0) {
+        v_u8 = packed & 0x0F;
+      } else {
+        v_u8 = (packed >> 4) & 0x0F;
+      }
+
+      int32_t v_s32 = (int32_t)v_u8 - 8;
+      dst_ptr[k_idx] = (float)v_s32 * recip_scale;
+    }
+  }
+}
+
+void __fallback_quant_nxk_qs8cx_f32(size_t n, size_t k, const float *rhs_f32,
+                                    int8_t *rhs_qs8cx, float *rhs_scales_f32) {
+  for (size_t n_idx = 0; n_idx < n; ++n_idx) {
+    const float *src_ptr = rhs_f32 + n_idx * k;
+    int8_t *dst_ptr = rhs_qs8cx + n_idx * k;
+
+    float max0 = -FLT_MAX;
+    float min0 = FLT_MAX;
+
+    // Find min/max for each channel
+    for (size_t k_idx = 0; k_idx < k; ++k_idx) {
+      const float src0_0 = src_ptr[k_idx];
+
+      max0 = std::max(src0_0, max0);
+      min0 = std::min(src0_0, min0);
+    }
+
+    // Maximum/minimum int8 values
+    const float qmin = (float)INT8_MIN;
+    const float qmax = (float)INT8_MAX;
+
+    const float rmin0 = std::min(0.0f, min0);
+    const float rmax0 = std::max(0.0f, max0);
+
+    const float scale0 = rmin0 == rmax0 ? 1.f : (qmax - qmin) / (rmax0 - rmin0);
+
+    // Reciprocal to quantize
+    const float recip_scale0 = scale0 ? 1.0f / scale0 : 0.0f;
+
+    // Quantize the channels
+    for (size_t k_idx = 0; k_idx < k; ++k_idx) {
+      const float src0_0 = src_ptr[k_idx];
+
+      // Scale the values
+      int32_t v0_s32 = (int32_t)(std::round(src0_0 * scale0));
+
+      // Maximum/minimum int8 values
+      v0_s32 = std::max(v0_s32, (int32_t)INT8_MIN);
+      v0_s32 = std::min(v0_s32, (int32_t)INT8_MAX);
+
+      dst_ptr[k_idx] = (int8_t)v0_s32;
+    }
+
+    rhs_scales_f32[n_idx] = recip_scale0;
+  }
+}
+
+void __fallback_dequantize_row_qs8cx_f32(size_t n_idx, size_t k,
+                                         const int8_t *rhs_qs8cx,
+                                         const float *rhs_scales_f32,
+                                         float *rhs_f32) {
+  const int8_t *src_ptr = rhs_qs8cx + n_idx * k;
+  const float recip_scale = rhs_scales_f32[n_idx];
+
+  for (size_t k_idx = 0; k_idx < k; ++k_idx) {
+    const int32_t v_s32 = (int32_t)src_ptr[k_idx];
+    rhs_f32[k_idx] = (float)v_s32 * recip_scale;
+  }
+}
+
+void __fallback_dequant_nxk_qs8cx_f32(size_t n, size_t k,
+                                      const int8_t *rhs_qs8cx,
+                                      const float *rhs_scales_f32,
+                                      float *rhs_f32) {
+  for (size_t n_idx = 0; n_idx < n; ++n_idx) {
+    const int8_t *src_ptr = rhs_qs8cx + n_idx * k;
+    float *dst_ptr = rhs_f32 + n_idx * k;
+    const float recip_scale = rhs_scales_f32[n_idx];
+
+    for (size_t k_idx = 0; k_idx < k; ++k_idx) {
+      const int32_t v_s32 = (int32_t)src_ptr[k_idx];
+      dst_ptr[k_idx] = (float)v_s32 * recip_scale;
+    }
   }
 }
 

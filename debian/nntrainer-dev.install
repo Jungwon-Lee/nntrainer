@@ -14,6 +14,7 @@
 /usr/include/nntrainer/q6_k_tensor.h
 /usr/include/nntrainer/q4_0_tensor.h
 /usr/include/nntrainer/q4_0_utils.h
+/usr/include/nntrainer/qs4cx_tensor.h
 /usr/include/nntrainer/int4_tensor.h
 /usr/include/nntrainer/int4_utils.h
 /usr/include/nntrainer/uint4_tensor.h
@@ -27,6 +28,7 @@
 /usr/include/nntrainer/x86_compute_backend.h
 /usr/include/nntrainer/cpu_backend.h
 /usr/include/nntrainer/compute_ops.h
+/usr/include/nntrainer/cpu_ops_table.h
 /usr/include/nntrainer/context_data.h
 /usr/include/nntrainer/var_grad.h
 /usr/include/nntrainer/weight.h
@@ -93,7 +95,6 @@
 /usr/include/nntrainer/swap_device.h
 /usr/include/nntrainer/optimizer_wrapped.h
 /usr/include/nntrainer/mem_allocator.h
-/usr/include/nntrainer/tensor_layer.h
 /usr/include/nntrainer/weight_layer.h
 /usr/include/nntrainer/ggml_interface.h
 /usr/include/nntrainer/nntr_ggml_impl.h

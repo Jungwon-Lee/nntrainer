@@ -46,9 +46,11 @@
 #endif
 #include "qwen2_causallm.h"
 #include "qwen2_embedding.h"
+#include "xlm_roberta.h"
 #if !defined(_WIN32)
 #include "qwen3_cached_slim_moe_causallm.h"
 #endif
+#include "lfm2_causallm.h"
 #include "qwen3_causallm.h"
 #include "qwen3_embedding.h"
 #include "qwen3_moe_causallm.h"
@@ -69,6 +71,22 @@ using json = nlohmann::json;
 
 std::atomic<size_t> peak_rss_kb{0};
 std::atomic<bool> tracking_enabled{true};
+
+namespace {
+
+void resolveNntrConfigPath(json &nntr_cfg, const std::string &key,
+                           const std::string &model_path) {
+  if (!nntr_cfg.contains(key) || !nntr_cfg[key].is_string())
+    return;
+
+  std::filesystem::path path = nntr_cfg[key].get<std::string>();
+  if (path.empty() || path.is_absolute())
+    return;
+
+  nntr_cfg[key] = (std::filesystem::path(model_path) / path).string();
+}
+
+} // namespace
 
 /**
  * @brief Print the maximum resident set size for the current process.
@@ -169,6 +187,9 @@ std::string resolve_architecture(std::string model_type,
       return "Qwen2Embedding";
     } else if (architecture == "BertForMaskedLM") {
       return "MultilingualTinyBert";
+    } else if (architecture == "XLMRobertaForMaskedLM" ||
+               architecture == "XLMRobertaModel") {
+      return "XLMRobertaForMaskedLM";
     } else if (architecture == "TimmViT" ||
                architecture == "vit_base_patch16_siglip_224") {
       return "TimmViT";
@@ -322,10 +343,22 @@ int main(int argc, char *argv[]) {
         cfg, generation_cfg, nntr_cfg);
     });
 #endif
+#if !defined(_WIN32)
+  causallm::Factory::Instance().registerModel(
+    "XLMRobertaForMaskedLM", [](json cfg, json generation_cfg, json nntr_cfg) {
+      return std::make_unique<causallm::XLMRobertaForMaskedLM>(
+        cfg, generation_cfg, nntr_cfg);
+    });
+#endif
   causallm::Factory::Instance().registerModel(
     "TimmViT", [](json cfg, json generation_cfg, json nntr_cfg) {
       return std::make_unique<causallm::TimmViTTransformer>(cfg, generation_cfg,
                                                             nntr_cfg);
+    });
+  causallm::Factory::Instance().registerModel(
+    "Lfm2ForCausalLM", [](json cfg, json generation_cfg, json nntr_cfg) {
+      return std::make_unique<causallm::Lfm2CausalLM>(cfg, generation_cfg,
+                                                      nntr_cfg);
     });
 
   // Validate arguments
@@ -353,6 +386,12 @@ int main(int argc, char *argv[]) {
       generation_cfg = causallm::LoadJsonFile(generation_config_path);
     }
     json nntr_cfg = causallm::LoadJsonFile(model_path + "/nntr_config.json");
+    resolveNntrConfigPath(nntr_cfg, "tokenizer_file", model_path);
+    resolveNntrConfigPath(nntr_cfg, "embedding_file_name", model_path);
+    resolveNntrConfigPath(nntr_cfg, "ple_file_name", model_path);
+    resolveNntrConfigPath(nntr_cfg, "model_file_name", model_path);
+    resolveNntrConfigPath(nntr_cfg, "binary_config_path", model_path);
+    resolveNntrConfigPath(nntr_cfg, "image_newline_path", model_path);
 
     if (nntr_cfg.contains("system_prompt")) {
       system_head_prompt =
@@ -361,9 +400,9 @@ int main(int argc, char *argv[]) {
         nntr_cfg["system_prompt"]["tail_prompt"].get<std::string>();
     }
 
-    // Construct weight file path
+    // Construct weight file path (already rebased onto model_path above)
     const std::string weight_file =
-      model_path + "/" + nntr_cfg["model_file_name"].get<std::string>();
+      nntr_cfg["model_file_name"].get<std::string>();
 
     std::cout << weight_file << std::endl;
 
@@ -427,6 +466,7 @@ int main(int argc, char *argv[]) {
     }
     model->initialize();
     model->load_weight(weight_file);
+    model->repack_weight();
 
     bool do_sample = generation_cfg.value("do_sample", false);
 

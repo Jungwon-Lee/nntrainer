@@ -2,8 +2,10 @@ causallm_src = [
     meson.current_source_dir() / 'chat_template.cpp',
     meson.current_source_dir() / 'huggingface_tokenizer.cpp',
     meson.current_source_dir() / 'llm_util.cpp',
+    meson.current_source_dir() / 'api' / 'callback_streamer.cpp',
     meson.current_source_dir() / 'api' / 'causal_lm_api.cpp',
     meson.current_source_dir() / 'api' / 'model_config.cpp',
+    meson.current_source_dir() / 'api' / 'streamer.cpp',
     meson.current_source_dir() / 'kv_cache_manager.cpp',
 ]
 
@@ -34,6 +36,8 @@ causallm_layer_dependencies += [
     causallm_qkv_layer_dep,
     causallm_embedding_pooling_layer_dep,
     causallm_embedding_normalize_layer_dep,
+    causallm_causal_conv1d_dep,
+    causallm_custom_multiply_dep,
     causallm_deberta_attention_layer_dep,
     causallm_shared_fully_connected_layer_dep,
     causallm_per_layer_slice_dep,
@@ -212,6 +216,21 @@ if get_option('enable-test')
     '../../test/unittest/models'
   )
 
+  unittest_embedding_sidecar_lut = executable(
+    'unittest_embedding_sidecar_lut',
+    meson.current_source_dir() / 'layers' / 'unittest_embedding_sidecar_lut.cpp',
+    dependencies: [nntrainer_dep, gtest_main_dep, causallm_embedding_layer_dep],
+    include_directories: causallm_layer_inc,
+    build_by_default: true,
+    install: false,
+  )
+
+  test('unittest_embedding_sidecar_lut', unittest_embedding_sidecar_lut,
+    args: '--gtest_output=xml:@0@/@1@.xml'.format(meson.build_root(), 'unittest_embedding_sidecar_lut'),
+    timeout: 60,
+    suite: 'unittests'
+  )
+
   unittest_kv_cache_manager = executable(
     'unittest_kv_cache_manager',
     meson.source_root() / 'test' / 'unittest' / 'layers' / 'unittest_kv_cache_manager.cpp',
@@ -223,6 +242,68 @@ if get_option('enable-test')
 
   test('unittest_kv_cache_manager', unittest_kv_cache_manager,
     args: '--gtest_output=xml:@0@/@1@.xml'.format(meson.build_root(), 'unittest_kv_cache_manager'),
+    timeout: 60,
+    suite: 'unittests'
+  )
+
+  # Extract causallm_reference fixture binaries from packaging/
+  causallm_fixture_tars = [
+    meson.source_root() / 'packaging' / 'causallm_reference_generation.tar.gz',
+    meson.source_root() / 'packaging' / 'causallm_reference_embedding.tar.gz',
+  ]
+  # The tarballs already contain a top-level `causallm_reference/` directory, so
+  # extract into models/ (NOT models/causallm_reference/, which would double the
+  # path to models/causallm_reference/causallm_reference/ and leave the fixtures
+  # where the tests cannot find them — causing every differential test to skip).
+  causallm_fixture_dest = meson.source_root() / 'test' / 'unittest' / 'models'
+  foreach fixture_tar : causallm_fixture_tars
+    if build_machine.system() == 'windows'
+      run_command([prog_win_cmd, '/C', 'tar', 'xzf',
+                   fixture_tar.replace('/', '\\'),
+                   '-C', causallm_fixture_dest.replace('/', '\\')], check: false)
+    else
+      run_command(['tar', 'xzf', fixture_tar, '-C', causallm_fixture_dest], check: false)
+    endif
+  endforeach
+
+  unittest_callback_streamer = executable(
+    'unittest_callback_streamer',
+    [
+      meson.current_source_dir() / 'api' / 'unittest_callback_streamer.cpp',
+      meson.current_source_dir() / 'api' / 'callback_streamer.cpp',
+      meson.current_source_dir() / 'api' / 'streamer.cpp',
+    ],
+    dependencies: [gtest_main_dep],
+    include_directories: causallm_inc,
+    build_by_default: true,
+    install: false,
+  )
+
+  test('unittest_callback_streamer', unittest_callback_streamer,
+    args: '--gtest_output=xml:@0@/@1@.xml'.format(meson.build_root(), 'unittest_callback_streamer'),
+    timeout: 60,
+    suite: 'unittests'
+  )
+
+  unittest_cancel_api = executable(
+    'unittest_cancel_api',
+    [
+      meson.current_source_dir() / 'api' / 'unittest_cancel_api.cpp',
+    ],
+    dependencies: [
+      nntrainer_dep,
+      nntrainer_ccapi_dep,
+      gtest_main_dep,
+      causallm_layer_dependencies,
+      causallm_dep
+    ],
+    include_directories: causallm_inc,
+    build_by_default: true,
+    install: false,
+  )
+
+  test('unittest_cancel_api', unittest_cancel_api,
+    args: '--gtest_output=xml:@0@/@1@.xml'.format(meson.build_root(), 'unittest_cancel_api'),
     timeout: 60,
     suite: 'unittests'
   )
@@ -241,8 +322,27 @@ if get_option('enable-test')
       [
         meson.source_root() / 'test' / 'unittest' / 'models' / 'causallm_test_utils.cpp',
         meson.source_root() / 'test' / 'unittest' / 'models' / 'unittest_causallm_gemma3.cpp',
+        meson.source_root() / 'test' / 'unittest' / 'models' / 'unittest_causallm_gemma3_reference.cpp',
+        meson.source_root() / 'test' / 'unittest' / 'models' / 'unittest_causallm_gemma4.cpp',
+        meson.source_root() / 'test' / 'unittest' / 'models' / 'unittest_causallm_gemma4_reference.cpp',
+        meson.source_root() / 'test' / 'unittest' / 'models' / 'unittest_causallm_qwen3_moe.cpp',
+        meson.source_root() / 'test' / 'unittest' / 'models' / 'unittest_causallm_qwen3_moe_reference.cpp',
+        meson.source_root() / 'test' / 'unittest' / 'models' / 'unittest_causallm_qwen3_slim_moe.cpp',
+        meson.source_root() / 'test' / 'unittest' / 'models' / 'unittest_causallm_qwen3_cached_slim_moe.cpp',
+        meson.source_root() / 'test' / 'unittest' / 'models' / 'unittest_causallm_gpt_oss.cpp',
+        meson.source_root() / 'test' / 'unittest' / 'models' / 'unittest_causallm_gpt_oss_cached_slim.cpp',
         meson.source_root() / 'test' / 'unittest' / 'models' / 'unittest_causallm_qwen2.cpp',
+        meson.source_root() / 'test' / 'unittest' / 'models' / 'unittest_causallm_qwen2_reference.cpp',
         meson.source_root() / 'test' / 'unittest' / 'models' / 'unittest_causallm_qwen3.cpp',
+        meson.source_root() / 'test' / 'unittest' / 'models' / 'unittest_causallm_qwen3_reference.cpp',
+        meson.source_root() / 'test' / 'unittest' / 'models' / 'unittest_causallm_qwen3_embedding_reference.cpp',
+        meson.source_root() / 'test' / 'unittest' / 'models' / 'unittest_causallm_qwen2_embedding_reference.cpp',
+        meson.source_root() / 'test' / 'unittest' / 'models' / 'unittest_causallm_embedding_gemma_reference.cpp',
+        meson.source_root() / 'test' / 'unittest' / 'models' / 'unittest_causallm_tinybert_reference.cpp',
+        meson.source_root() / 'test' / 'unittest' / 'models' / 'unittest_causallm_deberta_v2_reference.cpp',
+        meson.source_root() / 'test' / 'unittest' / 'models' / 'unittest_causallm_xlm_roberta_reference.cpp',
+        meson.source_root() / 'test' / 'unittest' / 'models' / 'unittest_causallm_lfm2.cpp',
+        meson.source_root() / 'test' / 'unittest' / 'models' / 'unittest_causallm_lfm2_reference.cpp',
       ],
       dependencies: [
         nntrainer_dep,
@@ -259,7 +359,8 @@ if get_option('enable-test')
     test('unittest_causallm_models', unittest_causallm_models,
       args: '--gtest_output=xml:@0@/@1@.xml'.format(meson.build_root(), 'unittest_causallm_models'),
       timeout: 60,
-      suite: 'unittests'
+      suite: 'unittests',
+      env: {'NNTR_QUANTIZE_BIN': e_quantize.full_path()}
     )
   endif
 endif

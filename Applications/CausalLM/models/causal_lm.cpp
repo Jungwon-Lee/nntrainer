@@ -28,6 +28,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <iterator>
 #include <limits>
 #include <utility>
 #include <vector>
@@ -42,12 +43,35 @@
 
 #include <causal_lm.h>
 #include <llm_util.hpp>
+#include <utf8_stream_util.h>
+
+#include "api/streamer.h"
 
 namespace causallm {
 
 CausalLM::CausalLM(json &cfg, json &generation_cfg, json &nntr_cfg) :
   Transformer(cfg, generation_cfg, nntr_cfg, ModelType::CAUSALLM) {
   setupParameters(cfg, generation_cfg, nntr_cfg);
+}
+
+void CausalLM::prepareForRun() {
+  stop_requested_.store(false, std::memory_order_release);
+  stop_prepared_for_run_.store(true, std::memory_order_release);
+}
+
+void CausalLM::prepareStopRequestForRun() {
+  if (!stop_prepared_for_run_.exchange(false, std::memory_order_acq_rel)) {
+    stop_requested_.store(false, std::memory_order_release);
+  }
+}
+
+void CausalLM::setLogitsProcessor(LogitsProcessor *processor) {
+  logits_processor = processor;
+}
+
+void CausalLM::resetLogitsProcessor() {
+  if (logits_processor != nullptr)
+    logits_processor->reset();
 }
 
 void CausalLM::setupParameters(json &cfg, json &generation_cfg,
@@ -166,9 +190,15 @@ void CausalLM::allocateAndBindKVCache() {
       kp = find_cache_placeholder("cache_k_l" + std::to_string(i));
     if (vp == nullptr)
       vp = find_cache_placeholder("cache_v_l" + std::to_string(i));
+    if (kp == nullptr && vp == nullptr) {
+      /// This layer has no attention sub-graph (e.g., a conv-only block in a
+      /// hybrid architecture like LFM2). Skip KV-cache binding for it.
+      continue;
+    }
     NNTR_THROW_IF(kp == nullptr || vp == nullptr, std::runtime_error)
       << "allocateAndBindKVCache: cache_k_l" << i << " / cache_v_l" << i
-      << " input placeholder not found in compiled graph";
+      << " partially found in compiled graph (one placeholder exists but "
+         "the other does not)";
     NNTR_THROW_IF(kp->getDataType() != kc.getDataType() ||
                     vp->getDataType() != vc.getDataType(),
                   std::runtime_error)
@@ -248,15 +278,17 @@ void CausalLM::registerOutputs(
       if (std::find(puncts.begin(), puncts.end(), decoded_str.back()) !=
           puncts.end()) {
         // last symbol is a punctuation, hold on
-      } else if (decoded_str.size() >= 3 &&
-                 decoded_str.compare(decoded_str.size() - 3, 3, "") == 0) {
-        // ends with an incomplete token, hold on
+      } else if (utf8stream::shouldHold(decoded_str, pending_ids_.size())) {
       } else {
-        if (log_output) {
+        if (log_output && streamer_ == nullptr) {
           std::cout << decoded_str;
           std::cout.flush();
         }
         output_list[b].append(decoded_str);
+        if (streamer_ != nullptr &&
+            streamer_put(streamer_, decoded_str.c_str()) != 0) {
+          requestStop();
+        }
         pending_ids_.clear();
       }
     }
@@ -300,37 +332,30 @@ std::vector<unsigned int> CausalLM::generate(float *logits, bool do_sample,
       applyBadWordsPenalty(logits, BAD_WORD_IDS.data(), NUM_BADWORDS);
     }
 
+    if (logits_processor != nullptr)
+      logits_processor->process(logits, NUM_VOCAB, iteration);
+
+    unsigned int output_id;
+
     // return argmax if do_sample is false
     if (do_sample == false) {
-      unsigned int argmax_idx =
+      output_id =
         std::distance(logits, std::max_element(logits, logits + NUM_VOCAB));
-      outputs.push_back(argmax_idx);
     } else {
-      // apply temperature & top-k & top-p to logits
-      float max_logits = applyTKP(logits, NUM_VOCAB, TEMPERATURE, TOP_K, TOP_P);
-      // transform logits to softmax
-      float sum_exp_logits = 0;
-      for (unsigned int i = 0; i < NUM_VOCAB; i++) {
-        float exp_x = exp(logits[i] - max_logits);
-        sum_exp_logits += exp_x;
-        logits[i] = exp_x;
-      }
-
-      for (unsigned int i = 0; i < NUM_VOCAB; ++i) {
-        logits[i] /= sum_exp_logits;
-      }
-
-      // sample from final logits
-      std::discrete_distribution<int> dist(logits, logits + NUM_VOCAB);
-      unsigned int sampled_idx = dist(rng);
-
-      // add sampled word
-      outputs.push_back(sampled_idx);
+      // apply temperature & top-k & top-p and sample with original logits
+      // unchanged
+      output_id = applyTKP(logits, NUM_VOCAB, TEMPERATURE, TOP_K, TOP_P, rng);
     }
+
+    outputs.push_back(output_id);
+
+    if (logits_processor != nullptr)
+      logits_processor->acceptToken(output_id, iteration);
 
     // set batch offset
     logits = logits + NUM_VOCAB;
-    input_ids = input_ids + MAX_SEQ_LEN;
+    if (input_ids != nullptr)
+      input_ids = input_ids + MAX_SEQ_LEN;
   }
 
   return outputs;
@@ -360,6 +385,11 @@ void CausalLM::run(const WSTR prompt, bool do_sample, const WSTR system_prompt,
                              "initialize() before run().");
   }
 
+  struct StreamerEndGuard {
+    BaseStreamer *streamer;
+    ~StreamerEndGuard() { streamer_end(streamer); }
+  } streamer_end_guard{streamer_};
+
   // Allocate the host-owned KV cache and bind it to mha_core's external cache
   // input slots. Idempotent: only the first call does work; subsequent runs
   // reuse the same buffers and continue from the computed absolute token
@@ -367,6 +397,7 @@ void CausalLM::run(const WSTR prompt, bool do_sample, const WSTR system_prompt,
   allocateAndBindKVCache();
 
   has_run_ = false;
+  prepareStopRequestForRun();
 
   output_list.clear();
   for (unsigned int b = 0; b < BATCH_SIZE; ++b) {
@@ -427,8 +458,20 @@ void CausalLM::run(const WSTR prompt, bool do_sample, const WSTR system_prompt,
   unsigned int num_allow_str = MAX_SEQ_LEN - NUM_TO_GENERATE;
   unsigned int text_len = _len;
 
-  if (_len > num_allow_str)
+  if (_len > num_allow_str) {
     text_len = num_allow_str;
+    // Truncation drops tokens from the tail of the prompt, which is where
+    // instructions in "summarize this document"-style prompts live: a
+    // silently truncated prompt can make the model continue the body
+    // instead of following a dropped trailing instruction. Always warn
+    // with the exact counts.
+    std::cerr << "[CausalLM] WARNING: prompt (" << _len
+              << " tokens) exceeds the max allowed prefill length ("
+              << num_allow_str
+              << " = max_seq_len - num_to_generate); "
+                 "truncating "
+              << (_len - num_allow_str) << " tail tokens." << std::endl;
+  }
 
   // feed only available length
   // if _input is allowed, it feeds all of the _input
@@ -592,7 +635,8 @@ void CausalLM::run(const WSTR prompt, bool do_sample, const WSTR system_prompt,
   auto start_generation = std::chrono::high_resolution_clock::now();
 
   for (unsigned int token_generation_idx = input_len + 1;
-       token_generation_idx < input_len + 1 + NUM_TO_GENERATE;
+       token_generation_idx < input_len + 1 + NUM_TO_GENERATE &&
+       !stop_requested_.load(std::memory_order_acquire);
        ++token_generation_idx) {
 
     allocateAndBindKVCache();
@@ -635,6 +679,10 @@ void CausalLM::run(const WSTR prompt, bool do_sample, const WSTR system_prompt,
     }
 
     if (is_finish) {
+      break;
+    }
+
+    if (stop_requested_.load(std::memory_order_acquire)) {
       break;
     }
   }

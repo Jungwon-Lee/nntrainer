@@ -24,6 +24,7 @@
 #include "qnn_rpc_manager.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cstdint>
 #include <fcntl.h>
 #include <functional>
@@ -45,10 +46,6 @@ using namespace qnn::tools;
 
 namespace nntrainer {
 
-/**
- * @enum    StatusCode
- * @brief   Coarse status codes returned across the QNN integration layer.
- */
 enum class StatusCode {
   SUCCESS,
   FAILURE,
@@ -58,11 +55,6 @@ enum class StatusCode {
   QNN_FEATURE_UNSUPPORTED
 };
 
-/**
- * @struct  Qnn_Context_Graph_t
- * @brief   Bundles a QNN context handle with the set of compiled graphs that
- *          live inside it (graph_map / graph_idx keyed by graph name).
- */
 struct Qnn_Context_Graph_t {
   Qnn_ContextHandle_t m_context;
   qnn_wrapper_api::GraphInfo_t **m_graphsInfo;
@@ -82,14 +74,32 @@ struct Qnn_Context_Graph_t {
     }
   }
 
-  qnn_wrapper_api::GraphInfo_t *getGraphPtr(std::string graph_name) {
+  qnn_wrapper_api::GraphInfo_t *getGraphPtr(const std::string &graph_name) {
     auto mapIt = graph_map.find(graph_name);
     if (mapIt != graph_map.end()) {
       return mapIt->second;
-    } else {
-      ml_loge("cannot find graph");
-      return nullptr;
     }
+
+    /**
+     * nntrainer's GraphCore::ensureName() lowercases every layer name, but QNN
+     * graph names are case-sensitive (e.g. "gemma_4_E2B_..."). When the layer
+     * name was lowercased the exact lookup above misses, so fall back to a
+     * case-insensitive match against the binary's real graph names.
+     */
+    auto ci_equal = [](const std::string &a, const std::string &b) {
+      return a.size() == b.size() &&
+             std::equal(a.begin(), a.end(), b.begin(),
+                        [](unsigned char x, unsigned char y) {
+                          return std::tolower(x) == std::tolower(y);
+                        });
+    };
+    for (auto &kv : graph_map) {
+      if (ci_equal(kv.first, graph_name))
+        return kv.second;
+    }
+
+    ml_loge("cannot find graph");
+    return nullptr;
   }
 
   int getGraphIdx(std::string graph_name) {
@@ -103,13 +113,6 @@ struct Qnn_Context_Graph_t {
   }
 };
 
-/**
- * @struct  QNNVar
- * @brief   Per-process QNN runtime state (backend handle, device handle,
- *          extensions, profiling level, IO data types). Held by
- *          QNNBackendVar and reachable from any tensor whose ContextData
- *          points at a QNN context.
- */
 struct QNNVar {
   QnnBackend_Config_t **m_backendConfig = nullptr;
   Qnn_BackendHandle_t m_backendHandle = nullptr;
@@ -136,6 +139,72 @@ struct QNNVar {
       return mapIt->second;
     }
     return std::nullopt;
+  }
+
+  StatusCode freeContext(const std::string &bin_path) {
+    auto it = ct_map.find(bin_path);
+    if (it == ct_map.end()) {
+      ml_logw("Context not found for: %s", bin_path.c_str());
+      return StatusCode::FAILURE;
+    }
+
+    auto &ctx = it->second;
+
+    // 1. QNN context handle 해제
+    if (ctx.m_context != nullptr &&
+        m_qnnFunctionPointers.qnnInterface.contextFree != nullptr) {
+      if (QNN_CONTEXT_NO_ERROR !=
+          m_qnnFunctionPointers.qnnInterface.contextFree(ctx.m_context,
+                                                         nullptr)) {
+        ml_loge("Failed to free QNN context for: %s", bin_path.c_str());
+      }
+      ctx.m_context = nullptr;
+    }
+
+    // 2. graphsInfo 해제 (use QnnModel_freeGraphsInfo pattern)
+    if (ctx.m_graphsInfo != nullptr) {
+      for (uint32_t i = 0; i < ctx.m_graphsCount; i++) {
+        if (ctx.m_graphsInfo[i] != nullptr) {
+          free(ctx.m_graphsInfo[i]->graphName);
+          qnn_wrapper_api::freeQnnTensors(ctx.m_graphsInfo[i]->inputTensors,
+                                          ctx.m_graphsInfo[i]->numInputTensors);
+          qnn_wrapper_api::freeQnnTensors(
+            ctx.m_graphsInfo[i]->outputTensors,
+            ctx.m_graphsInfo[i]->numOutputTensors);
+        }
+      }
+      free(*ctx.m_graphsInfo);
+      free(ctx.m_graphsInfo);
+      ctx.m_graphsInfo = nullptr;
+    }
+
+    // 3. contextConfig 해제
+    if (ctx.m_contextConfig != nullptr) {
+      for (int i = 0; ctx.m_contextConfig[i] != nullptr; i++) {
+        free(ctx.m_contextConfig[i]);
+      }
+      free(ctx.m_contextConfig);
+      ctx.m_contextConfig = nullptr;
+    }
+
+    // 4. ct_map에서 엔트리 제거
+    ct_map.erase(it);
+
+    ml_logi("Freed QNN context for: %s", bin_path.c_str());
+    return StatusCode::SUCCESS;
+  }
+
+  StatusCode freeAllContexts() {
+    // 반복 중 erase하면 안 되므로 키를 먼저 복사
+    std::vector<std::string> keys;
+    keys.reserve(ct_map.size());
+    for (auto &[k, _] : ct_map) {
+      keys.push_back(k);
+    }
+    for (auto &k : keys) {
+      freeContext(k);
+    }
+    return StatusCode::SUCCESS;
   }
 
   StatusCode makeContext(props::FilePath bin) {
@@ -281,16 +350,26 @@ struct QNNVar {
 
     qnn_wrapper_api::GraphInfo_t *graphInfo = context_i.getGraphPtr(graphName);
 
+    if (nullptr == graphInfo) {
+      ml_loge("cannot find graph for graph name : %s", graphName.c_str());
+      return nullptr;
+    }
+
     if (nullptr == m_qnnFunctionPointers.qnnInterface.graphRetrieve) {
       ml_loge("graphRetrieveFnHandle is nullptr.");
       return nullptr;
     }
 
+    /**
+     * QNN's graphRetrieve is case-sensitive, so pass the binary's real graph
+     * name (graphInfo->graphName) rather than the possibly-lowercased lookup
+     * key in graphName.
+     */
     if (QNN_SUCCESS !=
         m_qnnFunctionPointers.qnnInterface.graphRetrieve(
-          context_i.m_context, graphName.c_str(), &(graphInfo->graph))) {
+          context_i.m_context, graphInfo->graphName, &(graphInfo->graph))) {
       ml_loge("Unable to retrieve graph handle for graph name : %s",
-              graphName.c_str());
+              graphInfo->graphName);
       return nullptr;
     }
 
@@ -367,19 +446,9 @@ struct QNNVar {
   }
 };
 
-/**
- * @class   QNNBackendVar
- * @brief   ContextData subclass that carries QNN-specific runtime state
- *          (QNNVar) so layers and tensors bound to the QNN Context can
- *          reach the backend/device handles via
- * ContextData::as<QNNBackendVar>().
- */
 class QNNBackendVar : public ContextData {
 public:
   QNNBackendVar() : data(std::make_shared<QNNVar>()) {}
-
-  const char *getType() const override { return "qnn"; }
-
   std::shared_ptr<QNNVar> &getVar() { return data; }
 
 private:
