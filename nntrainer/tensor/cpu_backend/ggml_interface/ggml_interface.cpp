@@ -122,13 +122,10 @@ void __ggml_gemv_q4_0_rowwise(const unsigned int N, const unsigned int K,
 
   auto &tm = ThreadManager::Global();
   constexpr size_t rows_per_gemv_group = 4;
-  constexpr size_t chunks_per_thread = 4;
+  constexpr size_t max_gemv_chunks = 16;
   const size_t num_row_groups =
     (N + rows_per_gemv_group - 1) / rows_per_gemv_group;
-  const size_t num_chunks = std::max<size_t>(
-    1,
-    std::min(num_row_groups, static_cast<size_t>(tm.getComputeThreadCount()) *
-                               chunks_per_thread));
+  const size_t num_chunks = std::min(num_row_groups, max_gemv_chunks);
 
   const char *weight_data = static_cast<const char *>(B);
   tm.parallel_for(0, num_chunks, [&](size_t chunk) {
