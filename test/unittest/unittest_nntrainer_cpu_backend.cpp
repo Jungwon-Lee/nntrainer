@@ -432,6 +432,12 @@ TEST(nntrainer_cpu_backend_standalone, q4_0_rowwise_gemv) {
   nntrainer::gemv_q4_0_rowwise(0, K, activation.data(), q4_weight.data(),
                                output);
 
+  std::vector<float> fallback_output(N);
+  nntrainer::__fallback_gemv_q4_0_rowwise(
+    N, K, activation.data(), q4_weight.data(), fallback_output.data());
+  nntrainer::__fallback_gemv_q4_0_rowwise(
+    0, K, activation.data(), q4_weight.data(), fallback_output.data());
+
   const size_t activation_size =
     static_cast<size_t>(K) / QK8_0_TESTONLY * sizeof(block_q8_0_testonly);
   std::vector<char> q8_activation(activation_size);
@@ -447,6 +453,7 @@ TEST(nntrainer_cpu_backend_standalone, q4_0_rowwise_gemv) {
     const float expected = nntrainer::sdot(K, dequant_weight.data(), 1,
                                            dequant_activation.data(), 1);
     EXPECT_NEAR(output[row], expected, 1.0e-3f) << "row=" << row;
+    EXPECT_NEAR(fallback_output[row], expected, 1.0e-3f) << "row=" << row;
   }
   EXPECT_EQ(guarded_output[0], sentinel);
   EXPECT_EQ(guarded_output[1], sentinel);

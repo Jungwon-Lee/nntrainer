@@ -16,7 +16,6 @@
 #include <compute_ops.h>
 #include <fallback.h>
 #include <fallback_internal.h>
-#include <ggml_interface.h>
 #include <nntrainer_error.h>
 
 namespace nntrainer {
@@ -233,7 +232,7 @@ void gemm_q4_0(const unsigned int M, const unsigned int N, const unsigned int K,
 
 void gemv_q4_0_rowwise(const unsigned int N, const unsigned int K,
                        const float *A, const void *B, float *C) {
-  __ggml_gemv_q4_0_rowwise(N, K, A, B, C);
+  __fallback_gemv_q4_0_rowwise(N, K, A, B, C);
 }
 
 void gemm_q4_K(const unsigned int M, const unsigned int N, const unsigned int K,
