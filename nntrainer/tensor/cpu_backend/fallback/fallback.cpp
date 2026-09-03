@@ -21,10 +21,7 @@
 
 namespace nntrainer {
 
-void init_backend() {
-  __ggml_init();
-  g_compute_ops = get_cpu_ops();
-}
+void init_backend() { g_compute_ops = get_cpu_ops(); }
 
 void scopy_int4_to_float32(const unsigned int N, const uint8_t *X,
                            const unsigned int incX, float *Y,
