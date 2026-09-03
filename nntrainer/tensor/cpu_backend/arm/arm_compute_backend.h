@@ -1110,22 +1110,6 @@ void gemm_q4_0(const unsigned int M, const unsigned int N, const unsigned int K,
                const unsigned int ldb, T *C, const unsigned int ldc);
 
 /**
- * @brief Return storage required for one Q8_0 activation row
- * @param K Number of elements; must be a non-zero multiple of QK4_0
- * @return Size of the Q8_0 activation buffer in bytes
- */
-size_t q4_0_gemv_activation_size(const unsigned int K);
-
-/**
- * @brief Quantize one FP32 activation row to Q8_0 for Q4_0 GEMV
- * @param K Number of activation elements
- * @param A FP32 activation row
- * @param quantized_A Preallocated Q8_0 destination
- */
-void quantize_q4_0_gemv_activation(const unsigned int K, const float *A,
-                                   void *quantized_A);
-
-/**
  * @brief Compute canonical Q4_0 weight rows against one Q8_0 row
  * @param row_begin First output row
  * @param row_end One-past-last output row
@@ -1333,15 +1317,25 @@ void unpack_q4_0(const void *in_q4_0x, void *out_q4_0, size_t data_size,
                  const unsigned int M, const unsigned int N);
 
 /**
- * @brief Quantize float to q6_K Quantization format
- *
- * @param src float* src to be quantized
- * @param dst void* dst to store quantized data
- * @param k number of elements in src
+ * @brief Return storage required for one Q8_0 row
+ * @param k Number of elements; must be a multiple of the Q8_0 block size
+ * @return Size of the Q8_0 row in bytes
+ */
+size_t q8_0_row_size(const unsigned int k);
+
+/**
+ * @brief Quantize one row to Q8_0
+ * @param src Source row
+ * @param dst Preallocated Q8_0 destination
+ * @param k Number of elements in the row
  */
 template <typename T = float>
 void quantize_row_q8_0(const T *__restrict src, void *__restrict dst,
                        int64_t k);
+
+template <>
+void quantize_row_q8_0<float>(const float *__restrict src, void *__restrict dst,
+                              int64_t k);
 
 /**
  * @brief Quantize T to q8_0 Quantization format

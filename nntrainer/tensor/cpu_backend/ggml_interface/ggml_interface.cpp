@@ -44,6 +44,16 @@ size_t __ggml_quantize_q8_0(const float *src, void *dst, int64_t nrow,
   return nntr_quantize_q8_0(src, dst, nrow, n_per_row, quant_weights);
 }
 
+size_t __ggml_q8_0_row_size(const unsigned int k) {
+  assert(k % QK8_0 == 0);
+  return sizeof(block_q8_0) * (k / QK8_0);
+}
+
+void __ggml_quantize_row_q8_0(const float *__restrict src, void *__restrict dst,
+                              int64_t k) {
+  nntr_quantize_row_q8_0(src, dst, k);
+}
+
 void __ggml_quantize_row_q6_K(const float *src, void *dst, int64_t k) {
   __ggml_quantize_q6_K(src, dst, 1, k, nullptr);
 }
@@ -105,17 +115,6 @@ float __ggml_vec_dot_q6_K(const unsigned int K, const void *__restrict v_q6_K,
   nntr_vec_dot_q6_K_q8_K(K, &result, bs, v_q6_K, bx, v_q8_activation.data(), by,
                          nrc);
   return result;
-}
-
-size_t __ggml_q4_0_gemv_activation_size(const unsigned int K) {
-  assert(K % QK4_0 == 0);
-  return sizeof(block_q8_0) * (K / QK8_0);
-}
-
-void __ggml_quantize_q4_0_gemv_activation(const unsigned int K, const float *A,
-                                          void *quantized_A) {
-  assert(K % QK4_0 == 0);
-  nntr_quantize_row_q8_0(A, quantized_A, K);
 }
 
 void __ggml_gemv_q4_0_rowwise_range(const unsigned int row_begin,

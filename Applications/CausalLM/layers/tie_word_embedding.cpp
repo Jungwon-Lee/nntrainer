@@ -370,10 +370,9 @@ void TieWordEmbedding::incremental_forwarding_lmhead(
       const float *input_data = input_fp32.getData<float>();
       float *logits = hidden_step.getData<float>();
       thread_local std::vector<char> quantized_activation;
-      quantized_activation.resize(
-        nntrainer::q4_0_gemv_activation_size(hidden_size));
-      nntrainer::quantize_q4_0_gemv_activation(hidden_size, input_data,
-                                               quantized_activation.data());
+      quantized_activation.resize(nntrainer::q8_0_row_size(hidden_size));
+      nntrainer::quantize_row_q8_0(input_data, quantized_activation.data(),
+                                   hidden_size);
       // Resolve the caller's TLS buffer before dispatch. Accessing the TLS
       // variable inside a worker would select that worker's empty instance.
       const char *quantized_activation_data = quantized_activation.data();

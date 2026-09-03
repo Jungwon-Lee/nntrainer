@@ -56,6 +56,22 @@ size_t __ggml_quantize_q8_0(const float *src, void *dst, int64_t nrow,
                             int64_t n_per_row, const float *quant_weights);
 
 /**
+ * @brief Return storage required for one Q8_0 row
+ * @param k Number of elements in the row
+ * @return Size of the Q8_0 row in bytes
+ */
+size_t __ggml_q8_0_row_size(const unsigned int k);
+
+/**
+ * @brief Quantize one FP32 row to Q8_0
+ * @param src FP32 source row
+ * @param dst Preallocated Q8_0 destination
+ * @param k Number of elements in the row
+ */
+void __ggml_quantize_row_q8_0(const float *__restrict src, void *__restrict dst,
+                              int64_t k);
+
+/**
  * @brief Quantize float to q4_K Quantization format
  *
  * @param src input src to be quantized
@@ -279,17 +295,6 @@ void __ggml_gemm_q6_K(const unsigned int M, const unsigned int N,
                       const unsigned int K, const T *A, const unsigned int lda,
                       const void *B, const unsigned int ldb, T *C,
                       const unsigned int ldc);
-
-/**
- * @brief Return the Q8_0 buffer size for one Q4_0 GEMV activation row
- */
-size_t __ggml_q4_0_gemv_activation_size(const unsigned int K);
-
-/**
- * @brief Quantize one FP32 activation row to Q8_0 for Q4_0 GEMV
- */
-void __ggml_quantize_q4_0_gemv_activation(const unsigned int K, const float *A,
-                                          void *quantized_A);
 
 /**
  * @brief Thread-free Q4_0/Q8_0 row-major matrix-vector multiplication

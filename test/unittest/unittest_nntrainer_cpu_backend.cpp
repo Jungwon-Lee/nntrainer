@@ -413,9 +413,8 @@ TEST(nntrainer_cpu_backend_standalone, q4_0_rowwise_gemv) {
   std::vector<char> q4_weight(weight_size);
   nntrainer::quantize_q4_0(weight.data(), q4_weight.data(), N, K, nullptr);
 
-  std::vector<char> q8_activation(nntrainer::q4_0_gemv_activation_size(K));
-  nntrainer::quantize_q4_0_gemv_activation(K, activation.data(),
-                                           q8_activation.data());
+  std::vector<char> q8_activation(nntrainer::q8_0_row_size(K));
+  nntrainer::quantize_row_q8_0(activation.data(), q8_activation.data(), K);
 
   std::vector<float> output(N);
   const unsigned int row_split = 17;
