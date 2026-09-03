@@ -22,7 +22,6 @@
 #include <tie_word_embedding.h>
 #include <util_func.h>
 
-#include <algorithm>
 #include <vector>
 
 namespace causallm {
@@ -369,34 +368,8 @@ void TieWordEmbedding::incremental_forwarding_lmhead(
           : input_step.clone(nntrainer::TensorDim::DataType::FP32);
       const float *input_data = input_fp32.getData<float>();
       float *logits = hidden_step.getData<float>();
-      thread_local std::vector<char> quantized_activation;
-      quantized_activation.resize(nntrainer::q8_0_row_size(hidden_size));
-      nntrainer::quantize_row_q8_0(input_data, quantized_activation.data(),
-                                   hidden_size);
-      // Resolve the caller's TLS buffer before dispatch. Accessing the TLS
-      // variable inside a worker would select that worker's empty instance.
-      const char *quantized_activation_data = quantized_activation.data();
-
-      auto &tm = nntrainer::ThreadManager::Global();
-      constexpr size_t rows_per_gemv_group = 4;
-      constexpr size_t chunks_per_thread = 4;
-      const size_t num_row_groups =
-        (vocab_size + rows_per_gemv_group - 1) / rows_per_gemv_group;
-      const size_t num_chunks = std::max<size_t>(
-        1, std::min(num_row_groups,
-                    static_cast<size_t>(tm.getComputeThreadCount()) *
-                      chunks_per_thread));
-
-      tm.parallel_for(0, num_chunks, [=](size_t chunk) {
-        const size_t row_group_begin = chunk * num_row_groups / num_chunks;
-        const size_t row_group_end = (chunk + 1) * num_row_groups / num_chunks;
-        const size_t row_begin = row_group_begin * rows_per_gemv_group;
-        const size_t row_end =
-          std::min<size_t>(vocab_size, row_group_end * rows_per_gemv_group);
-        nntrainer::gemv_q4_0_rowwise_range(row_begin, row_end, hidden_size,
-                                           quantized_activation_data,
-                                           weight_data, logits);
-      });
+      nntrainer::gemv_q4_0_rowwise(vocab_size, hidden_size, input_data,
+                                   weight_data, logits);
     } else {
       input_step.dot(weight, hidden_step, false, true);
     }

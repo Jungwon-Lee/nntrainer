@@ -340,10 +340,9 @@ void gemm_q4_0(const unsigned int M, std::vector<unsigned int> Ns,
   throw std::runtime_error("Error: NYI for gemm_q4_0 with vectored weights");
 }
 
-void gemv_q4_0_rowwise_range(const unsigned int row_begin,
-                             const unsigned int row_end, const unsigned int K,
-                             const void *quantized_A, const void *B, float *C) {
-  __ggml_gemv_q4_0_rowwise_range(row_begin, row_end, K, quantized_A, B, C);
+void gemv_q4_0_rowwise(const unsigned int N, const unsigned int K,
+                       const float *A, const void *B, float *C) {
+  __ggml_gemv_q4_0_rowwise(N, K, A, B, C);
 }
 
 void gemm_q4_K(const unsigned int M, const unsigned int N, const unsigned int K,
@@ -388,14 +387,6 @@ size_t quantize_q4_K(const float *src, void *dst, int64_t nrow,
 size_t quantize_q6_K(const float *src, void *dst, int64_t nrow,
                      int64_t n_per_row, const float *quant_weights) {
   return __ggml_quantize_q6_K(src, dst, nrow, n_per_row, quant_weights);
-}
-
-size_t q8_0_row_size(const unsigned int k) { return __ggml_q8_0_row_size(k); }
-
-template <>
-void quantize_row_q8_0<float>(const float *__restrict src, void *__restrict dst,
-                              int64_t k) {
-  __ggml_quantize_row_q8_0(src, dst, k);
 }
 
 void quantize_row_q6_K(const float *src, void *dst, int64_t k) {

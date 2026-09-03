@@ -56,22 +56,6 @@ size_t __ggml_quantize_q8_0(const float *src, void *dst, int64_t nrow,
                             int64_t n_per_row, const float *quant_weights);
 
 /**
- * @brief Return storage required for one Q8_0 row
- * @param k Number of elements in the row
- * @return Size of the Q8_0 row in bytes
- */
-size_t __ggml_q8_0_row_size(const unsigned int k);
-
-/**
- * @brief Quantize one FP32 row to Q8_0
- * @param src FP32 source row
- * @param dst Preallocated Q8_0 destination
- * @param k Number of elements in the row
- */
-void __ggml_quantize_row_q8_0(const float *__restrict src, void *__restrict dst,
-                              int64_t k);
-
-/**
  * @brief Quantize float to q4_K Quantization format
  *
  * @param src input src to be quantized
@@ -297,20 +281,17 @@ void __ggml_gemm_q6_K(const unsigned int M, const unsigned int N,
                       const unsigned int ldc);
 
 /**
- * @brief Thread-free Q4_0/Q8_0 row-major matrix-vector multiplication
+ * @brief Q4_0 row-major matrix-vector multiplication with online Q8_0
+ * quantization
  *
- * @param row_begin First Q4_0 weight row to compute
- * @param row_end One-past-last Q4_0 weight row to compute
- * @param K Number of elements in each row
- * @param quantized_A Activation vector in Q8_0 format
+ * @param N Number of canonical Q4_0 weight rows
+ * @param K Number of elements in each activation and weight row
+ * @param A FP32 activation row
  * @param B Q4_0 weight rows in canonical block_q4_0 layout
  * @param C FP32 output vector
  */
-void __ggml_gemv_q4_0_rowwise_range(const unsigned int row_begin,
-                                    const unsigned int row_end,
-                                    const unsigned int K,
-                                    const void *quantized_A, const void *B,
-                                    float *C);
+void __ggml_gemv_q4_0_rowwise(const unsigned int N, const unsigned int K,
+                              const float *A, const void *B, float *C);
 /**
  * @brief (1xK)*(Kx1) dot product for q6_K and q8_K vectors
  *

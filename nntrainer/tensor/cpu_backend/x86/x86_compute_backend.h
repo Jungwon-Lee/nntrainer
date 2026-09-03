@@ -851,17 +851,15 @@ void gemm_q4_0(const unsigned int M, const unsigned int N, const unsigned int K,
                const unsigned int ldb, T *C, const unsigned int ldc);
 
 /**
- * @brief Compute canonical Q4_0 weight rows against one Q8_0 row
- * @param row_begin First output row
- * @param row_end One-past-last output row
- * @param K Number of elements per weight row
- * @param quantized_A Q8_0 activation row
+ * @brief Compute canonical Q4_0 weight rows against one FP32 activation row
+ * @param N Number of canonical Q4_0 weight rows
+ * @param K Number of elements per activation and weight row
+ * @param A FP32 activation row to quantize online
  * @param B Canonical row-major Q4_0 weights
- * @param C FP32 output vector indexed by the absolute weight row
+ * @param C FP32 output vector
  */
-void gemv_q4_0_rowwise_range(const unsigned int row_begin,
-                             const unsigned int row_end, const unsigned int K,
-                             const void *quantized_A, const void *B, float *C);
+void gemv_q4_0_rowwise(const unsigned int N, const unsigned int K,
+                       const float *A, const void *B, float *C);
 
 void gemm_q4_0(const unsigned int M, std::vector<unsigned int> Ns,
                const unsigned int K, const float *A, const unsigned int lda,
@@ -1066,13 +1064,6 @@ void unpack_q4_0(const void *in_q4_0x, void *out_q4_0, size_t data_size,
                  const unsigned int M, const unsigned int N);
 
 /**
- * @brief Return storage required for one Q8_0 row
- * @param k Number of elements; must be a multiple of the Q8_0 block size
- * @return Size of the Q8_0 row in bytes
- */
-size_t q8_0_row_size(const unsigned int k);
-
-/**
  * @brief Quantize one row to Q8_0
  * @param src Source row
  * @param dst Preallocated Q8_0 destination
@@ -1081,10 +1072,6 @@ size_t q8_0_row_size(const unsigned int k);
 template <typename T = float>
 void quantize_row_q8_0(const T *__restrict src, void *__restrict dst,
                        int64_t k);
-
-template <>
-void quantize_row_q8_0<float>(const float *__restrict src, void *__restrict dst,
-                              int64_t k);
 
 /**
  * @brief Quantize T to q8_0 Quantization format

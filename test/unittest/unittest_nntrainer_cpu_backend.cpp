@@ -64,6 +64,7 @@ static inline double find_max_diff(T *src, T *src2, int M, int N) {
 }
 
 #define QK4_0 32
+#define QK8_0_TESTONLY 32
 #define Q4_0 32
 /**
  * @brief q4_0 block
@@ -73,6 +74,15 @@ typedef struct {
   uint16_t d;            // delta
   uint8_t qs[QK4_0 / 2]; // nibbles / quants
 } block_q4_0_testonly;
+
+/**
+ * @brief q8_0 block
+ *
+ */
+typedef struct {
+  uint16_t d;                // delta
+  int8_t qs[QK8_0_TESTONLY]; // quants
+} block_q8_0_testonly;
 /**
  * @brief q4_K block
  *
@@ -413,27 +423,19 @@ TEST(nntrainer_cpu_backend_standalone, q4_0_rowwise_gemv) {
   std::vector<char> q4_weight(weight_size);
   nntrainer::quantize_q4_0(weight.data(), q4_weight.data(), N, K, nullptr);
 
-  std::vector<char> q8_activation(nntrainer::q8_0_row_size(K));
-  nntrainer::quantize_row_q8_0(activation.data(), q8_activation.data(), K);
-
-  std::vector<float> output(N);
-  const unsigned int row_split = 17;
-  nntrainer::gemv_q4_0_rowwise_range(0, row_split, K, q8_activation.data(),
-                                     q4_weight.data(), output.data());
-  nntrainer::gemv_q4_0_rowwise_range(row_split, N, K, q8_activation.data(),
-                                     q4_weight.data(), output.data());
-
   constexpr float sentinel = 12345.0f;
-  std::vector<float> ranged_output(N, sentinel);
-  const unsigned int range_begin = 2;
-  const unsigned int range_end = N - 2;
-  nntrainer::gemv_q4_0_rowwise_range(range_begin, range_end, K,
-                                     q8_activation.data(), q4_weight.data(),
-                                     ranged_output.data());
-  nntrainer::gemv_q4_0_rowwise_range(range_begin, range_begin, K,
-                                     q8_activation.data(), q4_weight.data(),
-                                     ranged_output.data());
+  constexpr size_t guard_size = 2;
+  std::vector<float> guarded_output(N + 2 * guard_size, sentinel);
+  float *output = guarded_output.data() + guard_size;
+  nntrainer::gemv_q4_0_rowwise(N, K, activation.data(), q4_weight.data(),
+                               output);
+  nntrainer::gemv_q4_0_rowwise(0, K, activation.data(), q4_weight.data(),
+                               output);
 
+  const size_t activation_size =
+    static_cast<size_t>(K) / QK8_0_TESTONLY * sizeof(block_q8_0_testonly);
+  std::vector<char> q8_activation(activation_size);
+  nntr_quantize_row_q8_0(activation.data(), q8_activation.data(), K);
   std::vector<float> dequant_activation(K);
   nntr_dequantize_row_q8_0(q8_activation.data(), dequant_activation.data(), K);
 
@@ -445,12 +447,11 @@ TEST(nntrainer_cpu_backend_standalone, q4_0_rowwise_gemv) {
     const float expected = nntrainer::sdot(K, dequant_weight.data(), 1,
                                            dequant_activation.data(), 1);
     EXPECT_NEAR(output[row], expected, 1.0e-3f) << "row=" << row;
-    if (row >= range_begin && row < range_end) {
-      EXPECT_NEAR(ranged_output[row], expected, 1.0e-3f) << "row=" << row;
-    } else {
-      EXPECT_EQ(ranged_output[row], sentinel) << "row=" << row;
-    }
   }
+  EXPECT_EQ(guarded_output[0], sentinel);
+  EXPECT_EQ(guarded_output[1], sentinel);
+  EXPECT_EQ(guarded_output[N + guard_size], sentinel);
+  EXPECT_EQ(guarded_output[N + guard_size + 1], sentinel);
 }
 
 /**

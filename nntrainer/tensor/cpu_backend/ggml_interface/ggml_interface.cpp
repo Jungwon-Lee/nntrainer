@@ -18,6 +18,7 @@
 #include <nntr_ggml_impl_utils.h>
 #include <string>
 #include <thread>
+#include <thread_manager.h>
 #include <vector>
 
 namespace nntrainer {
@@ -42,16 +43,6 @@ size_t __ggml_quantize_q6_K(const float *src, void *dst, int64_t nrow,
 size_t __ggml_quantize_q8_0(const float *src, void *dst, int64_t nrow,
                             int64_t n_per_row, const float *quant_weights) {
   return nntr_quantize_q8_0(src, dst, nrow, n_per_row, quant_weights);
-}
-
-size_t __ggml_q8_0_row_size(const unsigned int k) {
-  assert(k % QK8_0 == 0);
-  return sizeof(block_q8_0) * (k / QK8_0);
-}
-
-void __ggml_quantize_row_q8_0(const float *__restrict src, void *__restrict dst,
-                              int64_t k) {
-  nntr_quantize_row_q8_0(src, dst, k);
 }
 
 void __ggml_quantize_row_q6_K(const float *src, void *dst, int64_t k) {
@@ -117,21 +108,39 @@ float __ggml_vec_dot_q6_K(const unsigned int K, const void *__restrict v_q6_K,
   return result;
 }
 
-void __ggml_gemv_q4_0_rowwise_range(const unsigned int row_begin,
-                                    const unsigned int row_end,
-                                    const unsigned int K,
-                                    const void *quantized_A, const void *B,
-                                    float *C) {
+void __ggml_gemv_q4_0_rowwise(const unsigned int N, const unsigned int K,
+                              const float *A, const void *B, float *C) {
   assert(K % QK4_0 == 0);
-  if (row_begin >= row_end)
+  assert(K % QK8_0 == 0);
+  if (N == 0)
     return;
 
-  const size_t blocks_per_row = K / QK4_0;
-  const size_t weight_row_size = sizeof(block_q4_0) * blocks_per_row;
+  const size_t weight_row_size = sizeof(block_q4_0) * (K / QK4_0);
+  const size_t activation_row_size = sizeof(block_q8_0) * (K / QK8_0);
+  std::vector<char> quantized_activation(activation_row_size);
+  nntr_quantize_row_q8_0(A, quantized_activation.data(), K);
+
+  auto &tm = ThreadManager::Global();
+  constexpr size_t rows_per_gemv_group = 4;
+  constexpr size_t chunks_per_thread = 4;
+  const size_t num_row_groups =
+    (N + rows_per_gemv_group - 1) / rows_per_gemv_group;
+  const size_t num_chunks = std::max<size_t>(
+    1,
+    std::min(num_row_groups, static_cast<size_t>(tm.getComputeThreadCount()) *
+                               chunks_per_thread));
+
   const char *weight_data = static_cast<const char *>(B);
-  nntr_gemv_q4_0_q8_0_canonical_rows(K, C + row_begin,
-                                     weight_data + row_begin * weight_row_size,
-                                     quantized_A, row_end - row_begin);
+  tm.parallel_for(0, num_chunks, [&](size_t chunk) {
+    const size_t row_group_begin = chunk * num_row_groups / num_chunks;
+    const size_t row_group_end = (chunk + 1) * num_row_groups / num_chunks;
+    const size_t row_begin = row_group_begin * rows_per_gemv_group;
+    const size_t row_end =
+      std::min<size_t>(N, row_group_end * rows_per_gemv_group);
+    nntr_gemv_q4_0_q8_0_canonical_rows(
+      K, C + row_begin, weight_data + row_begin * weight_row_size,
+      quantized_activation.data(), row_end - row_begin);
+  });
 }
 
 void __ggml_repack_q4_0_to_q4_0_4(void *dst, void *src, size_t data_size,
