@@ -196,6 +196,7 @@ void hvx_dequant_acc_tile_to_f32(const int32_t *tile, uint32_t stride,
    does for n_units <= 1. Doing it here rather than passing NULL keeps the
    kernel's call sites exercised: the range arithmetic they hand the worker
    is part of what this check is for. */
+#ifndef NNTR_HOST_REAL_POOL
 void hvx_worker_pool_run(hvx_worker_pool *pool, hvx_worker_pool_func func,
                          void *ctx, uint32_t n_units) {
   (void)pool;
@@ -234,6 +235,7 @@ void hvx_worker_pool_wait_bg(hvx_worker_pool *pool, hvx_bg_job *job,
   (void)job;
   (void)n;
 }
+#endif
 
 void hvx_copy_ah_block(uint8_t *dst, const uint8_t *src, uint32_t k,
                        hvx_worker_pool *pool) {
@@ -317,9 +319,9 @@ void hvx_dequant_swiglu_acc_tiles_to_f32(
    itself would check the stand-in. */
 void hvx_dq_tiles_worker(uint32_t n_threads, uint32_t i, void *vjob) {
   const hvx_dq_tiles_job *c = (const hvx_dq_tiles_job *)vjob;
-  (void)n_threads;
-  (void)i;
-  for (uint32_t j = 0; j < c->n_tiles; ++j) {
+  const uint32_t lo = (uint32_t)((uint64_t)c->n_tiles * i / n_threads);
+  const uint32_t hi = (uint32_t)((uint64_t)c->n_tiles * (i + 1u) / n_threads);
+  for (uint32_t j = lo; j < hi; ++j) {
     const uint32_t c0 = (c->nt0 + j) * 32u;
     const int32_t *tile =
       (const int32_t *)(c->tiles_base + (size_t)j * c->tile_stride);
@@ -343,10 +345,10 @@ int hexkl_probe_on = 1;
    one above. */
 void hvx_dq_mul_worker(uint32_t n_threads, uint32_t i, void *vjob) {
   const hvx_dq_mul_job *c = (const hvx_dq_mul_job *)vjob;
-  (void)n_threads;
-  (void)i;
+  const uint32_t lo = (uint32_t)((uint64_t)c->n_pairs * i / n_threads);
+  const uint32_t hi = (uint32_t)((uint64_t)c->n_pairs * (i + 1u) / n_threads);
   float at[64 * 32], bt[64 * 32];
-  for (uint32_t j = 0; j < c->n_pairs; ++j) {
+  for (uint32_t j = lo; j < hi; ++j) {
     const uint32_t col = c->c0 + j * 32u;
     hvx_dequant_acc_tile_to_f32(
       (const int32_t *)(c->tiles_base + (size_t)j * c->tile_stride),

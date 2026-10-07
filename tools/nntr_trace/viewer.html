@@ -119,7 +119,7 @@ const $ = s => document.querySelector(s);
 const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
 const CAT = {
   'host.cpu': 'cpu', 'host.rpc': 'rpc', 'host.wait': 'wait', 'host.layer': 'frame', 'host.phase': 'frame', 'host.load': 'load',
-  'dsp.hmx': 'hmx', 'dsp.hvx': 'hvx', 'dsp.dma': 'dma', 'dsp.sync': 'sync', 'dsp.call': 'frame', 'dsp.entry': 'frame', 'qnn.op': 'cpu',
+  'dsp.hmx': 'hmx', 'dsp.hvx': 'hvx', 'dsp.dma': 'dma', 'dsp.dma.bound': 'dma', 'dsp.sync': 'sync', 'dsp.call': 'frame', 'dsp.entry': 'frame', 'qnn.op': 'cpu',
 };
 const LANES = ['dsp.hmx', 'dsp.hvx', 'dsp.dma'];
 const BUSY_CATS = [...LANES, 'host.cpu'];
@@ -180,8 +180,8 @@ function parseEvents(doc, name) {
       while (st.length && st[st.length - 1].ts + st[st.length - 1].dur <= e.ts + 1e-6) st.pop();
       e._d = st.length; maxd = Math.max(maxd, e._d); st.push(e);
       e._cat = CAT[e.cat] || 'sync'; e._th = th; e._i = i;
-      e._op = (e.args && e.args.op) || e.name;
-      e._label = e.args && e.args.op && !e.name.includes(e.args.op) ? e.args.op + ': ' + e.name : e.name;
+      e._op = (e.args && (e.args.op || e.args.operation)) || e.name;
+      e._label = (e.args && e.args.display_label) || (e.args && e.args.op && !e.name.includes(e.args.op) ? e.args.op + ': ' + e.name : e.name);
     });
     th.depth = maxd + 1;
   }
@@ -289,6 +289,7 @@ function layerRows(r, all = T.all) {
   return all.filter(e => e.cat === 'host.layer' && inRange(e, r)).map(e => ({ e, m: metrics({ t0: Math.max(e.ts, r.t0), t1: Math.min(e.ts + e.dur, r.t1) }, all) }));
 }
 function metricsJSON(r = range) {
+  if (T.md.lane_metrics) return T.md.lane_metrics; // complete one-call capture
   const m = metrics(r);
   return {
     schema: 'nntr_trace.metrics.v1', range: { label: r.label, t0_us: r.t0, t1_us: r.t1 }, wall_us: m.wall,
@@ -408,6 +409,9 @@ const fmtShort = v => v >= 1e6 ? (v / 1e6).toFixed(1) + 'M' : v >= 1e3 ? (v / 1e
 // ---------- warnings (W7) ----------
 function warnings(all = T.all, md = T.md) {
   const w = [], fb = all.filter(e => e.args && e.args.fallback);
+  if (md.lane_metrics) w.push({ id: 'lane-fidelity', text: 'Measured DSP callback/API windows. DMA is an outstanding bound, not hardware busy. Use Wall time dependency waits; no-callback gaps are not proven idle.' });
+  if (md.level === 'stage-seq') w.push({ id: 'stage-seq', text: 'DSP stage totals are reconstructed, not measured concurrent timestamps. Idle/compression numbers cannot identify hardware stalls; use a DSP lane capture.' });
+  if (md.dropped_records) w.push({ id: 'lane-dropped', text: `${md.dropped_records} records lost or DMA unfinished: capture is incomplete` });
   const dropped = md.dropped || {};
   if (md.htp_enabled === false) w.push({ id: 'htp', text: 'HTP backend disabled: every op ran on the CPU' });
   if (fb.length) w.push({ id: 'fallback', text: `${fb.length} op(s) fell back to CPU (${fmt(fb.reduce((s, e) => s + e.dur, 0))})`, filter: 'fallback', first: fb[0] });
@@ -581,6 +585,17 @@ const TABS = [
       (Object.keys(a).length ? `<div style="margin-top:8px"><b>Args</b><table>${Object.entries(a).map(([k, v]) => `<tr><td class="k">${esc(k)}</td><td class="mono">${esc(v)}</td></tr>`).join('')}</table></div>` : '');
   } },
   { id: 'wall', label: 'Wall time', render(pane, m) {
+    if (T.md.lane_metrics) {
+      const lm = T.md.lane_metrics;
+      const rows = [['DSP entry', lm.entry_us], ['HMX API windows (incl. acc_read)', lm.hmx_api_window_us], ['HMX × HVX callback overlap', lm.hmx_hvx_overlap_us], ['No HMX API window (NOT hardware idle)', lm.hmx_no_api_window_us]];
+      rows.push(...Object.entries(lm.exposed_wait_us).map(([name, us]) => ['Exposed wait: ' + name, us]));
+      rows.push(...Object.entries(lm.jobs_by_operation || {}).map(([name, j]) => ['Max publish-to-first-start upper bound: ' + name, j.max_publish_to_first_start_upper_us]));
+      pane.innerHTML = '<p class="hint">Full one-call capture metrics (not selection-relative). Hardware idle/utilization and parallel compression are intentionally not inferred.</p>' +
+        `<table>${rows.map(([name, us]) => `<tr><td>${esc(name)}</td><td class="n">${fmt(us)}</td></tr>`).join('')}</table>` +
+        `<p class="hint">${lm.caveats.map(esc).join('<br>')}</p>`;
+      const x = exportButtons(() => JSON.stringify(lm, null, 1), 'lane-metrics.json');
+      pane.append(x); return;
+    }
     const parts = buckets(m);
     pane.innerHTML = `<div class="stack" style="display:flex">${parts.map(p => `<i title="${esc(p[1])} ${fmt(p[2])}" style="width:${p[2] / m.wall * 100}%;background:${bucketBg(p[0])}"></i>`).join('')}</div>
       <table style="margin-top:8px"><tr><th></th><th>bucket</th><th class="n">time</th><th class="n">share</th></tr>${parts.map(p => `<tr><td><span class="sw" style="background:${bucketBg(p[0])}"></span></td><td>${p[1]}</td><td class="n">${fmt(p[2])}</td><td class="n">${pct(p[2] / m.wall)}</td></tr>`).join('')}
@@ -797,6 +812,9 @@ const dpct = (a, b) => a ? (((b - a) / a * 100).toFixed(1) + '%').replace(/^-0\.
 const dcell = (a, b) => `<td class="n" style="color:${b > a * 1.02 ? 'var(--critical)' : b < a * 0.98 ? 'var(--good, #0ca30c)' : 'inherit'}">${dpct(a, b)}</td>`;
 TABS.push({ id: 'cmp', label: 'Compare', enabled: () => T && T.models.length > 1, render(pane) {
   const A = T.models[0], B = T.models[1], rA = rangeFor(0), rB = rangeFor(1);
+  if (A.md.lane_metrics || B.md.lane_metrics) {
+    pane.innerHTML = '<p class="hint">DSP lane captures: compare the separate lane-metrics JSON files. Stage-total idle/compression comparisons do not apply.</p>'; return;
+  }
   const mA = metrics(rA, A.all), mB = metrics(rB, B.all);
   const bk = m => [['cpu', 'CPU', m.cpu], ['rpc', 'FastRPC', m.rpc], ['hmx', 'HMX only', m.hmxOnly], ['ovl', 'HMX ∥ HVX', m.overlap], ['hvx', 'HVX only', m.hvxOnly], ['dma', 'DMA only', m.dmaOnly], ['sync', 'DSP idle', m.idle], ['load', 'load', m.load], ['frame', 'other', m.other]];
   const scale = Math.max(mA.wall, mB.wall);

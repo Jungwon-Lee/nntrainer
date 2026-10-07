@@ -14,6 +14,13 @@
 #include <stdlib.h>
 #include <string.h>
 
+#ifndef CHECK_CONV_CHANNELS
+#define CHECK_CONV_CHANNELS 544u
+#endif
+#ifndef CHECK_CONV_OUT
+#define CHECK_CONV_OUT 1056u
+#endif
+
 /* The reference: one row of x at a time through in_proj's three slices,
    the conv over the previous rows' gate values, out_proj. */
 static void ref_block(const W *wa, const W *wb, const W *wc, const W *wo,
@@ -85,13 +92,22 @@ static int compare(const char *what, const float *got, const float *want,
 }
 
 int main(void) {
+#ifdef NNTR_HOST_REAL_POOL
+  hvx_worker_pool *pool = hvx_worker_pool_create(3);
+  if (!pool)
+    return 1;
+#else
+  hvx_worker_pool *pool = NULL;
+#endif
   /* Shapes small enough to run in seconds and awkward on purpose: M is
      three blocks with a short last one; C is 17 tiles, one more than the
      16 pairs a staging buffer holds, so phase 1 has a full batch and a
      one-pair batch and the second staging buffer is used; N_out is 33
      tiles, two out_proj batches; K != C != N_out, so a slot sized for the
      wrong weight would show. */
-  const uint32_t M = 150, K = 64, C = 544, N_out = 1056;
+  const uint32_t M = 150, K = 64, C = CHECK_CONV_CHANNELS,
+                 N_out = CHECK_CONV_OUT;
+  printf("shape M=%u K=%u C=%u N=%u\n", M, K, C, N_out);
   static uint8_t vtcm[8u << 20];
 
   hexkl_conv_block_layout L;
@@ -121,7 +137,7 @@ int main(void) {
   hexkl_moe_scratch scratch = {NULL, NULL, 0};
   rc =
     hexkl_conv_block_run(&g_tbl, vtcm, sizeof vtcm, sizeof vtcm, M, K, C, N_out,
-                         0, 1, 2, 3, conv_w, x, got, got_state, NULL, &scratch);
+                         0, 1, 2, 3, conv_w, x, got, got_state, pool, &scratch);
   printf("run rc=%d\n", rc);
   if (rc)
     return 1;
@@ -159,7 +175,7 @@ int main(void) {
     float *wst1 = (float *)malloc(sizeof(float) * 2 * C);
     int r = hexkl_conv_block_run(&g_tbl, vtcm, sizeof vtcm, sizeof vtcm, 1, K,
                                  C, N_out, 0, 1, 2, 3, conv_w, x, got1, st1,
-                                 NULL, &scratch);
+                                 pool, &scratch);
     ref_block(&wa, &wb, &wc, &wo, conv_w, x, 1, K, C, N_out, want1, wst1);
     int ok = (r == 0) && !compare("M=1 output", got1, want1, N_out) &&
              !compare("M=1 state", st1, wst1, 2u * C);
@@ -174,7 +190,7 @@ int main(void) {
   {
     int r = hexkl_conv_block_run(&g_tbl, vtcm, sizeof vtcm, sizeof vtcm, M, K,
                                  C, N_out, 0, 1, 3, 3, conv_w, x, got,
-                                 got_state, NULL, &scratch);
+                                 got_state, pool, &scratch);
     printf("bad handle shape  : rc=%d (want %d)\n", r, AEE_EBADPARM);
     fail |= (r != AEE_EBADPARM);
   }
@@ -189,7 +205,30 @@ int main(void) {
     printf("4 MB arena        : rc=%d (want %d)\n", r, AEE_ENOMEMORY);
     fail |= (r != AEE_ENOMEMORY);
   }
+  /* Reuse both pipeline slots and scratch across lengths around the
+     four-row pack, stage-unit and 64-row block boundaries. The async
+     build links the real pool: foreground dequant and background stages
+     run concurrently while the caller reuses staging buffers. */
+  const uint32_t lengths[] = {2u,  3u,  4u,  7u,  8u,  9u,   15u,  16u, 17u,
+                              63u, 64u, 65u, 66u, 67u, 127u, 128u, 129u};
+  for (size_t i = 0; i < sizeof(lengths) / sizeof(lengths[0]); ++i) {
+    const uint32_t rows = lengths[i];
+    memset(got, 0xa5, sizeof(float) * M * N_out);
+    memset(got_state, 0xa5, sizeof(float) * 2u * C);
+    int r = hexkl_conv_block_run(&g_tbl, vtcm, sizeof vtcm, sizeof vtcm, rows,
+                                 K, C, N_out, 0, 1, 2, 3, conv_w, x, got,
+                                 got_state, pool, &scratch);
+    ref_block(&wa, &wb, &wc, &wo, conv_w, x, rows, K, C, N_out, want,
+              want_state);
+    printf("row boundary M=%u rc=%d\n", rows, r);
+    fail |= r != 0;
+    fail |= compare("boundary output", got, want, (size_t)rows * N_out);
+    fail |= compare("boundary state", got_state, want_state, 2u * C);
+  }
   printf(fail ? "\nFAIL\n" : "\nALL CHECKS PASS\n");
+#ifdef NNTR_HOST_REAL_POOL
+  hvx_worker_pool_destroy(pool);
+#endif
   hexkl_moe_scratch_free(&scratch);
   return fail;
 }

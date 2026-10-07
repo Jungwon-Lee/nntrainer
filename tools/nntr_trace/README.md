@@ -64,7 +64,126 @@ holding that call's stage totals on their lanes, with prefill and each
 decode token marked as phases. Stage totals are laid out sequentially
 inside a call, which the metadata states; the one measured overlap is the
 MoE layer kernel's SwiGLU worker time, drawn under its HMX span. General
-lane overlap needs the DSP-side ring of P3 in the plan document.
+lane overlap needs DSP timestamps; use the bounded capture below for MoE or conv.
+
+### Measured parallel MoE / conv capture
+
+Build **both** the DSP skel (`test/htp/build.sh`) and ARM client/library
+(`generate_stub.sh`, then your Android build) from the same IDL revision.
+`build.sh` supports the flat SDK addon layout and the versioned beta layout.
+For the older two-argument HexKL initializer, set `NNTR_HEXKL_HW_INIT_2ARG=1`.
+
+Capture one matching production call, without stage probes or repetition:
+
+```bash
+# Add to the model run's environment (an absolute writable device path):
+export NNTR_DSP_LANE_TRACE=/data/local/tmp/model-m512.bin
+export NNTR_DSP_LANE_KIND=moe # default moe; conv selects the fused conv block
+export NNTR_DSP_LANE_M=512   # default 1; exact M match
+export NNTR_DSP_LANE_SKIP=1  # default 0; skip matching calls, e.g. a warmup
+# Run the model here, then pull/convert on the host:
+
+adb pull /data/local/tmp/model-m512.bin
+python3 tools/nntr_trace/lane_trace_to_trace.py model-m512.bin \
+  -o model-m512.json --metrics model-m512-metrics.json
+python3 tools/nntr_trace/bundle.py -o lanes.html --trace model=model-m512.json
+```
+
+The selected call is excluded from the aggregate `NNTR_HTP_PROFILE` summary,
+since its stage probes are disabled. Extraction and file I/O happen after
+the call timer stops; end-to-end inference time still includes extraction.
+Capture prefill and decode in separate runs. Selection is one-shot per process
+and serialized by the existing invoke mutex. Unset the variable for normal use.
+An old skel without the appended trace methods produces an explicit RPC error.
+
+For conv, enable `"conv_block_engine": "htp"` in `nntr_config.json` and set
+`NNTR_DSP_LANE_KIND=conv`. The current model path offloads prefill (`M>1`)
+with Q4_0 projections; decode remains on the CPU. `M` must match the actual
+prefill row count. At `M=512`, `SKIP=1` skips the load-time conv warmup;
+other kinds do not consume the skip count. Rebuild both the library and
+DSP skel for the new selection and conv event names.
+
+Conv tracks distinguish HMX a/c, b and out_proj batches, a/c dequant +
+multiply, b/out dequant, and the fused conv/gate/requant/pack stage. Stage
+units own four rows by default, with four-row-aligned AH pack stores.
+Short units let workers return sooner to foreground dequant when a stage
+callback overlaps its publication; the worker pool cannot interrupt a
+callback already running. Device A/B timing is needed to verify the tradeoff
+between foreground response time and the extra unit scheduling overhead.
+`HEXKL_CONV_STAGE_UNIT_ROWS=4`, `8` or `16` when building the skel allows
+device comparisons of scheduling overhead and foreground response time.
+Each unit completes its own gate before scanning and packing those rows;
+there is no block-wide gate barrier or single-worker requant job.
+The out_proj waits for all units of its input block before reading it.
+
+The isolated conv check builds and saves output **and state** for M=1, 3,
+63, 65, 150 and 512, with four distinct projection weights:
+
+```bash
+ANDROID_NDK=/path/to/ndk HEXAGON_SDK_ROOT=/path/to/sdk \
+  bash test/htp/build_conv_block_bench.sh
+# Deploy conv_block_bench and a matching skel in an isolated directory:
+ADSP_LIBRARY_PATH=. ./conv_block_bench baseline 40
+ADSP_LIBRARY_PATH=. ./conv_block_bench optimized 40 lane
+```
+
+Use the baseline skel for the first command and the optimized skel for the
+second. Compare each corresponding `*-m<M>.f32` file byte for byte; these
+contain the output followed by the two-row state. The `lane` run also
+saves `*-m<M>.bin` captures for `lane_trace_to_trace.py`. Timing samples
+exclude capture and extraction and have stage probes enabled on both
+sides. M=1 tests the kernel's empty-history edge, not stateful decode.
+The current FP32 HVX kernels build for v79; targeting v75 with this SDK
+fails instruction selection for the existing IEEE vector add/multiply
+intrinsics and requires a separate arithmetic implementation.
+
+All timestamps share the DSP qtimer; they are **not** aligned with the host
+clock. HVX tracks use physical worker IDs, not callback slice/unit indices.
+Lane slices display the operation (FC matmul gate/up/down or conv projection,
+dequant, quant/requant, pack, and fused callbacks). Hover or click for the
+original event and job/block details; fused operations retain one measured
+window. `Color: op` assigns colors by operation. For labeled SVG exports:
+
+```bash
+python3 tools/nntr_trace/render_lane_timeline.py model-m512.json -o timeline.svg
+python3 tools/nntr_trace/render_lane_timeline.py model-m512.json \
+  --start-us 0 --end-us 1000 -o timeline-detail.svg
+```
+
+HMX spans include the synchronous batch API and accumulator read. DMA spans
+are issue-to-observed-completion **bounds**, with the last observed incomplete
+timestamp retained; they do not prove hardware DMA activity. The converter
+rejects malformed clocks and exits nonzero for dropped records/unfinished DMA.
+
+Use `exposed_wait_us`, job publish-to-start bounds, worker finish tails, and
+`longest_hmx_no_api_windows` to find dependencies delaying the caller.
+Background waits subtract time the caller spends helping HVX work.
+`callback_threads.no_callback_us` means no instrumented callback, **not**
+hardware idle or scheduler sleep. Publish-to-start also includes publication,
+wake costs and (for background jobs) dependency gating, not just scheduling.
+These measurements identify exposed stalls, not a full dependency-DAG critical
+path or PMU utilization. Generic stage-total idle/compression metrics are
+intentionally replaced in the viewer's Wall time pane and CLI summary.
+
+For a model-independent output/overhead check, build the isolated client:
+
+```bash
+ANDROID_NDK=/path/to/ndk HEXAGON_SDK_ROOT=/path/to/sdk \
+  bash test/htp/build_lane_trace_bench.sh
+# Deploy the bench and matching skel to a separate device directory, then:
+ADSP_LIBRARY_PATH=. ./lane_trace_bench lane 40
+ADSP_LIBRARY_PATH=. ./lane_trace_bench timed-lane 40 timed
+```
+
+This uses synthetic distinct weights, K=2048/I=1792, top-4/32 experts,
+M=1 and 512. It alternates ON/OFF order and verifies identical finite outputs.
+Default results time production RPCs; `timed` additionally compares DSP totals
+with the existing stage probes enabled on **both** sides. Neither is a model
+throughput claim. The trace buffer is bounded (4096 records per physical
+thread, eight threads); inspect capture completeness before drawing conclusions.
+Captures longer than the 32-bit qtimer-relative range (~224 seconds) are
+marked incomplete. Use a single process/session during capture, as the
+underlying DMA ring and existing stage probes are also DSP-global.
 
 ## Viewer
 

@@ -19,6 +19,7 @@
  */
 
 #include "hvx_worker_pool.h"
+#include "../hmx/hexkl_lane_trace.h"
 
 #include <stdatomic.h>
 #include <stdio.h>
@@ -69,6 +70,7 @@ struct hvx_worker_pool_s {
       index k-1 of n_threads instead of index k. */
   int async;
   int outstanding; /**< caller-side: a submit not yet waited for */
+  uint32_t trace_job, trace_kind;
 
   /** The background lane: a ring of caller-owned jobs in submit order.
       Workers scan from head; a job's units are claimable only once every
@@ -86,7 +88,7 @@ struct hvx_worker_pool_s {
 };
 
 /** @brief Claims and runs one unit of @a job; 0 when it has none left. */
-static int hvx_worker_pool_bg_take_from(hvx_bg_job *job) {
+static int hvx_worker_pool_bg_take_from(hvx_bg_job *job, uint32_t writer) {
   uint32_t u = atomic_load_explicit(&job->next, memory_order_relaxed);
   for (;;) {
     if (u >= job->n_units) {
@@ -97,7 +99,10 @@ static int hvx_worker_pool_bg_take_from(hvx_bg_job *job) {
       break;
     }
   }
+  HLT_BEGIN(trace_t0);
   job->func(job->n_units, u, job->ctx);
+  HLT_END(writer, job->trace_kind, trace_t0, job->trace_job, u, job->n_units,
+          1);
   atomic_store_explicit((_Atomic uint8_t *)&job->done[u], 1,
                         memory_order_release);
   if (atomic_fetch_add_explicit(&job->n_done, 1u, memory_order_acq_rel) + 1u ==
@@ -110,7 +115,7 @@ static int hvx_worker_pool_bg_take_from(hvx_bg_job *job) {
 /** @brief Claims and runs one background unit from the oldest job that has
  *         one, stopping at the first incomplete job that has none left --
  *         the jobs behind it are gated on it. 0 when there is nothing. */
-static int hvx_worker_pool_bg_take_one(hvx_worker_pool *pool) {
+static int hvx_worker_pool_bg_take_one(hvx_worker_pool *pool, uint32_t writer) {
   const uint32_t tail =
     atomic_load_explicit(&pool->bg_tail, memory_order_acquire);
   for (uint32_t i = atomic_load_explicit(&pool->bg_head, memory_order_relaxed);
@@ -119,7 +124,7 @@ static int hvx_worker_pool_bg_take_one(hvx_worker_pool *pool) {
     if (atomic_load_explicit(&job->complete, memory_order_acquire)) {
       continue;
     }
-    return hvx_worker_pool_bg_take_from(job);
+    return hvx_worker_pool_bg_take_from(job, writer);
   }
   return 0;
 }
@@ -145,7 +150,10 @@ static void hvx_worker_pool_thread_entry(void *arg) {
       prev_fg = fg;
       const uint32_t idx = pool->async ? (me->id - 1u) : me->id;
       if (idx < pool->n_threads) {
+        HLT_BEGIN(trace_t0);
         pool->func(pool->n_threads, idx, pool->ctx);
+        HLT_END(me->id, pool->trace_kind, trace_t0, pool->trace_job, idx,
+                pool->n_threads, 0);
         atomic_fetch_sub_explicit(&pool->barrier, 1, memory_order_release);
       }
       // me->id >= pool->n_threads: this run didn't need this worker.
@@ -153,7 +161,7 @@ static void hvx_worker_pool_thread_entry(void *arg) {
     }
     /* One background unit, then back to the top: a foreground job that
        arrived meanwhile is served before the next unit. */
-    if (hvx_worker_pool_bg_take_one(pool)) {
+    if (hvx_worker_pool_bg_take_one(pool, me->id)) {
       continue;
     }
     /* Spin before sleeping. The MoE kernel submits an epilogue every ~47
@@ -262,10 +270,12 @@ void hvx_worker_pool_wait(hvx_worker_pool *pool) {
   if (!pool || !pool->outstanding) {
     return;
   }
+  HLT_BEGIN(trace_t0);
   while (atomic_load_explicit(&pool->barrier, memory_order_relaxed) > 0) {
     hvx_worker_pool_pause();
   }
   atomic_thread_fence(memory_order_acquire);
+  HLT_END(0, HLT_WAIT_FG, trace_t0, pool->trace_job, pool->trace_kind, 0, 0);
   pool->outstanding = 0;
 }
 
@@ -275,7 +285,12 @@ void hvx_worker_pool_submit(hvx_worker_pool *pool, hvx_worker_pool_func func,
     return;
   }
   if (!pool || pool->n_workers == 0) {
+    HLT_BEGIN(trace_t0);
+    const uint32_t job = pool ? hexkl_lane_trace_job() : 0;
     func(1u, 0, ctx); /* see run: one slice, the whole range */
+    if (pool)
+      HLT_END(0, hexkl_lane_trace_kind((uintptr_t)func, HLT_WORKER), trace_t0,
+              job, 0, 1, 0);
     return;
   }
   hvx_worker_pool_wait(pool);
@@ -289,11 +304,15 @@ void hvx_worker_pool_submit(hvx_worker_pool *pool, hvx_worker_pool_func func,
   pool->n_threads = n;
   pool->async = 1;
   pool->outstanding = 1;
+  pool->trace_job = hexkl_lane_trace_job();
+  pool->trace_kind = hexkl_lane_trace_kind((uintptr_t)func, HLT_WORKER);
+  HLT_BEGIN(trace_submit);
   atomic_store_explicit(&pool->barrier, n, memory_order_relaxed);
   /* Publish, then wake everyone -- run() explains why everyone. */
   atomic_fetch_add_explicit(&pool->fg_id, 1, memory_order_release);
   atomic_fetch_add_explicit(&pool->seqn, 1, memory_order_release);
   qurt_futex_wake(&pool->seqn, (int)pool->n_workers);
+  HLT_END(0, HLT_SUBMIT, trace_submit, pool->trace_job, pool->trace_kind, n, 0);
 }
 
 /** @brief Pops complete jobs off the head of the ring. Caller-side. */
@@ -321,9 +340,13 @@ void hvx_worker_pool_submit_bg(hvx_worker_pool *pool, hvx_bg_job *job) {
   atomic_init(&job->n_done, 0);
   atomic_init(&job->complete, 0);
   job->low = 0;
+  job->trace_job = hexkl_lane_trace_job();
+  job->trace_kind = hexkl_lane_trace_kind((uintptr_t)job->func, HLT_BG_UNIT);
   if (!pool || pool->n_workers == 0) {
     for (uint32_t u = 0; u < job->n_units; ++u) {
+      HLT_BEGIN(trace_t0);
       job->func(job->n_units, u, job->ctx);
+      HLT_END(0, job->trace_kind, trace_t0, job->trace_job, u, job->n_units, 1);
       job->done[u] = 1;
     }
     atomic_store_explicit(&job->n_done, job->n_units, memory_order_relaxed);
@@ -346,10 +369,13 @@ void hvx_worker_pool_submit_bg(hvx_worker_pool *pool, hvx_bg_job *job) {
   const uint32_t tail =
     atomic_load_explicit(&pool->bg_tail, memory_order_relaxed);
   pool->bg_ring[tail % HVX_WORKER_POOL_BG_DEPTH] = job;
+  HLT_BEGIN(trace_submit);
   /* The job and its slot are visible before the tail that announces it. */
   atomic_store_explicit(&pool->bg_tail, tail + 1u, memory_order_release);
   atomic_fetch_add_explicit(&pool->seqn, 1, memory_order_release);
   qurt_futex_wake(&pool->seqn, (int)pool->n_workers);
+  HLT_END(0, HLT_SUBMIT, trace_submit, job->trace_job, job->trace_kind,
+          job->n_units, 1);
 }
 
 void hvx_worker_pool_wait_bg(hvx_worker_pool *pool, hvx_bg_job *job,
@@ -357,9 +383,10 @@ void hvx_worker_pool_wait_bg(hvx_worker_pool *pool, hvx_bg_job *job,
   if (!pool || !job || pool->n_workers == 0) {
     return; /* inline jobs are complete at submit */
   }
+  HLT_BEGIN(trace_t0);
   if (n >= job->n_units) {
     while (!atomic_load_explicit(&job->complete, memory_order_acquire)) {
-      if (!hvx_worker_pool_bg_take_one(pool)) {
+      if (!hvx_worker_pool_bg_take_one(pool, 0)) {
         hvx_worker_pool_pause();
       }
     }
@@ -368,12 +395,13 @@ void hvx_worker_pool_wait_bg(hvx_worker_pool *pool, hvx_bg_job *job,
       if (atomic_load_explicit((_Atomic uint8_t *)&job->done[job->low],
                                memory_order_acquire)) {
         job->low++;
-      } else if (!hvx_worker_pool_bg_take_one(pool)) {
+      } else if (!hvx_worker_pool_bg_take_one(pool, 0)) {
         hvx_worker_pool_pause();
       }
     }
   }
   hvx_worker_pool_bg_pop(pool);
+  HLT_END(0, HLT_WAIT_BG, trace_t0, job->trace_job, job->trace_kind, n, 0);
 }
 
 void hvx_worker_pool_run(hvx_worker_pool *pool, hvx_worker_pool_func func,
@@ -388,7 +416,14 @@ void hvx_worker_pool_run(hvx_worker_pool *pool, hvx_worker_pool_func func,
        got a revert out of it. The trap was left in place and documented;
        this removes it. Callers that pass NULL now get the whole range on
        the calling thread, which is what every one of them meant. */
+    HLT_BEGIN(trace_t0);
+    const uint32_t job = pool ? hexkl_lane_trace_job() : 0;
     func(1u, 0, ctx);
+    /* NULL-pool calls can be nested inside a worker callback. The enclosing
+       callback already measures them on the correct physical writer. */
+    if (pool)
+      HLT_END(0, hexkl_lane_trace_kind((uintptr_t)func, HLT_WORKER), trace_t0,
+              job, 0, 1, 0);
     return;
   }
 
@@ -401,6 +436,8 @@ void hvx_worker_pool_run(hvx_worker_pool *pool, hvx_worker_pool_func func,
   pool->ctx = ctx;
   pool->n_threads = n;
   pool->async = 0;
+  pool->trace_job = hexkl_lane_trace_job();
+  pool->trace_kind = hexkl_lane_trace_kind((uintptr_t)func, HLT_WORKER);
   atomic_store_explicit(&pool->barrier, n - 1u, memory_order_relaxed);
 
   // Publish the job, then wake every worker -- not just the n-1 that will
@@ -414,12 +451,16 @@ void hvx_worker_pool_run(hvx_worker_pool *pool, hvx_worker_pool_func func,
   atomic_fetch_add_explicit(&pool->seqn, 1, memory_order_release);
   qurt_futex_wake(&pool->seqn, (int)pool->n_workers);
 
+  HLT_BEGIN(trace_t0);
   func(n, 0, ctx); // the calling thread is worker 0
+  HLT_END(0, pool->trace_kind, trace_t0, pool->trace_job, 0, n, 0);
 
+  HLT_BEGIN(trace_wait);
   while (atomic_load_explicit(&pool->barrier, memory_order_relaxed) > 0) {
     hvx_worker_pool_pause();
   }
   // Pairs with each worker's release store to barrier: makes every
   // worker's writes to ctx visible to the calling thread from here on.
   atomic_thread_fence(memory_order_acquire);
+  HLT_END(0, HLT_WAIT_FG, trace_wait, pool->trace_job, pool->trace_kind, 0, 0);
 }

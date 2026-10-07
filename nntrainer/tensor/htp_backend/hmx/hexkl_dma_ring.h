@@ -58,4 +58,7 @@ void hexkl_dma_ring_wait(uint32_t idx);
 /** @brief Blocks until every queued transfer has completed. */
 void hexkl_dma_ring_drain(void);
 
+/** @brief Completion observation for optional lane tracing. */
+int hexkl_dma_ring_is_done(uint32_t idx);
+
 #endif /* __NNTRAINER_HEXKL_DMA_RING_H__ */

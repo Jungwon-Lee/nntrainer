@@ -19,6 +19,7 @@
 #include <hexagon_types.h>
 #include <hvx_hexagon_protos.h>
 
+#include "../hmx/hexkl_lane_trace.h"
 #include "hvx_convert.h"
 #include "hvx_quant_u8.h"
 
@@ -358,3 +359,10 @@ int hvx_quant_pack_u8_ah_mapped(const float *x, const uint32_t *row_map,
   }
   return AEE_SUCCESS;
 }
+
+#ifdef NNTR_DSP_LANE_TRACE
+void hvx_quant_u8_trace_register(void) {
+  hexkl_lane_trace_func((uintptr_t)quant_rows_worker, HLT_QUANT);
+  hexkl_lane_trace_func((uintptr_t)quant_pack_worker, HLT_QUANT);
+}
+#endif

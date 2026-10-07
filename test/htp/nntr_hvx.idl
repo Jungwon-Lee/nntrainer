@@ -420,4 +420,10 @@ interface nntr_hvx : remote_handle64 {
    // method.
    AEEResult int_epilogue_selfcheck(in uint32 seed, rout sequence<uint32> counts);
 
+   // Arm one MoE call; copy after it joins all workers. Appended to keep
+   // existing method ordinals unchanged. Raw qtimer events, schema in
+   // hexkl_lane_trace.h; read-back is outside the measured kernel window.
+   AEEResult lane_trace_control(in uint32 enable);
+   AEEResult lane_trace_read(rout sequence<uint32> words, rout uint32 used);
+
 };

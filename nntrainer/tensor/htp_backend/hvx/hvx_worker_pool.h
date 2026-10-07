@@ -97,6 +97,8 @@ typedef struct {
   _Atomic uint32_t n_done; /**< finished units */
   _Atomic int complete;    /**< n_done == n_units */
   uint32_t low;            /**< caller-side: units [0, low) seen done */
+  uint32_t trace_job;      /**< optional profiler correlation id */
+  uint32_t trace_kind;     /**< optional profiler operation kind */
 } hvx_bg_job;
 
 /** @brief How many background jobs can be queued before submit_bg has to

@@ -16,6 +16,7 @@
  */
 
 #include "hexkl_dma_ring.h"
+#include "hexkl_lane_trace.h"
 
 #include <hexagon_protos.h>
 #include <hexagon_types.h>
@@ -65,12 +66,15 @@ static hexkl_dma_desc2d *g_tail;
 static int g_started;
 
 static void hexkl_dma_ring_wait_idx_(uint32_t i) {
+  HLT_BEGIN(trace_t0);
   long guard = 0;
   while (!g_ring[i].done && guard++ < 50000000L) {
     unsigned r = 0;
     asm volatile(" %0 = dmpoll" : "=r"(r) : : "memory");
     (void)r;
   }
+  HLT_END(0, HLT_WAIT_DMA, trace_t0, hexkl_lane_trace_dma_id(i), i, 0, 0);
+  hexkl_lane_trace_dma_sample();
 }
 
 void hexkl_dma_ring_reset(void) {
@@ -84,6 +88,8 @@ void hexkl_dma_ring_reset(void) {
 void hexkl_dma_ring_push2d(void *dst, const void *src, uint32_t dst_stride,
                            uint32_t src_stride, uint32_t row_size,
                            uint32_t nrows, int src_vtcm, int dst_vtcm) {
+  HLT_BEGIN(trace_t0);
+  hexkl_lane_trace_dma_sample();
   if (((g_push + 1) & (HEXKL_DMA_RING_N - 1)) == g_pop) {
     // Ring full: the oldest transfer must have already finished by the time
     // we have wrapped this far around, so reclaiming it is a formality, not
@@ -120,10 +126,18 @@ void hexkl_dma_ring_push2d(void *dst, const void *src, uint32_t dst_stride,
     hexkl_dma_link(g_tail, d);
   }
   g_tail = d;
+  if (hexkl_lane_trace_on) {
+    hexkl_lane_trace_dma_issue(g_push, row_size * nrows, trace_t0);
+    HLT_END(0, HLT_DMA_PUSH, trace_t0, row_size * nrows, g_push, 0, 0);
+  }
   g_push = (g_push + 1) & (HEXKL_DMA_RING_N - 1);
 }
 
 uint32_t hexkl_dma_ring_next_idx(void) { return g_push; }
+
+int hexkl_dma_ring_is_done(uint32_t idx) {
+  return g_ring[idx & (HEXKL_DMA_RING_N - 1)].done != 0;
+}
 
 void hexkl_dma_ring_wait(uint32_t idx) {
   /* Descriptors are dmlinked, so they retire in push order and waiting on

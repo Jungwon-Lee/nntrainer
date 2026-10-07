@@ -75,6 +75,7 @@
 
 #include <remote.h>
 
+#include "hmx/hexkl_lane_trace.h"
 #include <nntr_hvx.h>
 
 namespace nntrainer {
@@ -1564,6 +1565,66 @@ private:
     profile.addInvokeFused(M, K, N, t0, elapsed, timed ? stage_us : nullptr);
   }
 
+  /** @brief Arm one matching call. Both callers hold invoke_mutex_, so
+   *  selection, arming and extraction share one process-wide capture. The
+   *  default preserves MoE capture; conv must be selected explicitly. */
+  static const char *armLaneCapture(remote_handle64 session, unsigned int M,
+                                    const char *kind) {
+    static const char *path = std::getenv("NNTR_DSP_LANE_TRACE");
+    static const char *selected_kind = [] {
+      const char *v = std::getenv("NNTR_DSP_LANE_KIND");
+      return v ? v : "moe";
+    }();
+    static const unsigned selected_m = [] {
+      const char *v = std::getenv("NNTR_DSP_LANE_M");
+      return v ? static_cast<unsigned>(std::strtoul(v, nullptr, 10)) : 1u;
+    }();
+    static unsigned skip = [] {
+      const char *v = std::getenv("NNTR_DSP_LANE_SKIP");
+      return v ? static_cast<unsigned>(std::strtoul(v, nullptr, 10)) : 0u;
+    }();
+    static bool captured = false;
+    if (!path || !*path || captured || M != selected_m ||
+        std::strcmp(kind, selected_kind) != 0)
+      return nullptr;
+    if (skip) {
+      --skip;
+      return nullptr;
+    }
+    const int rc = nntr_hvx_lane_trace_control(session, 1);
+    if (rc != AEE_SUCCESS)
+      throw std::runtime_error("DSP lane trace control failed: " +
+                               std::to_string(rc));
+    captured = true;
+    return path;
+  }
+
+  /** @brief Extract only after the RPC timer stops. */
+  static void saveLaneCapture(remote_handle64 session, const char *path,
+                              const char *kind, unsigned int M, unsigned int K,
+                              unsigned int N) {
+    std::vector<uint32_t> words(HEXKL_LANE_TRACE_MAX_WORDS);
+    uint32_t used = 0;
+    const int rc = nntr_hvx_lane_trace_read(
+      session, words.data(), static_cast<int>(words.size()), &used);
+    if (rc != AEE_SUCCESS || used < HEXKL_LANE_TRACE_HEADER_WORDS ||
+        used > words.size())
+      throw std::runtime_error("DSP lane trace read failed: " +
+                               std::to_string(rc));
+    FILE *f = std::fopen(path, "wb");
+    if (!f)
+      throw std::runtime_error("Cannot open DSP lane trace output");
+    const bool saved =
+      std::fwrite(words.data(), sizeof(uint32_t), used, f) == used;
+    const int close_rc = std::fclose(f);
+    if (!saved || close_rc)
+      throw std::runtime_error("Cannot write DSP lane trace output");
+    std::fprintf(stderr,
+                 "[DSP-LANE] kind=%s M=%u K=%u N=%u records=%u "
+                 "dropped=%u entry_us=%.3f path=%s\n",
+                 kind, M, K, N, words[3], words[4], words[5] / 19.2, path);
+  }
+
   /** @brief [doc 46] One call for the whole layer.
    *
    *  The activation goes over once instead of once per expert, and the
@@ -1598,7 +1659,9 @@ private:
 
     HtpProfile &profile = HtpProfile::global();
     uint32_t stage_us[HTP_MOE_N_STAGES] = {0};
-    const bool timed = profile.level() >= 2;
+    const char *lane_path = armLaneCapture(session, M, "moe");
+    const bool lane_capture = lane_path != nullptr;
+    const bool timed = profile.level() >= 2 && !lane_capture;
     // NNTR_HTP_PROFILE=3 runs the call several times on the same input and
     // keeps the fastest. Two runs with no functional change between them
     // differed by 4.5 ms of DSP time (doc 46 section 23.2) -- the
@@ -1608,7 +1671,7 @@ private:
     // Repeating inside one call puts the comparison at the same temperature
     // and the same contention, and the output is unchanged because the
     // input is.
-    const int reps = (profile.level() >= 3) ? 5 : 1;
+    const int reps = (profile.level() >= 3 && !lane_capture) ? 5 : 1;
     // The trace places the call at the first rep's start; with reps > 1 the
     // fastest rep's stages describe a call that ran later in that window.
     const uint64_t t_call = profile.level() ? HtpProfile::nowUs() : 0;
@@ -1665,7 +1728,9 @@ private:
         " failed: err=" + std::to_string(err) + hint);
     }
     stagedMemcpy(out, out_f32, static_cast<size_t>(out_len) * sizeof(float));
-    if (profile.level()) {
+    if (lane_capture)
+      saveLaneCapture(session, lane_path, "moe", M, K, N_out);
+    if (profile.level() && !lane_capture) {
       profile.addInvokeMoeLayer(M, K, N_out, static_cast<unsigned>(h_gu.size()),
                                 t_call, elapsed, timed ? stage_us : nullptr,
                                 kind);
@@ -1706,7 +1771,9 @@ private:
 
     HtpProfile &profile = HtpProfile::global();
     uint32_t stage_us[HTP_MOE_N_STAGES] = {0};
-    const bool timed = profile.level() >= 2;
+    const char *lane_path = armLaneCapture(session, M, "conv");
+    const bool lane_capture = lane_path != nullptr;
+    const bool timed = profile.level() >= 2 && !lane_capture;
     const uint64_t t0 = profile.level() ? HtpProfile::nowUs() : 0;
     const int err =
       timed ? nntr_hvx_mm_u8i4_conv_block_timed(
@@ -1736,7 +1803,9 @@ private:
     stagedMemcpy(out, out_f32, static_cast<size_t>(out_len) * sizeof(float));
     std::memcpy(state, state_f32,
                 static_cast<size_t>(state_len) * sizeof(float));
-    if (profile.level()) {
+    if (lane_capture)
+      saveLaneCapture(session, lane_path, "conv", M, K, N_out);
+    if (profile.level() && !lane_capture) {
       profile.addInvokeMoeLayer(M, K, N_out,
                                 static_cast<unsigned>(ch.h_in.size()), t0,
                                 elapsed, timed ? stage_us : nullptr,

@@ -10,6 +10,8 @@
 # Override HexKL with:      HEXKL_ROOT=/path/to/hexkl_addon ./build.sh
 # Integer MoE epilogue:      HEXKL_MOE_INT_EPILOGUE=1 ./build.sh   (doc 53 section 9;
 #                            an A/B against the f32 epilogue is two skels)
+# Conv stage row groups:    HEXKL_CONV_STAGE_UNIT_ROWS=16 ./build.sh
+#                            (default 4; multiples of 4, at most 64)
 #   ... its C reference instead of the HVX version: add HEXKL_INT_EPILOGUE_SCALAR=1
 
 set -eu
@@ -36,6 +38,9 @@ if [ -z "${HEXKL_SDK_VER:-}" ]; then
 fi
 HEXKL_TOOLS_VARIANT="${HEXKL_TOOLS_VARIANT:-toolv19}"
 HEXKL_LIB="$HEXKL_ROOT/lib/$HEXKL_SDK_VER/hexagon_${HEXKL_TOOLS_VARIANT}_${HEX_ARCH}/libhexkl_micro.a"
+if [ -f "$HEXKL_ROOT/lib/hexagon_${HEXKL_TOOLS_VARIANT}_${HEX_ARCH}/libhexkl_micro.a" ]; then
+    HEXKL_LIB="$HEXKL_ROOT/lib/hexagon_${HEXKL_TOOLS_VARIANT}_${HEX_ARCH}/libhexkl_micro.a"
+fi
 
 if [ ! -f "$HEXKL_LIB" ]; then
     echo "Error: HexKL static library not found:" >&2
@@ -83,6 +88,7 @@ SRCS="$SRCS $BACKEND/hmx/hexkl_mm_u8i4_moe.c $BACKEND/hmx/hexkl_conv_block.c"
 SRCS="$SRCS $BACKEND/hmx/hexkl_mm_u8i8_dma.c"
 SRCS="$SRCS $BACKEND/hmx/hexkl_dma_ring.c $BACKEND/hmx/hexkl_kv_quant.c"
 SRCS="$SRCS $BACKEND/hmx/hexkl_probe.c $BACKEND/hmx/hexkl_acc_tile.c"
+SRCS="$SRCS $BACKEND/hmx/hexkl_lane_trace.c"
 SRCS="$SRCS $BACKEND/hmx/hexkl_attn_dtype.c $BACKEND/hmx/hexkl_attn_u8.c"
 SRCS="$SRCS $BACKEND/hvx/hvx_quant_u8.c $BACKEND/hvx/hvx_dequant_i32.c"
 SRCS="$SRCS $BACKEND/hvx/hvx_int_epilogue.c $BACKEND/hvx/hvx_int_epilogue_hvx.c"
@@ -95,8 +101,11 @@ SRCS="$SRCS $BACKEND/hvx/hvx_worker_pool.c $BACKEND/hvx/hvx_gemm_u8i4_wh.c"
 "$DEFAULT_HEXAGON_TOOLS_ROOT/Tools/bin/hexagon-clang" \
     -m"$HEX_ARCH" -mhvx -mhvx-length=128B -G0 -O3 -fPIC -shared \
     -DHEXKL_INT_EPILOGUE_HVX=1 \
+    -DNNTR_DSP_LANE_TRACE=1 \
+    ${NNTR_HEXKL_HW_INIT_2ARG:+-DNNTR_HEXKL_HW_INIT_2ARG=1} \
     ${HEXKL_MOE_INT_EPILOGUE:+-DHEXKL_MOE_INT_EPILOGUE=1} \
     ${HEXKL_INT_EPILOGUE_SCALAR:+-DHEXKL_INT_EPILOGUE_SCALAR=1} \
+    ${HEXKL_CONV_STAGE_UNIT_ROWS:+-DHEXKL_CONV_STAGE_UNIT_ROWS=$HEXKL_CONV_STAGE_UNIT_ROWS} \
     -Wall -Werror \
     -I generated \
     -I "$HEXKL_ROOT/include" \

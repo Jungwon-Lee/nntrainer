@@ -82,6 +82,25 @@ cc=${CC:-gcc}
 
 "$OUT/conv_block_host_check"
 
+# Run the conv pipeline with actual pthread-backed foreground/background
+# workers. The row-group variants exercise AH pack boundaries and buffer
+# reuse under concurrent stages, not device timing or HVX arithmetic.
+# Odd out_proj and a/c batch counts must keep staging parity across row
+# blocks too; otherwise HMX can overwrite an outstanding epilogue's input.
+for conv_shape in "4 544 1056" "8 544 1056" "16 544 1056" \
+                  "4 544 2080" "4 1056 544"; do
+  read -r stage_rows channels out_cols <<< "$conv_shape"
+  "$cc" -std=c11 -O1 -Wall -Wextra -Wno-unused-parameter -ffp-contract=off \
+    -pthread -DNNTR_HOST_REAL_POOL=1 -DHEXKL_CONV_STAGE_UNIT_ROWS="$stage_rows" \
+    -DCHECK_CONV_CHANNELS="$channels" -DCHECK_CONV_OUT="$out_cols" \
+    -I "$HERE/stub" -I "$BACKEND/hmx" -I "$BACKEND/hvx" \
+    -o "$OUT/conv_block_host_check_async" \
+    "$HERE/conv_block_host_check.c" "$HERE/hvx_scalar_stubs.c" \
+    "$BACKEND/hmx/hexkl_conv_block.c" "$BACKEND/hmx/hexkl_mm_u8i4_moe.c" \
+    "$BACKEND/hvx/hvx_int_epilogue.c" "$BACKEND/hvx/hvx_worker_pool.c" -lm
+  "$OUT/conv_block_host_check_async"
+done
+
 # The FC / projection call (hexkl_mm_u8i4_layer_run) on the same stand-ins:
 # several handles against one activation, the pooled epilogue's batching.
 "$cc" -std=c99 -O1 -Wall -Wextra -Wno-unused-parameter \
@@ -102,3 +121,9 @@ cc=${CC:-gcc}
   "$HERE/worker_pool_host_check.c" "$BACKEND/hvx/hvx_worker_pool.c"
 
 "$OUT/worker_pool_host_check"
+
+"$cc" -std=c11 -O1 -Wall -Wextra -Werror \
+  -DNNTR_DSP_LANE_TRACE=1 -DHEXKL_LANE_TRACE_HOST_TEST=1 \
+  -I "$BACKEND/hmx" -o "$OUT/lane_trace_host_check" \
+  "$HERE/lane_trace_host_check.c" "$BACKEND/hmx/hexkl_lane_trace.c"
+"$OUT/lane_trace_host_check"

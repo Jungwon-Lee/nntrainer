@@ -28,14 +28,15 @@
 
 #include "hexkl_acc_tile.h"
 #include "hexkl_dma_ring.h"
+#include "hexkl_lane_trace.h"
 #include "hexkl_micro.h"
 #include "hexkl_probe.h"
 #include "hvx_conv_gate_f32.h"
 #include "hvx_dequant_i32.h"
 #include "hvx_quant_u8.h"
 
-#define ROUND_UP_U32(v, a) ((((v) + ((a) - 1)) / (a)) * (a))
-#define ROUND_UP_SZ(v, a) ((((v) + ((a) - 1)) / (a)) * (a))
+#define ROUND_UP_U32(v, a) ((((v) + ((a)-1)) / (a)) * (a))
+#define ROUND_UP_SZ(v, a) ((((v) + ((a)-1)) / (a)) * (a))
 #define CB_SCRATCH_ALIGN 128u
 
 /** @brief Kept in sync with hexkl_mm_u8i4_dma.c's copies by inspection. */
@@ -53,9 +54,19 @@
  * (doc 51 section 2.8). They are background-lane jobs now, submitted as
  * soon as the block's z is dequantized and retired only where out_proj
  * needs mid -- one block later -- so they run under the next block's b
- * matmul. The lane runs jobs in order, so the requant job cannot start
- * before every gate unit is done. */
-#define CB_GATE_UNIT_ROWS 16u
+ * matmul. Each unit owns a disjoint group of rows through gate, quant
+ * params and AH pack, so requantization also runs across the workers and
+ * no block-wide gate barrier is needed. Four-row pack groups never cross
+ * a unit boundary. Use the minimum four-row pack group so workers can
+ * return to foreground dequant between short background callbacks;
+ * foreground priority takes effect only after a callback finishes. */
+#ifndef HEXKL_CONV_STAGE_UNIT_ROWS
+#define HEXKL_CONV_STAGE_UNIT_ROWS 4u
+#endif
+#if HEXKL_CONV_STAGE_UNIT_ROWS == 0 || HEXKL_CONV_STAGE_UNIT_ROWS > 64 ||      \
+  (HEXKL_CONV_STAGE_UNIT_ROWS % 4) != 0
+#error "HEXKL_CONV_STAGE_UNIT_ROWS must be a multiple of 4 in [4, 64]"
+#endif
 
 typedef struct {
   float *z;            /**< this block's [64 x C] f32, VTCM */
@@ -80,47 +91,38 @@ static inline void cb_stage_probe_add(uint64_t t0) {
   }
 }
 
-static void cb_gate_unit(uint32_t n_units, uint32_t u, void *v) {
+static void cb_stage_unit(uint32_t n_units, uint32_t u, void *v) {
   (void)n_units;
   const cb_stage_ctx *c = (const cb_stage_ctx *)v;
-  const uint32_t r0 = u * CB_GATE_UNIT_ROWS;
+  const uint32_t r0 = u * HEXKL_CONV_STAGE_UNIT_ROWS;
   if (r0 >= c->m_blk) {
     return;
   }
-  const uint32_t n =
-    (c->m_blk - r0 < CB_GATE_UNIT_ROWS) ? (c->m_blk - r0) : CB_GATE_UNIT_ROWS;
+  const uint32_t n = (c->m_blk - r0 < HEXKL_CONV_STAGE_UNIT_ROWS)
+                       ? (c->m_blk - r0)
+                       : HEXKL_CONV_STAGE_UNIT_ROWS;
   uint64_t t0 = 0;
   HEXKL_PROBE_T0(t0);
   hvx_conv_gate_f32(c->z + (size_t)r0 * c->C, c->C, c->g, c->C, c->mb + r0, n,
                     c->C, c->conv_w, NULL);
-  cb_stage_probe_add(t0);
-}
-
-/** @brief The one requant unit: the same two calls the synchronous path
- *         made, on the calling worker (the pool cannot be used from inside
- *         a unit). Rows [m_blk, m4) are padding the pack takes whole,
- *         zeroed so the bytes are deterministic. */
-static void cb_requant_unit(uint32_t n_units, uint32_t u, void *v) {
-  (void)n_units;
-  (void)u;
-  const cb_stage_ctx *c = (const cb_stage_ctx *)v;
-  const uint32_t m4 = ROUND_UP_U32(c->m_blk, 4u);
-  uint64_t t0 = 0;
-  HEXKL_PROBE_T0(t0);
-  if (m4 > c->m_blk) {
-    memset(c->z + (size_t)c->m_blk * c->C, 0,
-           sizeof(float) * (size_t)(m4 - c->m_blk) * c->C);
+  const uint32_t m4 = ROUND_UP_U32(n, 4u);
+  float *z = c->z + (size_t)r0 * c->C;
+  if (m4 > n) {
+    memset(z + (size_t)n * c->C, 0, sizeof(float) * (size_t)(m4 - n) * c->C);
   }
-  hvx_quant_rows_u8_params(c->z, c->m_blk, HEXKL_HMX_INT8_BLOCK_N_ROW, c->C,
-                           c->rq_scale, c->rq_zp, NULL);
-  hvx_quant_pack_u8_ah_rows(c->z, NULL, 0u, m4, c->C, c->rq_scale, c->rq_zp,
-                            c->mid);
+  /* NULL avoids a nested submission to the same pool. Offset the params
+     scan, but keep pack's row indices relative to the whole AH block. */
+  hvx_quant_rows_u8_params(z, n, m4, c->C, c->rq_scale + r0, c->rq_zp + r0,
+                           NULL);
+  hvx_quant_pack_u8_ah_rows(c->z, NULL, r0, r0 + m4, c->C, c->rq_scale,
+                            c->rq_zp, c->mid);
   cb_stage_probe_add(t0);
 }
 
-/** @brief Units of a block's gate job. */
-#define CB_GATE_UNITS                                                          \
-  ((HEXKL_HMX_INT8_BLOCK_N_ROW + CB_GATE_UNIT_ROWS - 1u) / CB_GATE_UNIT_ROWS)
+/** @brief Maximum units of a block's fused stage job. */
+#define CB_STAGE_UNITS                                                         \
+  ((HEXKL_HMX_INT8_BLOCK_N_ROW + HEXKL_CONV_STAGE_UNIT_ROWS - 1u) /            \
+   HEXKL_CONV_STAGE_UNIT_ROWS)
 
 int hexkl_conv_block_layout_get(uint32_t K, uint32_t C, uint32_t N_out,
                                 uint32_t arena_bytes,
@@ -315,12 +317,20 @@ int hexkl_conv_block_run(hexkl_weight_u8i4_table *tbl, uint8_t *vtcm_base,
      bytes live here because a job outlives its submit until the wait
      that retires it. */
   cb_stage_ctx stage_ctx[2];
-  hvx_bg_job gate_job[2], rq_job[2];
-  uint8_t gate_done[2][CB_GATE_UNITS], rq_done[2][1];
+  hvx_bg_job stage_job[2];
+  uint8_t stage_done[2][CB_STAGE_UNITS];
   int stage_submitted[2] = {0, 0};
   uint32_t idx_ac[CB_MAX_CHUNKS], idx_b[CB_MAX_CHUNKS], idx_o[CB_MAX_CHUNKS];
   uint32_t act_idx;
   uint64_t mm_t0 = 0, mm_acc0 = 0, mm_dq0 = 0;
+
+  hexkl_lane_trace_func((uintptr_t)hexkl_moe_pack_bg_worker, HLT_PACK);
+  hexkl_lane_trace_func((uintptr_t)hvx_dq_mul_worker, HLT_CONV_AC_EPILOGUE);
+  hexkl_lane_trace_func((uintptr_t)hvx_dq_tiles_worker, HLT_CONV_EPILOGUE);
+  hexkl_lane_trace_func((uintptr_t)cb_stage_unit, HLT_CONV_STAGE);
+#ifdef NNTR_DSP_LANE_TRACE
+  hvx_quant_u8_trace_register();
+#endif
 
   /* In: the FastRPC buffers are uncached (see hexkl_mm_u8i4_moe.c on why
      each is touched exactly once). conv_w goes to VTCM: phase 2 reads it
@@ -367,6 +377,11 @@ int hexkl_conv_block_run(hexkl_weight_u8i4_table *tbl, uint8_t *vtcm_base,
   act_idx =
     hexkl_moe_push_act_block(vtcm_base, L.act_off, act_ah, 0u, K, k_tiles);
 
+  /* Keep staging parity across batches, row blocks and both phase-2
+     projections. The buffer opposite the outstanding epilogue is free
+     for the next HMX batch, even when a projection has an odd batch count. */
+  uint32_t acc_batch = 0u;
+
   /* ---- phase 1: g = dq(x . W_a) * dq(x . W_c), block by block ---------- */
   for (uint32_t mb = 0; mb < M; mb += BR) {
     const uint32_t m_blk = (M - mb < BR) ? (M - mb) : BR;
@@ -378,7 +393,7 @@ int hexkl_conv_block_run(hexkl_weight_u8i4_table *tbl, uint8_t *vtcm_base,
     for (uint32_t g0 = 0, ci = 0; g0 < c_ntiles; g0 += half, ++ci) {
       const uint32_t np = (c_ntiles - g0 < half) ? (c_ntiles - g0) : half;
       const uint32_t stage_off =
-        L.result_off + (ci & 1u) * L.acc_tiles * ACC_TILE_BYTES;
+        L.result_off + (acc_batch & 1u) * L.acc_tiles * ACC_TILE_BYTES;
       if (mb == 0u) {
         HEXKL_PROBE_T0(p0);
         hexkl_dma_ring_wait(idx_ac[ci]);
@@ -392,6 +407,7 @@ int hexkl_conv_block_run(hexkl_weight_u8i4_table *tbl, uint8_t *vtcm_base,
       }
       /* Slots [0, np) get a's tiles, [np, 2np) c's, at the same columns. */
       HEXKL_MOE_MM_BEGIN();
+      HLT_BEGIN(trace_hmx);
       for (uint32_t j = 0; j < 2u * np; ++j) {
         const uint32_t col = g0 + ((j < np) ? j : (j - np));
         const uint32_t w_off = (j < np) ? L.w_a_off : L.w_b_off;
@@ -412,15 +428,16 @@ int hexkl_conv_block_run(hexkl_weight_u8i4_table *tbl, uint8_t *vtcm_base,
           goto out;
         }
       }
+      HLT_END(0, HLT_HMX_CONV_AC, trace_hmx, mb / BR, ci, g0, 2u * np);
       HEXKL_MOE_MM_END();
 
-      /* Retire the epilogue that read this staging buffer's partner
-         (batch ci-1), then launch this batch's straight into g. */
+      /* Retire the previous batch's epilogue, which reads the other
+         staging buffer, then launch this batch's straight into g. */
       HEXKL_PROBE_T0(p0);
       hvx_worker_pool_wait(pool);
       HEXKL_PROBE_ADD(HEXKL_PROBE_DEQUANT, p0);
       {
-        hvx_dq_mul_job *jb = &mul_job[ci & 1u];
+        hvx_dq_mul_job *jb = &mul_job[acc_batch & 1u];
         jb->tiles_base =
           (const uint8_t *)((const int32_t *)(vtcm_base + stage_off) +
                             acc->base);
@@ -441,6 +458,7 @@ int hexkl_conv_block_run(hexkl_weight_u8i4_table *tbl, uint8_t *vtcm_base,
         jb->dst_stride = C;
         hvx_worker_pool_submit(pool, hvx_dq_mul_worker, jb, np);
       }
+      ++acc_batch;
     }
     /* The activation slot is free once the last acc_read returned; the
        next block rides under this block's last epilogue. */
@@ -503,13 +521,14 @@ int hexkl_conv_block_run(hexkl_weight_u8i4_table *tbl, uint8_t *vtcm_base,
         const uint32_t nb =
           (c_ntiles - nt0 < L.acc_tiles) ? (c_ntiles - nt0) : L.acc_tiles;
         const uint32_t stage_off =
-          L.result_off + (ci & 1u) * L.acc_tiles * ACC_TILE_BYTES;
+          L.result_off + (acc_batch & 1u) * L.acc_tiles * ACC_TILE_BYTES;
         if (mb == 0u) {
           HEXKL_PROBE_T0(p0);
           hexkl_dma_ring_wait(idx_b[ci]);
           HEXKL_PROBE_ADD(HEXKL_PROBE_DRAIN_DN, p0);
         }
         HEXKL_MOE_MM_BEGIN();
+        HLT_BEGIN(trace_hmx);
         for (uint32_t j = 0; j < nb; ++j) {
           hexkl_micro_hmx_acc_clear_int32();
           for (uint32_t kt = 0; kt < k_tiles; ++kt) {
@@ -528,12 +547,13 @@ int hexkl_conv_block_run(hexkl_weight_u8i4_table *tbl, uint8_t *vtcm_base,
             goto out;
           }
         }
+        HLT_END(0, HLT_HMX_CONV_B, trace_hmx, n, ci, nt0, nb);
         HEXKL_MOE_MM_END();
         HEXKL_PROBE_T0(p0);
         hvx_worker_pool_wait(pool);
         HEXKL_PROBE_ADD(HEXKL_PROBE_DEQUANT, p0);
         {
-          hvx_dq_tiles_job *jb = &dq_job[ci & 1u];
+          hvx_dq_tiles_job *jb = &dq_job[acc_batch & 1u];
           jb->tiles_base =
             (const uint8_t *)((const int32_t *)(vtcm_base + stage_off) +
                               acc->base);
@@ -553,6 +573,7 @@ int hexkl_conv_block_run(hexkl_weight_u8i4_table *tbl, uint8_t *vtcm_base,
           jb->n_tiles = nb;
           hvx_worker_pool_submit(pool, hvx_dq_tiles_worker, jb, nb);
         }
+        ++acc_batch;
       }
       HEXKL_PROBE_T0(p0);
       hvx_worker_pool_wait(pool);
@@ -566,7 +587,7 @@ int hexkl_conv_block_run(hexkl_weight_u8i4_table *tbl, uint8_t *vtcm_base,
                                            mb + BR, K, k_tiles);
       }
 
-      /* This block's gate and requant, to the background lane. */
+      /* This block's fused gate/requant/pack, to the background lane. */
       {
         cb_stage_ctx *c = &stage_ctx[cur];
         c->z = zbuf[cur];
@@ -578,16 +599,12 @@ int hexkl_conv_block_run(hexkl_weight_u8i4_table *tbl, uint8_t *vtcm_base,
         c->mb = mb;
         c->m_blk = m_blk;
         c->C = C;
-        gate_job[cur].func = cb_gate_unit;
-        gate_job[cur].ctx = c;
-        gate_job[cur].n_units = CB_GATE_UNITS;
-        gate_job[cur].done = gate_done[cur];
-        rq_job[cur].func = cb_requant_unit;
-        rq_job[cur].ctx = c;
-        rq_job[cur].n_units = 1u;
-        rq_job[cur].done = rq_done[cur];
-        hvx_worker_pool_submit_bg(pool, &gate_job[cur]);
-        hvx_worker_pool_submit_bg(pool, &rq_job[cur]);
+        stage_job[cur].func = cb_stage_unit;
+        stage_job[cur].ctx = c;
+        stage_job[cur].n_units = (m_blk + HEXKL_CONV_STAGE_UNIT_ROWS - 1u) /
+                                 HEXKL_CONV_STAGE_UNIT_ROWS;
+        stage_job[cur].done = stage_done[cur];
+        hvx_worker_pool_submit_bg(pool, &stage_job[cur]);
         stage_submitted[cur] = 1;
       }
     }
@@ -600,19 +617,20 @@ int hexkl_conv_block_run(hexkl_weight_u8i4_table *tbl, uint8_t *vtcm_base,
       /* Its requant is usually long done; what this wait reads is the
          exposure, filed under REQUANT as the synchronous path's was. */
       HEXKL_PROBE_T0(p0);
-      hvx_worker_pool_wait_bg(pool, &rq_job[prev], UINT32_MAX);
+      hvx_worker_pool_wait_bg(pool, &stage_job[prev], UINT32_MAX);
       HEXKL_PROBE_ADD(HEXKL_PROBE_REQUANT, p0);
       for (uint32_t nt0 = 0, ci = 0; nt0 < o_ntiles; nt0 += L.acc_tiles, ++ci) {
         const uint32_t nb =
           (o_ntiles - nt0 < L.acc_tiles) ? (o_ntiles - nt0) : L.acc_tiles;
         const uint32_t stage_off =
-          L.result_off + (ci & 1u) * L.acc_tiles * ACC_TILE_BYTES;
+          L.result_off + (acc_batch & 1u) * L.acc_tiles * ACC_TILE_BYTES;
         if (pmb == 0u) {
           HEXKL_PROBE_T0(p0);
           hexkl_dma_ring_wait(idx_o[ci]);
           HEXKL_PROBE_ADD(HEXKL_PROBE_DRAIN_DN, p0);
         }
         HEXKL_MOE_MM_BEGIN();
+        HLT_BEGIN(trace_hmx);
         for (uint32_t j = 0; j < nb; ++j) {
           hexkl_micro_hmx_acc_clear_int32();
           for (uint32_t kt = 0; kt < c_ktiles; ++kt) {
@@ -633,12 +651,13 @@ int hexkl_conv_block_run(hexkl_weight_u8i4_table *tbl, uint8_t *vtcm_base,
             goto out;
           }
         }
+        HLT_END(0, HLT_HMX_CONV_OUT, trace_hmx, n - 1u, ci, nt0, nb);
         HEXKL_MOE_MM_END();
         HEXKL_PROBE_T0(p0);
         hvx_worker_pool_wait(pool);
         HEXKL_PROBE_ADD(HEXKL_PROBE_DEQUANT, p0);
         {
-          hvx_dq_tiles_job *jb = &dq_job[ci & 1u];
+          hvx_dq_tiles_job *jb = &dq_job[acc_batch & 1u];
           jb->tiles_base =
             (const uint8_t *)((const int32_t *)(vtcm_base + stage_off) +
                               acc->base);
@@ -658,14 +677,21 @@ int hexkl_conv_block_run(hexkl_weight_u8i4_table *tbl, uint8_t *vtcm_base,
           jb->n_tiles = nb;
           hvx_worker_pool_submit(pool, hvx_dq_tiles_worker, jb, nb);
         }
+        ++acc_batch;
       }
-      /* The last epilogue reads rq[prev], which block n+1's requant
-         rewrites; retire it here. */
-      HEXKL_PROBE_T0(p0);
-      hvx_worker_pool_wait(pool);
-      HEXKL_PROBE_ADD(HEXKL_PROBE_DEQUANT, p0);
+      /* Leave the last out_proj epilogue in flight under the next block's
+         first b batch. That batch writes the other staging buffer and
+         retires this job before submitting its own dequant. The wait for
+         b's last dequant precedes the next stage submission, so rq[prev]
+         is no longer read when that stage reuses it. */
     }
   }
+
+  /* There is no next b batch to cover the final out_proj epilogue. Its
+     output must be complete before the DMA reads out_c. */
+  HEXKL_PROBE_T0(p0);
+  hvx_worker_pool_wait(pool);
+  HEXKL_PROBE_ADD(HEXKL_PROBE_DEQUANT, p0);
 
   HEXKL_PROBE_T0(p0);
   hexkl_moe_dma_copy(out_f32, out_c, sizeof(float) * (size_t)M * N_out, 0, 0);
@@ -679,7 +705,7 @@ out:
   }
   for (uint32_t i = 0; i < 2u; ++i) {
     if (stage_submitted[i]) {
-      hvx_worker_pool_wait_bg(pool, &rq_job[i], UINT32_MAX);
+      hvx_worker_pool_wait_bg(pool, &stage_job[i], UINT32_MAX);
     }
   }
   return rc;

@@ -17,6 +17,11 @@
 
 #include "hvx_worker_pool.h"
 
+#ifdef NNTR_DSP_LANE_TRACE
+/** Register callback names before publishing any MoE worker jobs. */
+void hvx_quant_u8_trace_register(void);
+#endif
+
 /**
  * @brief Computes the per-row scale and zero point (K1).
  *

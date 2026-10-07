@@ -48,6 +48,7 @@
 
 #include "hexkl_acc_tile.h"
 #include "hexkl_dma_ring.h"
+#include "hexkl_lane_trace.h"
 #include "hexkl_micro.h"
 #include "hexkl_probe.h"
 #include "hvx_dequant_i32.h"
@@ -682,6 +683,16 @@ int hexkl_mm_u8i4_moe_layer_run(
   const float *act_f32, float *out_f32, hvx_worker_pool *pool,
   hexkl_moe_scratch *scratch) {
 
+  hexkl_lane_trace_func((uintptr_t)hexkl_moe_pack_bg_worker, HLT_PACK);
+  hexkl_lane_trace_func((uintptr_t)moe_gu_worker, HLT_GU_EPILOGUE);
+  hexkl_lane_trace_func((uintptr_t)moe_dn_worker, HLT_DN_EPILOGUE);
+  hexkl_lane_trace_func((uintptr_t)moe_tail_pair_unit, HLT_TAIL_GU);
+  hexkl_lane_trace_func((uintptr_t)moe_tail_requant_unit, HLT_TAIL_RQ);
+  hexkl_lane_trace_func((uintptr_t)moe_tail_down_unit, HLT_TAIL_DN);
+#ifdef NNTR_DSP_LANE_TRACE
+  hvx_quant_u8_trace_register();
+#endif
+
   if (!tbl || !vtcm_base || !h_gate_up || !h_down || !row_index || !row_count ||
       !row_weight || !act_f32 || !out_f32 || !scratch || M == 0u ||
       n_experts == 0u) {
@@ -1157,6 +1168,7 @@ int hexkl_mm_u8i4_moe_layer_run(
         }
         /* This staging buffer was last read by the epilogue two issues
            back, retired when the last one was submitted. */
+        HLT_BEGIN(trace_hmx);
         HEXKL_MOE_MM_BEGIN();
         for (uint32_t j = 0; j < 2u * np; ++j) {
           const uint32_t col =
@@ -1179,6 +1191,8 @@ int hexkl_mm_u8i4_moe_layer_run(
           }
         }
         HEXKL_MOE_MM_END();
+        HLT_END(0, HLT_HMX_GU, trace_hmx, blk.e, n, gb, 2u * np);
+        hexkl_lane_trace_dma_sample();
 
         /* Retire what the pool is running -- DN(n-1)'s last epilogue at
            gb == 0, epilogue gb-1 otherwise (its buffer is the one batch
@@ -1318,6 +1332,7 @@ int hexkl_mm_u8i4_moe_layer_run(
           hexkl_dma_ring_wait(dn_idx[db]);
           HEXKL_PROBE_ADD(HEXKL_PROBE_DRAIN_DN, p0);
         }
+        HLT_BEGIN(trace_hmx);
         HEXKL_MOE_MM_BEGIN();
         for (uint32_t j = 0; j < nb; ++j) {
           hexkl_micro_hmx_acc_clear_int32();
@@ -1339,6 +1354,8 @@ int hexkl_mm_u8i4_moe_layer_run(
           }
         }
         HEXKL_MOE_MM_END();
+        HLT_END(0, HLT_HMX_DN, trace_hmx, pblk.e, n - 1u, db, nb);
+        hexkl_lane_trace_dma_sample();
 
         /* db == 0 retires GU(n)'s last epilogue -- gate_off is complete,
            which the requantization in this job needs -- and every later

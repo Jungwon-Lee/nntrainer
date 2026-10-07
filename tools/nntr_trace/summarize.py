@@ -468,7 +468,12 @@ def main():
   a = ap.parse_args()
   with open(a.trace) as f:
     model = parse_events(json.load(f))
-  out = metrics_json(model, resolve_range(model, a.range))
+  if model["md"].get("lane_metrics"):
+    if a.range != "all":
+      ap.error("DSP lane metrics describe a complete one-call capture; --range is unsupported")
+    out = model["md"]["lane_metrics"]
+  else:
+    out = metrics_json(model, resolve_range(model, a.range))
   text = json.dumps(out, indent=1)
   if a.out:
     with open(a.out, "w") as f:
