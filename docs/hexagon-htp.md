@@ -10,12 +10,9 @@ DSP while the ARM host manages model loading, tokenization, weight delivery
 and application control. The current integrations cover Gemma4 26B A4B and
 LFM2 24B A2B, including their mixture-of-experts (MoE) layers.
 
-This page describes the implementation in
-[PR #4428](https://github.com/nntrainer/nntrainer/pull/4428) at
-[`89aa8c1f8`](https://github.com/nntrainer/nntrainer/commit/89aa8c1f8b263c30e426980eaf2e17b210d734eb),
-as of October 19, 2026. Support below refers to inference with the listed
-model packs. Enabling the backend does not automatically make an arbitrary
-model or training workload executable on the DSP.
+Support below refers to inference with the listed model packs. Enabling
+the backend does not automatically make an arbitrary model or training
+workload executable on the DSP.
 
 ## Native HTP and QNN
 
@@ -41,20 +38,20 @@ appropriate model catalog entry and build variant. For the QNN path, see
 
 ### Devices and build environment
 
-The standard native HTP Android build targets **ARM64 and Hexagon v81**.
-Device validation includes Galaxy S26 Ultra variants SM-S948N and SM-S948U.
-The documented app setup uses Android 16 on a device with 4 KB pages.
-
-The tested tool combination includes Android NDK r30, Hexagon SDK 6.4.0.1,
-Hexagon Tools 19.0.04 and HexKL 1.0 beta 2 with its `6.4.0.2` library
-directory. The SDK version and the HexKL library directory are separate
-settings. Qualcomm SDK binaries and production model weights are supplied
-separately from this repository.
-
-There is also a [v79 execution record](gemma4-htp-kv-cache-s25u.md) for the
-Galaxy S25 Ultra using a separately rebuilt DSP skeleton. The standard
-`build_android.sh --htp` path still requires `HEX_ARCH=v81`; the v79 record
-does not establish equivalent app or packaging support.
+- **Standard build target:** Android ARM64 with Hexagon v81;
+  `build_android.sh --htp` requires `HEX_ARCH=v81`.
+- **Validated devices:** Galaxy S26 Ultra variants SM-S948N and SM-S948U.
+- **App validation environment:** Android 16 with 4 KB pages.
+- **Android NDK:** r30 in the documented native/app setup.
+- **Hexagon SDK:** 6.4.0.1.
+- **Hexagon toolchain:** Hexagon Tools 19.0.04.
+- **HexKL:** 1.0 beta 2, using its `6.4.0.2` library directory. The Hexagon
+  SDK version and HexKL library directory are separate settings.
+- **External dependencies:** Qualcomm SDK binaries and production model
+  weights are supplied separately from this repository.
+- **Additional device record:** [Galaxy S25 Ultra / v79](gemma4-htp-kv-cache-s25u.md)
+  was exercised with a separately rebuilt DSP skeleton. This does not
+  establish equivalent app or packaging support through the standard build.
 
 ### Models and weight formats
 
@@ -67,8 +64,11 @@ weights.
 |---|---|---|---|---|
 | Gemma4, original fused pack | `QS2CX_WH` | `QS4CX` projections; `Q4_0` embedding/head | Supported | Accepted |
 | Gemma4, native TL2/affine pack | `TL2CX_WH`, with affine expert overrides for mixed packs | `QS4CX_WH_AFFINE` projections/head; `Q4_0` embedding | Supported | Accepted for the configured HTP contract |
-| LFM2, `htp_fused_v1` | `TL2CX_WH` | Affine INT4 projections/head; FP32 embedding/router | Supported | Accepted |
-| LFM2 SR15, `sr15_v2` | `TL2CX_WH` | Affine INT4 projections/head/router; `Q4_0` embedding; packed short-convolution weights | Supported | Not accepted by the current API loader |
+| LFM2 SR15, `sr15_v2` | `TL2CX_WH` | Affine INT4 projections/head/router; `Q4_0` embedding; packed short-convolution weights | Supported | Accepted |
+
+LFM2 HTP requires `sr15_v2` in both the CLI model loader and QuickDotAI.
+The legacy unrotated `htp_fused_v1` pack is no longer supported. Convert
+the matching SR15 checkpoint rather than changing an old pack's metadata.
 
 Both models require their explicit `htp_fused` execution profile and run at
 batch size one. Their geometry, attention-cache settings and rotation
@@ -88,7 +88,8 @@ underlying model's capabilities.
 | Capability | Native CLI | QuickDotAI API |
 |---|---|---|
 | Text generation | Model pack passed to `nntr_causallm` | Catalog model loaded with `NPU` and `W4A32` |
-| LFM2 SR15 loading | Supported | Loader currently requires `htp_fused_v1` |
+| LFM2 SR15 loading | Requires `sr15_v2` | Requires the same `sr15_v2` pack |
+| Automatic SR15 performance preset | Applied unless disabled or overridden | Not installed by the API |
 | KV snapshot save/load | Available through model configuration | Snapshot options are rejected |
 | Model ownership | One model per CLI invocation | One active HTP model handle per process |
 
@@ -99,6 +100,15 @@ generation requests start independent prompts while retaining loaded
 weights. Destroy or unload the active HTP model before loading another one.
 See the [API implementation](../Applications/CausalLM/api/quick_dot_ai_api.cpp)
 and [runtime ownership](../Applications/CausalLM/api/htp_model_runtime.h).
+
+For LFM2 in SampleTestAPP, select family `lfm2`, runtime `NATIVE` and
+backend `NPU`. Place the SR15 pack in
+`<model_base_path>/lfm2-24ba2b-htp-w4a32/`. App validation covers repeated
+generation, cancellation, unload, reload, invalid-path recovery and Chat
+and OpenAI output parity with the CLI, including Activity restart using
+the default model path. See the
+[LFM2 API and app instructions](../Applications/CausalLM/api/README.md#lfm2-moe-on-native-htp)
+for provisioning and test entry points.
 
 ## Current performance
 
@@ -118,6 +128,8 @@ slot per layer after the first decode step and is applied by the CLI only.
 It does not change the model pack's prompt or generation budget; the
 published workload sets those explicitly.
 
+These are CLI measurements, not QuickDotAI or SampleTestAPP throughput
+results. The API does not install the automatic SR15 performance preset.
 These rates use inference timers and exclude model initialization. They do
 not measure complete time to first token or sustained throughput. The
 recorded output IDs matched their nntrainer references; that is distinct
@@ -133,10 +145,10 @@ speed-and-memory result.
 |---|---|
 | Build the native runtime or Android app | [SDK setup and Android build](gemma4-htp-quickdotai.md#android-build) |
 | Prepare a Gemma4 model pack | [Weight formats and conversion](gemma4-htp-tl2-guide.md) |
-| Prepare an LFM2 model pack | [Supported packs and conversion](lfm2-htp-user-guide.md#supported-model-packs) |
+| Prepare an LFM2 model pack | [SR15 pack and conversion](lfm2-htp-user-guide.md#supported-model-pack) |
 | Run from the command line | [Gemma4 CLI](gemma4-htp-user-guide.md#7-run-from-the-command-line), [LFM2 CLI](lfm2-htp-user-guide.md#build-and-run) |
 | Integrate an application | [QuickDotAI C API](../Applications/CausalLM/api/README.md), [Android AAR](../Applications/CausalLM/Android/QuickDotAI/README.md) |
-| Check correctness and lifecycle behavior | [Host and device test coverage](gemma4-htp-code-guide.md#8-tests-and-what-each-one-proves), [API and app validation](gemma4-htp-quickdotai.md#validation) |
+| Check correctness and lifecycle behavior | [Host and device test coverage](gemma4-htp-code-guide.md#8-tests-and-what-each-one-proves), [Gemma4 API and app validation](gemma4-htp-quickdotai.md#validation), [LFM2 API and app checks](../Applications/CausalLM/api/README.md#lfm2-moe-on-native-htp) |
 | Understand or extend the backend | [Execution architecture and code map](gemma4-htp-code-guide.md) |
 
 ## Operational limits
