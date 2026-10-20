@@ -135,8 +135,11 @@ the raw-input path; the CLI clears them after successfully rendering
 | `generation_config.json` → `do_sample` | Sampling selection; use `false` for greedy repeatability checks |
 | EOS and `bad_word_ids` | Determine whether generation can stop at the checkpoint's end-of-turn tokens |
 
-The runtime reserves context space for generation. Overlong prompts can
-lose tail tokens and produce a truncation warning. That can remove the
+The runtime reserves context space for generation and any loaded KV prefix.
+If a prefix is present and the prompt does not fit, it rejects the request
+before cache loading and prefill, reporting the prefix size and available
+prompt space. Without a prefix, overlong prompts can lose tail tokens and
+produce a truncation warning. That can remove the
 question or assistant prefix, so check the token budget after applying the
 template. LFM2 can process longer prompts in chunks while keeping the
 prefill buffers at `init_seq_len`; the total context limit still applies.
@@ -331,8 +334,8 @@ Use `getPerformanceMetricsHandle()` or `engine.metrics()` after a completed
 run to inspect inference metrics. Keep model initialization, prefill,
 decode and complete request latency distinct. For comparisons, record the
 pack, rendered prompt, token budget, settings and device conditions with
-the result; the [overview](../hexagon-htp.md#current-performance) reports
-existing measurements and their scope.
+the result. [HTP Performance](HTP_PERFORMANCE.md) describes existing
+measurements, their scope and a reproducible capture procedure.
 
 ## Snapshots and common failures
 
@@ -341,7 +344,10 @@ The QuickDotAI HTP loaders reject enabled `use_kvcache` or `save_kvcache` option
 LFM2 native snapshots require a matching `<snapshot>.conv` companion for
 convolution state. Gemma4 snapshot or chunked-prefill output can differ
 from a single prefill because quantized KV calibration depends on the
-processed rows. See the model-specific
+processed rows. The current windowed-cache path preserves the maxima of
+dropped rows for decode scale seeding; that fixes a specific window/full
+cache mismatch and does not establish parity for every snapshot workflow.
+See [HTP Validation](HTP_VALIDATION.md) and the model-specific
 [Gemma4 validation limits](../gemma4-htp-tl2-guide.md#current-validation-coverage)
 and [LFM2 state handling](../lfm2-htp-user-guide.md#build-and-run).
 

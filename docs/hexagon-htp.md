@@ -143,13 +143,12 @@ speed-and-memory result.
 
 | Task | Starting point |
 |---|---|
-| Build the native runtime or Android app | [SDK setup and Android build](gemma4-htp-quickdotai.md#android-build) |
-| Prepare a Gemma4 model pack | [Weight formats and conversion](gemma4-htp-tl2-guide.md) |
-| Prepare an LFM2 model pack | [SR15 pack and conversion](lfm2-htp-user-guide.md#supported-model-pack) |
-| Run from the command line | [Gemma4 CLI](gemma4-htp-user-guide.md#7-run-from-the-command-line), [LFM2 CLI](lfm2-htp-user-guide.md#build-and-run) |
-| Integrate an application | [QuickDotAI C API](../Applications/CausalLM/api/README.md), [Android AAR](../Applications/CausalLM/Android/QuickDotAI/README.md) |
-| Check correctness and lifecycle behavior | [Host and device test coverage](gemma4-htp-code-guide.md#8-tests-and-what-each-one-proves), [Gemma4 API and app validation](gemma4-htp-quickdotai.md#validation), [LFM2 API and app checks](../Applications/CausalLM/api/README.md#lfm2-moe-on-native-htp) |
-| Understand or extend the backend | [Execution architecture and code map](gemma4-htp-code-guide.md) |
+| Build the native runtime or Android app | [HTP Build](backend_guide/HTP_BUILD.md) |
+| Prepare and verify a model pack | [HTP Model Preparation](backend_guide/HTP_MODEL_PREPARATION.md) |
+| Run the CLI or integrate QuickDotAI | [HTP Inference](backend_guide/HTP_INFERENCE.md) |
+| Understand current results and measure performance | [HTP Performance](backend_guide/HTP_PERFORMANCE.md) |
+| Check correctness and lifecycle behavior | [HTP Validation](backend_guide/HTP_VALIDATION.md) |
+| Understand or extend the backend | [HTP Architecture](backend_guide/HTP_ARCHITECTURE.md) |
 
 ## Operational limits
 

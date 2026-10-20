@@ -280,5 +280,7 @@ The shared Android entry point enforces v81.
 | ARM or DSP library fails to load on the device | Confirm that the matching runtime libraries were deployed together. Use the generated CLI wrappers; in an app, pass the extracted native library directory to the model loader. |
 | Deployment cannot select a device | Check `adb devices` for an authorized device and set `ANDROID_SERIAL`. |
 
-For runtime correctness and lifecycle checks after a successful build, see
-the [HTP overview's validation links](../hexagon-htp.md#where-to-go-next).
+After building, prepare a pack with
+[HTP Model Preparation](HTP_MODEL_PREPARATION.md), run it with
+[HTP Inference](HTP_INFERENCE.md), and check correctness and lifecycle
+behavior with [HTP Validation](HTP_VALIDATION.md).

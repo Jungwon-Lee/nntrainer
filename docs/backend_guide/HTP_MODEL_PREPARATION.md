@@ -312,7 +312,7 @@ implementations, while the public loader imposes additional catalog and
 configuration checks. Keep CLI snapshot options out of API configurations.
 
 For deployment of runtime binaries, follow [HTP Build](HTP_BUILD.md#deploy-to-a-device).
-For model provisioning and loading, see the
-[C API guide](../../Applications/CausalLM/api/README.md),
-[Gemma4 app guide](../gemma4-htp-quickdotai.md) and
-[LFM2 guide](../lfm2-htp-user-guide.md#build-and-run).
+For model provisioning and loading, continue with
+[HTP Inference](HTP_INFERENCE.md). Use
+[HTP Validation](HTP_VALIDATION.md) to check a new pack and
+[HTP Performance](HTP_PERFORMANCE.md) to interpret or reproduce measurements.
